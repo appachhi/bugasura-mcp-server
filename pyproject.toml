@@ -1,0 +1,14 @@
+[project]
+name = "bugasura-mcp-server"
+version = "1.0.0"
+description = "MCP server for Bugasura/Appachhi API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
+
+[dependency-groups]
+dev = []

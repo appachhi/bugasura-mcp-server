@@ -1,0 +1,9 @@
+fastmcp
+requests>=2.31.0
+python-dotenv>=1.0.0
+pyjwt>=2.8.0
+# SSE transport dependencies
+uvicorn>=0.30.0
+starlette>=0.38.0
+sse-starlette>=2.0.0
+httpx>=0.27.0
