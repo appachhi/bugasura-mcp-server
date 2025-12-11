@@ -32,6 +32,7 @@ import logging
 import argparse
 from typing import Optional
 from dotenv import load_dotenv
+from pydantic import Field
 
 # Load environment variables from .env file (API_BASE_URL, MCP_SERVER_NAME, etc.)
 load_dotenv()
@@ -711,8 +712,11 @@ def select_team_project_context(api_key: str, team_id: Optional[int], project_id
 # All projects, issues, and test cases belong to a team.
 # Users must be members of a team to access its data.
 
-@mcp.tool()
-def list_teams(api_key: str) -> dict:
+@mcp.tool(
+    name = "list_teams",
+    description = "List all teams the user belongs to. Returns minimal team info for selection."
+)
+def list_teams(api_key: str = Field(description="User's Bugasura API key")) -> dict:
     """
     List all teams the user belongs to.
 
@@ -824,8 +828,11 @@ def _fetch_user_context(api_key: str) -> dict:
     }
 
 
-@mcp.tool()
-def get_user_context(api_key: str) -> dict:
+@mcp.tool(
+    name = "get_user_context",
+    description = "Get complete user context including all teams and their projects. Returns comprehensive information for discovery and finding team_id/project_id values."
+)
+def get_user_context(api_key: str = Field(description="User's Bugasura API key")) -> dict:
     """
     Get complete user context including all teams and their projects.
 
@@ -871,8 +878,14 @@ def get_user_context(api_key: str) -> dict:
     return _fetch_user_context(api_key)
 
 
-@mcp.tool()
-def find_project_by_name(api_key: str, project_name: str) -> dict:
+@mcp.tool(
+    name = "find_project_by_name",
+    description = "Find projects by name across ALL teams. Searches case-insensitive, partial match. Returns team_id and project_id for use in other operations."
+)
+def find_project_by_name(
+    api_key: str = Field(description="User's Bugasura API key"),
+    project_name: str = Field(description="Project name to search for (case-insensitive, partial match supported)")
+) -> dict:
     """
     Find projects by name across ALL teams the user belongs to.
 
@@ -950,8 +963,14 @@ def find_project_by_name(api_key: str, project_name: str) -> dict:
     }
 
 
-@mcp.tool()
-def find_team_by_name(api_key: str, team_name: str) -> dict:
+@mcp.tool(
+    name = "find_team_by_name",
+    description = "Find teams by name (case-insensitive, partial match). Returns team_id and project count for teams the user belongs to."
+)
+def find_team_by_name(
+    api_key: str = Field(description="User's Bugasura API key"),
+    team_name: str = Field(description="Team name to search for (case-insensitive, partial match supported)")
+) -> dict:
     """
     Find teams by name that the user belongs to.
 
@@ -1031,8 +1050,22 @@ def find_team_by_name(api_key: str, team_name: str) -> dict:
 # - Some endpoints use "project_id", others use "app_id" - check each endpoint
 # - Test case endpoints specifically require "app_id" parameter name
 
-@mcp.tool()
-def list_projects( api_key: str, team_id: int, start_at: int = 0, max_results: int = 10, platform: str = "ALL", platform_type: str = "ALL", status: str = "ACTIVE", project_type: str = "all", search_text: str = "", source: str = "" ) -> dict:
+@mcp.tool(
+    name = "list_projects",
+    description = "List projects for a specific team with filtering and pagination. Supports platform, status, and search filters."
+)
+def list_projects(
+    api_key: str = Field(description="User's Bugasura API key"),
+    team_id: int = Field(description="Team identifier (required)"),
+    start_at: int = Field(default=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=10, description="Number of results to return (10-100, default: 10)"),
+    platform: str = Field(default="ALL", description="Filter by platform: 'ALL', 'Android', 'iOS', 'Desktop', 'Multiple' (case-sensitive)"),
+    platform_type: str = Field(default="ALL", description="Filter by platform type: 'ALL', 'Apps', 'Mobileweb', 'Web', 'Multiple' (case-sensitive)"),
+    status: str = Field(default="ACTIVE", description="Filter by status: 'ACTIVE', 'ARCHIVE', 'ALL' (case-insensitive)"),
+    project_type: str = Field(default="all", description="Filter by access: 'all', 'contributed', 'private', 'public' (case-insensitive)"),
+    search_text: str = Field(default="", description="Search projects by name (case-insensitive partial match)"),
+    source: str = Field(default="", description="Filter by creation source: 'PLATFORM', 'EXTENSION', 'API', 'IMPORT'")
+) -> dict:
     """
     List all projects for a team with filtering and pagination.
 
@@ -1166,7 +1199,7 @@ def list_projects( api_key: str, team_id: int, start_at: int = 0, max_results: i
 
     # Normalize status (case-insensitive, convert to uppercase)
     status = status.upper()
-    valid_statuses = ['ACTIVE', 'ARCHIVE', 'ALL']
+    valid_statuses = ['ACTIVE', 'ARCHIVE', 'DELETED']
     if status not in valid_statuses:
         return {
             'status': 'failed',
@@ -1202,8 +1235,15 @@ def list_projects( api_key: str, team_id: int, start_at: int = 0, max_results: i
     return make_api_request('GET', '/v1/projects/list', api_key, params=params)
 
 
-@mcp.tool()
-def get_project_details(api_key: str, team_id: int, project_id: int) -> dict:
+@mcp.tool(
+    name = "get_project_details",
+    description = "Get detailed information about a specific project including workflow, tags, and settings."
+)
+def get_project_details(
+    api_key: str = Field(description="User's Bugasura API key"),
+    team_id: int = Field(description="Team identifier"),
+    project_id: int = Field(description="Project identifier")
+) -> dict:
     """Get detailed information about a specific project."""
     # Validate API key before proceeding
     validation = validate_api_key(api_key)
@@ -1228,8 +1268,15 @@ def get_project_details(api_key: str, team_id: int, project_id: int) -> dict:
 # - Some API endpoints: use report_id parameter (matches database column)
 # - Comments added where parameter names differ from function parameters
 
-@mcp.tool()
-def list_sprints(api_key: str, team_id: Optional[int] = None, project_id: Optional[int] = None) -> dict:
+@mcp.tool(
+    name = "list_sprints",
+    description = "List all sprints for a project. Supports interactive team/project selection if IDs not provided."
+)
+def list_sprints(
+    api_key: str = Field(description="User's Bugasura API key"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)")
+) -> dict:
     """
     List all sprints for a project.
 
@@ -1263,8 +1310,16 @@ def list_sprints(api_key: str, team_id: Optional[int] = None, project_id: Option
     })
 
 
-@mcp.tool()
-def get_sprint_details(api_key: str, sprint_id: int, team_id: Optional[int] = None, project_id: Optional[int] = None) -> dict:
+@mcp.tool(
+    name = "get_sprint_details",
+    description = "Get detailed sprint information and statistics. Supports interactive team/project selection."
+)
+def get_sprint_details(
+    api_key: str = Field(description="User's Bugasura API key"),
+    sprint_id: int = Field(description="Sprint identifier"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)")
+) -> dict:
     """
     Get sprint details and statistics.
 
@@ -1300,8 +1355,20 @@ def get_sprint_details(api_key: str, sprint_id: int, team_id: Optional[int] = No
     })
 
 
-@mcp.tool()
-def create_sprint( api_key: str, sprint_name: str, team_id: Optional[int] = None, project_id: Optional[int] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, duration: Optional[int] = None, sprint_status: str = "IN PROGRESS" ) -> dict:
+@mcp.tool(
+    name = "create_sprint",
+    description = "Create a new sprint for a project. Requires sprint_name (5-250 chars). Supports dates, duration, and status. Interactive team/project selection available."
+)
+def create_sprint(
+    api_key: str = Field(description="User's Bugasura API key"),
+    sprint_name: str = Field(description="Name of the sprint (5-250 characters required)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)"),
+    start_date: Optional[str] = Field(default=None, description="Sprint start date in YYYY-MM-DD format (optional)"),
+    end_date: Optional[str] = Field(default=None, description="Sprint end date in YYYY-MM-DD format (optional)"),
+    duration: Optional[int] = Field(default=None, description="Sprint duration in days (optional)"),
+    sprint_status: str = Field(default="IN PROGRESS", description="Sprint status: 'SCHEDULED', 'IN PROGRESS', 'CANCELLED', 'COMPLETED' (default: IN PROGRESS)")
+) -> dict:
     """
     Create a new sprint for a project.
 
@@ -1414,8 +1481,21 @@ def create_sprint( api_key: str, sprint_name: str, team_id: Optional[int] = None
     return make_api_request('POST', '/v1/sprints/add', api_key, data=payload)
 
 
-@mcp.tool()
-def update_sprint( api_key: str, sprint_id: int, team_id: Optional[int] = None, project_id: Optional[int] = None, sprint_name: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, duration: Optional[int] = None, sprint_status: Optional[str] = None ) -> dict:
+@mcp.tool(
+    name = "update_sprint",
+    description = "Update sprint details (partial updates supported). Can update name, dates, duration, or status. Interactive team/project selection available."
+)
+def update_sprint(
+    api_key: str = Field(description="User's Bugasura API key"),
+    sprint_id: int = Field(description="Sprint identifier"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)"),
+    sprint_name: Optional[str] = Field(default=None, description="New sprint name (5-250 characters, optional)"),
+    start_date: Optional[str] = Field(default=None, description="New start date in YYYY-MM-DD format (optional)"),
+    end_date: Optional[str] = Field(default=None, description="New end date in YYYY-MM-DD format (optional)"),
+    duration: Optional[int] = Field(default=None, description="New duration in days (optional)"),
+    sprint_status: Optional[str] = Field(default=None, description="New status: 'SCHEDULED', 'IN PROGRESS', 'CANCELLED', 'COMPLETED' (optional)")
+) -> dict:
     """
     Update an existing sprint.
 
@@ -1524,6 +1604,121 @@ def update_sprint( api_key: str, sprint_id: int, team_id: Optional[int] = None, 
     return make_api_request('POST', '/v1/sprints/update', api_key, data=payload)
 
 
+@mcp.tool(
+    name = "delete_sprint",
+    description = "Delete a sprint permanently by numeric ID or exact name match. Supports interactive team/project selection."
+)
+def delete_sprint(
+    api_key: str = Field(description="User's Bugasura API key"),
+    sprint_identifier: str = Field(description="Sprint identifier: numeric ID (e.g., '123') or exact sprint name (e.g., 'Sprint 15')"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)")
+) -> dict:
+    """
+    Delete a sprint from a project by ID or name.
+
+    Interactive flow: If team_id/project_id are not provided, this function
+    will guide you through selection.
+
+    WARNING: This action cannot be undone. The sprint and all its associations
+    will be permanently removed.
+
+    Args:
+        api_key: User's Bugasura API key (required)
+        sprint_identifier: Sprint ID (numeric) or sprint name (string) to delete (required)
+        team_id: Team identifier (optional - will prompt if not provided)
+        project_id: Project identifier (optional - will prompt if not provided)
+
+    Returns:
+        dict: {
+            'status': 'OK',
+            'message': 'Sprint deleted successfully'
+        }
+
+    Examples:
+        # Delete a sprint by ID
+        delete_sprint(api_key, sprint_identifier="123", team_id=456, project_id=789)
+
+        # Delete a sprint by name
+        delete_sprint(api_key, sprint_identifier="Sprint 15", team_id=456, project_id=789)
+
+        # Delete with interactive context selection
+        delete_sprint(api_key, sprint_identifier="Sprint 15")
+    """
+    # Validate API key before proceeding
+    validation = validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    # Use centralized context selection helper
+    context = select_team_project_context(api_key, team_id, project_id, 'delete_sprint', f', sprint_identifier={sprint_identifier}')
+
+    # If context selection is needed, return the selection prompt
+    if 'status' in context and context['status'] == 'selection_required':
+        return context
+
+    # Extract validated team_id and project_id
+    team_id = context['team_id']
+    project_id = context['project_id']
+
+    # Resolve sprint_identifier to sprint_id
+    sprint_id = None
+
+    # Check if it's a numeric ID
+    if sprint_identifier.isdigit():
+        sprint_id = int(sprint_identifier)
+        logger.info(f"delete_sprint: Using numeric sprint_id={sprint_id}")
+    else:
+        # It's a name - search for the sprint
+        logger.info(f"delete_sprint: Searching for sprint by name: '{sprint_identifier}'")
+        sprints_response = make_api_request('GET', '/v1/sprints/list', api_key, params={
+            'team_id': str(team_id),
+            'project_id': str(project_id)
+        })
+
+        if sprints_response.get('status') != 'OK':
+            return {
+                'status': 'failed',
+                'error': 'Failed to fetch sprints',
+                'message': sprints_response.get('message', 'Could not retrieve sprints list')
+            }
+
+        # Search for sprint by name (case-insensitive)
+        sprints = sprints_response.get('sprintsList', [])
+        matching_sprints = [s for s in sprints if s.get('sprint_name', '').lower() == sprint_identifier.lower()]
+
+        if not matching_sprints:
+            # Try partial match
+            matching_sprints = [s for s in sprints if sprint_identifier.lower() in s.get('sprint_name', '').lower()]
+
+        if not matching_sprints:
+            return {
+                'status': 'failed',
+                'error': 'Sprint not found',
+                'message': f"No sprint found with name '{sprint_identifier}' in project {project_id}"
+            }
+
+        if len(matching_sprints) > 1:
+            sprint_list = '\n'.join([f"  - ID: {s['sprint_id']}, Name: {s['sprint_name']}" for s in matching_sprints])
+            return {
+                'status': 'failed',
+                'error': 'Multiple sprints found',
+                'message': f"Multiple sprints match '{sprint_identifier}'. Please use the sprint ID instead:\n{sprint_list}"
+            }
+
+        sprint_id = matching_sprints[0]['sprint_id']
+        logger.info(f"delete_sprint: Found sprint '{sprint_identifier}' with ID {sprint_id}")
+
+    # Build payload
+    payload = {
+        "team_id": team_id,
+        "project_id": project_id,
+        "sprint_id": sprint_id
+    }
+
+    logger.info(f"Deleting sprint_id={sprint_id} for team_id={team_id}, project_id={project_id}")
+    return make_api_request('POST', '/v1/sprints/delete', api_key, data=payload)
+
 
 # ============================================================================
 # ISSUE/BUG MANAGEMENT TOOLS
@@ -1531,8 +1726,32 @@ def update_sprint( api_key: str, sprint_id: int, team_id: Optional[int] = None, 
 # Issues (also called bugs or test results) are the core entities in Bugasura.
 # They represent defects, feature requests, or test failures.
 
-@mcp.tool()
-def create_issue( api_key: str, summary: str, team_id: Optional[int] = None, project_id: Optional[int] = None, sprint_id: Optional[int] = None, description: str = "", severity: str = "MEDIUM", status: str = "New", device_name: str = "", os_name: str = "", os_version: str = "", browser_name: str = "", browser_version: str = "", network_name: str = "", resolution: str = "", tags: str = "", issue_type: str = "", issue_assignees: str = "", is_public: str = "", custom_fields: str = "" ) -> dict:
+@mcp.tool(
+    name = "create_issue",
+    description = "Create a new issue/bug with required summary. Supports severity, status, environment details, tags, assignees, and custom fields. Interactive team/project/sprint selection available."
+)
+def create_issue(
+    api_key: str = Field(description="User's Bugasura API key"),
+    summary: str = Field(description="Issue summary/title (required)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional - will prompt if not provided)"),
+    description: str = Field(default="", description="Detailed issue description (optional, supports HTML)"),
+    severity: str = Field(default="MEDIUM", description="Severity: 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW' (default: MEDIUM)"),
+    status: str = Field(default="New", description="Status (default: New, must match project workflow)"),
+    device_name: str = Field(default="", description="Device name for testing environment (optional)"),
+    os_name: str = Field(default="", description="Operating system name (optional)"),
+    os_version: str = Field(default="", description="OS version (optional)"),
+    browser_name: str = Field(default="", description="Browser name (optional)"),
+    browser_version: str = Field(default="", description="Browser version (optional)"),
+    network_name: str = Field(default="", description="Network condition (optional)"),
+    resolution: str = Field(default="", description="Screen resolution (optional)"),
+    tags: str = Field(default="", description="Comma-separated tags (optional)"),
+    issue_type: str = Field(default="", description="Issue type/category (optional)"),
+    issue_assignees: str = Field(default="", description="Comma-separated assignee names, emails, or IDs (optional)"),
+    is_public: str = Field(default="", description="Public visibility: 'true' or 'false' (optional)"),
+    custom_fields: str = Field(default="", description="JSON string of custom field values (optional)")
+) -> dict:
     """
     Create a new issue/bug in Bugasura.
 
@@ -1603,7 +1822,7 @@ def create_issue( api_key: str, summary: str, team_id: Optional[int] = None, pro
         if sprints_response.get('status') != 'OK':
             return sprints_response
 
-        sprints = sprints_response.get('sprint_list', [])
+        sprints = sprints_response.get('sprintsList', [])
         if not sprints:
             return {
                 'status': 'failed',
@@ -1633,6 +1852,29 @@ def create_issue( api_key: str, summary: str, team_id: Optional[int] = None, pro
         }
 
     # All context parameters provided - proceed with issue creation
+
+    # IMPORTANT: Validate that the sprint exists and belongs to this project
+    # The backend will fail with "Error getting testplan report" if sprint_id is invalid
+    logger.info(f"create_issue: Validating sprint_id={sprint_id} for project_id={project_id}")
+    sprint_validation = make_api_request('GET', '/v1/sprints/list', api_key, params={
+        'team_id': str(team_id),
+        'project_id': str(project_id)
+    })
+
+    if sprint_validation.get('status') == 'OK':
+        sprints = sprint_validation.get('sprintsList', [])
+        # Check if the provided sprint_id exists in this project
+        sprint_ids = [s.get('sprint_id') for s in sprints]
+        if sprint_id not in sprint_ids:
+            return {
+                'status': 'failed',
+                'error': 'Invalid sprint_id',
+                'message': f"Sprint ID {sprint_id} does not exist in project {project_id}. Available sprint IDs: {sprint_ids[:10]}",
+                'suggestion': 'Please verify the sprint_id belongs to the selected project.'
+            }
+        logger.info(f"create_issue: Sprint validation passed. Sprint {sprint_id} exists in project {project_id}")
+    else:
+        logger.warning(f"create_issue: Could not validate sprint (API error), proceeding anyway")
 
     # Build required fields payload
     # Note: IDs will be auto-converted to strings by make_api_request()
@@ -1672,8 +1914,16 @@ def create_issue( api_key: str, summary: str, team_id: Optional[int] = None, pro
     return make_api_request('POST', '/v1/issues/add', api_key, data=payload)
 
 
-@mcp.tool()
-def get_issue(api_key: str, issue_id: int, team_id: Optional[int] = None, project_id: Optional[int] = None) -> dict:
+@mcp.tool(
+    name = "get_issue",
+    description = "Get detailed issue information by numeric ID. Returns full issue details including comments and attachments. Interactive team/project selection available."
+)
+def get_issue(
+    api_key: str = Field(description="User's Bugasura API key"),
+    issue_id: int = Field(description="Issue numeric ID (testresults_id)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)")
+) -> dict:
     """
     Get issue details by numeric ID (testresults_id).
 
@@ -1715,8 +1965,34 @@ def get_issue(api_key: str, issue_id: int, team_id: Optional[int] = None, projec
     return response
 
 
-@mcp.tool()
-def update_issue( api_key: str, issue_id: int, team_id: Optional[int] = None, project_id: Optional[int] = None, sprint_id: Optional[int] = None, summary: Optional[str] = None, description: Optional[str] = None, severity: Optional[str] = None, status: Optional[str] = None, tags: Optional[str] = None, issue_type: Optional[str] = None, is_public: Optional[str] = None, device_name: Optional[str] = None, os_name: Optional[str] = None, os_version: Optional[str] = None, network_name: Optional[str] = None, browser_name: Optional[str] = None, browser_version: Optional[str] = None, resolution: Optional[str] = None, similar_issues: Optional[str] = None, custom_fields: Optional[str] = None, project_testcase_ids: Optional[str] = None ) -> dict:
+@mcp.tool(
+    name = "update_issue",
+    description = "Update an existing issue (partial updates supported). Can update any field including summary, description, severity, status, tags, assignees, environment, and custom fields. Interactive selection available."
+)
+def update_issue(
+    api_key: str = Field(description="User's Bugasura API key"),
+    issue_id: int = Field(description="Issue numeric ID to update"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional)"),
+    summary: Optional[str] = Field(default=None, description="New issue summary/title (optional)"),
+    description: Optional[str] = Field(default=None, description="New description (optional, supports HTML)"),
+    severity: Optional[str] = Field(default=None, description="New severity: 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW' (optional)"),
+    status: Optional[str] = Field(default=None, description="New status (optional, must match project workflow)"),
+    tags: Optional[str] = Field(default=None, description="New tags, comma-separated (optional)"),
+    issue_type: Optional[str] = Field(default=None, description="New issue type/category (optional)"),
+    is_public: Optional[str] = Field(default=None, description="New public visibility: 'true' or 'false' (optional)"),
+    device_name: Optional[str] = Field(default=None, description="New device name (optional)"),
+    os_name: Optional[str] = Field(default=None, description="New OS name (optional)"),
+    os_version: Optional[str] = Field(default=None, description="New OS version (optional)"),
+    network_name: Optional[str] = Field(default=None, description="New network condition (optional)"),
+    browser_name: Optional[str] = Field(default=None, description="New browser name (optional)"),
+    browser_version: Optional[str] = Field(default=None, description="New browser version (optional)"),
+    resolution: Optional[str] = Field(default=None, description="New screen resolution (optional)"),
+    similar_issues: Optional[str] = Field(default=None, description="Related issue IDs, comma-separated (optional)"),
+    custom_fields: Optional[str] = Field(default=None, description="JSON string of custom field updates (optional)"),
+    project_testcase_ids: Optional[str] = Field(default=None, description="Linked test case IDs, comma-separated (optional)")
+) -> dict:
     """
     Update an existing issue. Only updates the fields that are provided.
 
@@ -1889,8 +2165,160 @@ def update_issue( api_key: str, issue_id: int, team_id: Optional[int] = None, pr
     return make_api_request('POST', '/v1/issues/update', api_key, data=payload)
 
 
-@mcp.tool()
-def list_issues( api_key: str, team_id: Optional[int] = None, project_id: Optional[int] = None, sprint_id: Optional[int] = None, start_at: int = 0, max_results: int = 10 ) -> dict:
+@mcp.tool(
+    name = "delete_issue",
+    description = "Delete an issue permanently by numeric ID, issue key (e.g., 'ISS09'), or exact/partial summary match. Uses 3-step matching: exact key → exact summary → partial summary. Interactive selection available."
+)
+def delete_issue(
+    api_key: str = Field(description="User's Bugasura API key"),
+    issue_identifier: str = Field(description="Issue identifier: numeric ID (e.g., '123'), issue key (e.g., 'ISS09'), or summary text for matching"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional - narrows search scope)")
+) -> dict:
+    """
+    Delete an issue/bug from Bugasura by ID, issue key, or summary/title.
+
+    Interactive flow: If team_id/project_id are not provided, this function
+    will guide you through selection.
+
+    WARNING: This action cannot be undone. The issue and all its data
+    (comments, attachments, history) will be permanently removed.
+
+    Args:
+        api_key: User's Bugasura API key (required)
+        issue_identifier: Issue ID (numeric), issue key (e.g., "ISS09"), or issue summary/title (string) to delete (required)
+        team_id: Team identifier (optional - will prompt if not provided)
+        project_id: Project identifier (optional - will prompt if not provided)
+        sprint_id: Sprint identifier to narrow search (optional, helps when searching by name)
+
+    Returns:
+        dict: {
+            'status': 'OK',
+            'message': 'Issue deleted successfully'
+        }
+
+    Examples:
+        # Delete an issue by numeric ID
+        delete_issue(api_key, issue_identifier="123", team_id=456, project_id=789)
+
+        # Delete an issue by issue key
+        delete_issue(api_key, issue_identifier="ISS09", team_id=456, project_id=789)
+
+        # Delete an issue by summary
+        delete_issue(api_key, issue_identifier="Login button not working", team_id=456, project_id=789)
+
+        # Delete with sprint context
+        delete_issue(api_key, issue_identifier="Login bug", sprint_id=5)
+
+        # Delete with interactive context selection
+        delete_issue(api_key, issue_identifier="ISS09")
+    """
+    # Validate API key before proceeding
+    validation = validate_api_key(api_key)
+    # Handle case where API might return a list instead of dict
+    if isinstance(validation, list):
+        return {'status': 'failed', 'error': 'Unexpected API response format', 'details': str(validation)}
+    if not validation.get('valid'):
+        return validation
+
+    # Use centralized context selection helper
+    context = select_team_project_context(api_key, team_id, project_id, 'delete_issue', f', issue_identifier={issue_identifier}')
+
+    # If context selection is needed, return the selection prompt
+    if 'status' in context and context['status'] == 'selection_required':
+        return context
+
+    # Extract validated team_id and project_id
+    team_id = context['team_id']
+    project_id = context['project_id']
+
+    # Resolve issue_identifier to issue_id
+    issue_id = None
+
+    # Check if it's a numeric ID
+    if issue_identifier.isdigit():
+        issue_id = int(issue_identifier)
+        logger.info(f"delete_issue: Using numeric issue_id={issue_id}")
+    else:
+        # It could be an issue key (e.g., "ISS09") or a summary/title - search for it
+        logger.info(f"delete_issue: Searching for issue by key or summary: '{issue_identifier}'")
+
+        params = {
+            'team_id': str(team_id),
+            'project_id': str(project_id),
+            'start_at': 0,
+            'max_results': 100  # Get more results for better matching
+        }
+
+        if sprint_id:
+            params['sprint_id'] = str(sprint_id)
+
+        issues_response = make_api_request('GET', '/v1/issues/list', api_key, params=params)
+
+        if issues_response.get('status') != 'OK':
+            return {
+                'status': 'failed',
+                'error': 'Failed to fetch issues',
+                'message': issues_response.get('message', 'Could not retrieve issues list')
+            }
+
+        issues = issues_response.get('issues', [])
+
+        # Step 1: Try exact match by issue key (case-insensitive)
+        # Issue keys are usually in format like "ISS09", "BUG123", etc.
+        matching_issues = [i for i in issues if i.get('issue_id', '').upper() == issue_identifier.upper()]
+
+        if matching_issues:
+            logger.info(f"delete_issue: Found issue by issue key: {matching_issues[0].get('issue_id')}")
+        else:
+            # Step 2: Try exact match by summary (case-insensitive)
+            matching_issues = [i for i in issues if i.get('reason', '').lower() == issue_identifier.lower()]
+
+            if not matching_issues:
+                # Step 3: Try partial match by summary
+                matching_issues = [i for i in issues if issue_identifier.lower() in i.get('reason', '').lower()]
+
+        if not matching_issues:
+            return {
+                'status': 'failed',
+                'error': 'Issue not found',
+                'message': f"No issue found with key or summary '{issue_identifier}' in project {project_id}"
+            }
+
+        if len(matching_issues) > 1:
+            issue_list = '\n'.join([f"  - ID: {i['testresults_id']}, Key: {i.get('issue_id', 'N/A')}, Summary: {i['reason']}" for i in matching_issues[:10]])
+            return {
+                'status': 'failed',
+                'error': 'Multiple issues found',
+                'message': f"Multiple issues match '{issue_identifier}'. Please use the issue ID or unique issue key instead:\n{issue_list}"
+            }
+
+        issue_id = matching_issues[0]['testresults_id']
+        logger.info(f"delete_issue: Found issue '{issue_identifier}' with ID {issue_id}")
+
+    # Build payload
+    payload = {
+        "team_id": team_id,
+        "issue_key": issue_id
+    }
+
+    logger.info(f"Deleting issue_id={issue_id} for team_id={team_id}, project_id={project_id}")
+    return make_api_request('POST', '/v1/issues/delete', api_key, data=payload)
+
+
+@mcp.tool(
+    name = "list_issues",
+    description = "List issues for a project with optional sprint filter and pagination. Returns issue summaries with key details. Interactive team/project selection available."
+)
+def list_issues(
+    api_key: str = Field(description="User's Bugasura API key"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier to filter issues (optional)"),
+    start_at: int = Field(default=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=10, description="Number of results to return (default: 10)")
+) -> dict:
     """
     List issues for a project with optional sprint filter and pagination.
 
@@ -1945,8 +2373,17 @@ def list_issues( api_key: str, team_id: Optional[int] = None, project_id: Option
 # - API requests: map to app_id (what the Bugasura API expects)
 # - Comment added at each mapping point for clarity
 
-@mcp.tool()
-def list_test_cases( api_key: str, team_id: Optional[int] = None, project_id: Optional[int] = None, start_at: int = 0, max_results: int = 10 ) -> dict:
+@mcp.tool(
+    name = "list_test_cases",
+    description = "List test cases for a project with pagination. Returns test case summaries. Interactive team/project selection available."
+)
+def list_test_cases(
+    api_key: str = Field(description="User's Bugasura API key"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)"),
+    start_at: int = Field(default=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=10, description="Number of results to return (default: 10)")
+) -> dict:
     """
     List test cases for a project with pagination.
 
@@ -1990,8 +2427,28 @@ def list_test_cases( api_key: str, team_id: Optional[int] = None, project_id: Op
     return filter_large_fields(response)
 
 
-@mcp.tool()
-def create_test_case( api_key: str, scenario: str, team_id: Optional[int] = None, project_id: Optional[int] = None, feature_name: str = "", sub_feature_name: str = "", testing_type: str = "Functional", severity: str = "MEDIUM", priority: str = "P2", test_conditions: str = "", test_idea: str = "", test_data: str = "", acceptance_criteria: str = "", assignees: Optional[str] = None, is_api_test_case: bool = False, folder_id: Optional[int] = None ) -> dict:
+@mcp.tool(
+    name = "create_test_case",
+    description = "Create a new test case with required scenario. Supports feature tags, testing type, severity, priority, conditions, test data, assignees, and folder organization. Interactive team/project selection available."
+)
+def create_test_case(
+    api_key: str = Field(description="User's Bugasura API key"),
+    scenario: str = Field(description="Test case scenario/title (required)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)"),
+    feature_name: str = Field(default="", description="Feature name/tag (optional)"),
+    sub_feature_name: str = Field(default="", description="Sub-feature name/tag (optional)"),
+    testing_type: str = Field(default="Functional", description="Testing type: 'Functional', 'Regression', 'Smoke', 'Integration', etc. (default: Functional)"),
+    severity: str = Field(default="MEDIUM", description="Severity: 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW' (default: MEDIUM)"),
+    priority: str = Field(default="P2", description="Priority: 'P0', 'P1', 'P2', 'P3', 'P4' (default: P2)"),
+    test_conditions: str = Field(default="", description="Pre-conditions and test setup (optional)"),
+    test_idea: str = Field(default="", description="Test idea or objective (optional)"),
+    test_data: str = Field(default="", description="Test data required (optional)"),
+    acceptance_criteria: str = Field(default="", description="Acceptance criteria or expected results (optional)"),
+    assignees: Optional[str] = Field(default=None, description="Comma-separated assignee names, emails, or IDs (optional)"),
+    is_api_test_case: bool = Field(default=False, description="Flag for API test cases (default: False)"),
+    folder_id: Optional[int] = Field(default=None, description="Folder ID for organization (optional)")
+) -> dict:
     """
     Create a new test case in Bugasura.
 
@@ -2131,8 +2588,17 @@ def create_test_case( api_key: str, scenario: str, team_id: Optional[int] = None
     return make_api_request('POST', '/v1/testcases/add', api_key, data=payload)
 
 
-@mcp.tool()
-def get_test_case( api_key: str, testcase_id: int, team_id: Optional[int] = None, project_id: Optional[int] = None, sprint_id: Optional[int] = None ) -> dict:
+@mcp.tool(
+    name = "get_test_case",
+    description = "Get detailed test case information by numeric ID. Returns full test case details including steps and execution history. Interactive team/project selection available."
+)
+def get_test_case(
+    api_key: str = Field(description="User's Bugasura API key"),
+    testcase_id: int = Field(description="Test case numeric ID"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional)")
+) -> dict:
     """
     Get test case details.
 
@@ -2180,8 +2646,31 @@ def get_test_case( api_key: str, testcase_id: int, team_id: Optional[int] = None
     return response
 
 
-@mcp.tool()
-def update_test_case( api_key: str, testcase_id: int, team_id: Optional[int] = None, project_id: Optional[int] = None, feature_name: Optional[str] = None, sub_feature_name: Optional[str] = None, scenario: Optional[str] = None, testing_type: Optional[str] = None, severity: Optional[str] = None, priority: Optional[str] = None, test_conditions: Optional[str] = None, test_idea: Optional[str] = None, test_data: Optional[str] = None, acceptance_criteria: Optional[str] = None, execution_status: Optional[str] = None, test_case_status: Optional[str] = None, assignees: Optional[str] = None, folder_id: Optional[int] = None, sprint_ids: Optional[str] = None ) -> dict:
+@mcp.tool(
+    name = "update_test_case",
+    description = "Update test case details (partial updates supported). Can update any field including scenario, feature tags, testing type, severity, priority, conditions, assignees, status, and sprint associations. Interactive selection available."
+)
+def update_test_case(
+    api_key: str = Field(description="User's Bugasura API key"),
+    testcase_id: int = Field(description="Test case numeric ID to update"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)"),
+    feature_name: Optional[str] = Field(default=None, description="New feature name/tag (optional)"),
+    sub_feature_name: Optional[str] = Field(default=None, description="New sub-feature name/tag (optional)"),
+    scenario: Optional[str] = Field(default=None, description="New test case scenario/title (optional)"),
+    testing_type: Optional[str] = Field(default=None, description="New testing type (optional)"),
+    severity: Optional[str] = Field(default=None, description="New severity: 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW' (optional)"),
+    priority: Optional[str] = Field(default=None, description="New priority: 'P0', 'P1', 'P2', 'P3', 'P4' (optional)"),
+    test_conditions: Optional[str] = Field(default=None, description="New test conditions (optional)"),
+    test_idea: Optional[str] = Field(default=None, description="New test idea (optional)"),
+    test_data: Optional[str] = Field(default=None, description="New test data (optional)"),
+    acceptance_criteria: Optional[str] = Field(default=None, description="New acceptance criteria (optional)"),
+    execution_status: Optional[str] = Field(default=None, description="New execution status: 'PASS', 'FAIL', 'BLOCKED', 'NOT EXECUTED' (optional)"),
+    test_case_status: Optional[str] = Field(default=None, description="New test case status (optional)"),
+    assignees: Optional[str] = Field(default=None, description="New assignees, comma-separated names/emails/IDs (optional)"),
+    folder_id: Optional[int] = Field(default=None, description="New folder ID for organization (optional)"),
+    sprint_ids: Optional[str] = Field(default=None, description="New sprint associations, comma-separated sprint IDs (optional)")
+) -> dict:
     """
     Update a test case. Only updates the fields that are provided.
 
@@ -2403,6 +2892,146 @@ def update_test_case( api_key: str, testcase_id: int, team_id: Optional[int] = N
     return make_api_request('POST', '/v1/testcases/update', api_key, data=payload)
 
 
+@mcp.tool(
+    name = "delete_test_case",
+    description = "Delete a test case permanently by numeric ID, test case key (e.g., 'TES5', 'MCP11'), or exact/partial scenario match. Uses 3-step matching: exact key → exact scenario → partial scenario. Interactive selection available."
+)
+def delete_test_case(
+    api_key: str = Field(description="User's Bugasura API key"),
+    testcase_identifier: str = Field(description="Test case identifier: numeric ID (e.g., '123'), test case key (e.g., 'TES5', 'MCP11'), or scenario text for matching"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)")
+) -> dict:
+    """
+    Delete a test case from Bugasura by ID, test case key, or scenario name.
+
+    Interactive flow: If team_id/project_id are not provided, this function
+    will guide you through selection.
+
+    WARNING: This action cannot be undone. The test case and all its execution
+    history will be permanently removed.
+
+    Args:
+        api_key: User's Bugasura API key (required)
+        testcase_identifier: Test case ID (numeric), test case key (e.g., "TES5", "MCP11"), or scenario name (string) to delete (required)
+        team_id: Team identifier (optional - will prompt if not provided)
+        project_id: Project identifier (optional - will prompt if not provided)
+
+    Returns:
+        dict: {
+            'status': 'OK',
+            'message': 'Test case deleted successfully'
+        }
+
+    Examples:
+        # Delete a test case by numeric ID
+        delete_test_case(api_key, testcase_identifier="123", team_id=456, project_id=789)
+
+        # Delete a test case by test case key
+        delete_test_case(api_key, testcase_identifier="TES5", team_id=456, project_id=789)
+
+        # Delete a test case by scenario name
+        delete_test_case(api_key, testcase_identifier="Verify login with valid credentials", team_id=456, project_id=789)
+
+        # Delete with interactive context selection
+        delete_test_case(api_key, testcase_identifier="MCP11")
+    """
+    # Validate API key before proceeding
+    validation = validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    # Use centralized context selection helper
+    context = select_team_project_context(api_key, team_id, project_id, 'delete_test_case', f', testcase_identifier={testcase_identifier}')
+
+    # If context selection is needed, return the selection prompt
+    if 'status' in context and context['status'] == 'selection_required':
+        return context
+
+    # Extract validated team_id and project_id
+    team_id = context['team_id']
+    project_id = context['project_id']
+
+    # Resolve testcase_identifier to testcase_id
+    testcase_id = None
+
+    # Check if it's a numeric ID
+    if testcase_identifier.isdigit():
+        testcase_id = int(testcase_identifier)
+        logger.info(f"delete_test_case: Using numeric testcase_id={testcase_id}")
+    else:
+        # It could be a test case key (e.g., "TES5", "MCP11") or a scenario name - search for it
+        logger.info(f"delete_test_case: Searching for test case by key or scenario: '{testcase_identifier}'")
+
+        # NOTE: Test case endpoints use 'app_id' not 'project_id'
+        params = {
+            'team_id': str(team_id),
+            'app_id': str(project_id),  # API expects 'app_id'
+            'start_at': 0,
+            'max_results': 100  # Get more results for better matching
+        }
+
+        testcases_response = make_api_request('GET', '/v1/testcases/list', api_key, params=params)
+
+        if testcases_response.get('status') != 'OK':
+            return {
+                'status': 'failed',
+                'error': 'Failed to fetch test cases',
+                'message': testcases_response.get('message', 'Could not retrieve test cases list')
+            }
+
+        testcases = testcases_response.get('testCases', [])
+
+        # Step 1: Try exact match by test case key (case-insensitive)
+        # Test case keys are usually in format like "TES5", "MCP11", etc.
+        matching_testcases = [tc for tc in testcases if tc.get('test_case_key', '').upper() == testcase_identifier.upper()]
+
+        if matching_testcases:
+            logger.info(f"delete_test_case: Found test case by key: {matching_testcases[0].get('test_case_key')}")
+        else:
+            # Step 2: Try exact match by scenario (case-insensitive)
+            matching_testcases = [tc for tc in testcases if tc.get('scenario', '').lower() == testcase_identifier.lower()]
+
+            if not matching_testcases:
+                # Step 3: Try partial match by scenario
+                matching_testcases = [tc for tc in testcases if testcase_identifier.lower() in tc.get('scenario', '').lower()]
+
+        if not matching_testcases:
+            return {
+                'status': 'failed',
+                'error': 'Test case not found',
+                'message': f"No test case found with key or scenario '{testcase_identifier}' in project {project_id}"
+            }
+
+        if len(matching_testcases) > 1:
+            testcase_list = '\n'.join([f"  - ID: {tc['project_test_case_id']}, Key: {tc.get('test_case_key', 'N/A')}, Scenario: {tc['scenario']}" for tc in matching_testcases[:10]])
+            return {
+                'status': 'failed',
+                'error': 'Multiple test cases found',
+                'message': f"Multiple test cases match '{testcase_identifier}'. Please use the test case ID or unique test case key instead:\n{testcase_list}"
+            }
+
+        testcase_id = matching_testcases[0]['project_test_case_id']
+        logger.info(f"delete_test_case: Found test case '{testcase_identifier}' with ID {testcase_id}")
+
+    # Build payload
+    # NOTE: Test case endpoints use 'app_id' not 'project_id'
+    # The API expects 'testcaseids' (comma-separated list) not 'testcase_id'
+    # IMPORTANT: The API requires either sprintId OR isDeleteTestCases=true
+    # - If isDeleteTestCases=false (default), sprintId is REQUIRED
+    # - If isDeleteTestCases=true, sprintId is optional
+    # We set isDeleteTestCases=true to allow deletion without sprint context
+    payload = {
+        "app_id": project_id,      # API expects 'app_id' (project_id mapped here)
+        "testcaseids": str(testcase_id),  # API expects comma-separated string
+        "team_id": team_id,
+        "isDeleteTestCases": "true"  # Set to true to bypass sprint_id requirement
+    }
+
+    logger.info(f"Deleting testcase_id={testcase_id} for team_id={team_id}, project_id={project_id}")
+    return make_api_request('POST', '/v1/testcases/delete', api_key, data=payload)
+
+
 # ============================================================================
 # ASSIGNEE MANAGEMENT TOOLS
 # ============================================================================
@@ -2437,8 +3066,14 @@ def _fetch_team_members(api_key: str, team_id: int) -> dict:
     return response
 
 
-@mcp.tool()
-def list_team_members(api_key: str, team_id: int) -> dict:
+@mcp.tool(
+    name = "list_team_members",
+    description = "List all team members with user IDs, names, emails, and roles. Essential for finding user IDs when assigning work by name or email."
+)
+def list_team_members(
+    api_key: str = Field(description="User's Bugasura API key"),
+    team_id: int = Field(description="Team identifier")
+) -> dict:
     """
     List all members of a team with their user IDs, names, and emails.
 
@@ -2578,8 +3213,17 @@ def _find_user_ids_by_names_or_emails(api_key: str, team_id: int, identifiers: s
     return {'status': 'OK', 'user_ids': ','.join(resolved_ids)}
 
 
-@mcp.tool()
-def add_issue_assignees(api_key: str, issue_id: int, assignees: str, team_id: Optional[int] = None, project_id: Optional[int] = None) -> dict:
+@mcp.tool(
+    name = "add_issue_assignees",
+    description = "Add assignees to an issue by user IDs, email addresses, or names (auto-resolves to IDs). Supports comma-separated values. Interactive team/project selection available."
+)
+def add_issue_assignees(
+    api_key: str = Field(description="User's Bugasura API key"),
+    issue_id: int = Field(description="Issue numeric ID"),
+    assignees: str = Field(description="Comma-separated assignees: user IDs (e.g., '123'), emails (e.g., 'john@example.com'), or names (e.g., 'John Doe')"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)")
+) -> dict:
     """
     Add assignees to an issue using names, emails, or user IDs.
 
@@ -2673,8 +3317,17 @@ def add_issue_assignees(api_key: str, issue_id: int, assignees: str, team_id: Op
     return response
 
 
-@mcp.tool()
-def remove_issue_assignees(api_key: str, issue_id: int, assignees: str, team_id: Optional[int] = None, project_id: Optional[int] = None) -> dict:
+@mcp.tool(
+    name = "remove_issue_assignees",
+    description = "Remove assignees from an issue by user IDs, email addresses, or names (auto-resolves to IDs). Supports comma-separated values. Interactive team/project selection available."
+)
+def remove_issue_assignees(
+    api_key: str = Field(description="User's Bugasura API key"),
+    issue_id: int = Field(description="Issue numeric ID"),
+    assignees: str = Field(description="Comma-separated assignees to remove: user IDs (e.g., '123'), emails (e.g., 'john@example.com'), or names (e.g., 'John Doe')"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided)")
+) -> dict:
     """
     Remove assignees from an issue using names, emails, or user IDs.
 

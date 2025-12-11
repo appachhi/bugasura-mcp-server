@@ -10,9 +10,9 @@ Bugasura MCP Server enables AI tools like Claude, VS Code Copilot, and Cursor to
 
 ## Features
 
-- 📋 **Test Case Management** - Create, update, and search test cases
-- 🐛 **Issue Tracking** - Report and manage bugs with rich context
-- 🏃 **Sprint Planning** - Create and manage agile sprints
+- 📋 **Test Case Management** - Create, update, delete, and search test cases
+- 🐛 **Issue Tracking** - Report, manage, and delete bugs with rich context
+- 🏃 **Sprint Planning** - Create, update, delete, and manage agile sprints
 - 👥 **Team Collaboration** - Assign work using names or emails (auto-resolves to user IDs)
 - 🔍 **Smart Discovery** - Find projects and teams without memorizing IDs
 - 🤖 **Interactive Workflows** - Guided context selection for all operations
@@ -255,6 +255,18 @@ Update test case 123 to mark it as PASS
 Assign test case 456 to john@example.com
 ```
 
+```
+Delete test case 789
+```
+
+```
+Delete test case with key "TES5"
+```
+
+```
+Delete test case named "Verify login with valid credentials"
+```
+
 ### 🐛 Issues & Bugs
 
 ```
@@ -273,6 +285,18 @@ Update issue 789 to change status to "Fixed"
 Add John and Jane as assignees to issue 123
 ```
 
+```
+Delete issue 456
+```
+
+```
+Delete issue with key "ISS09"
+```
+
+```
+Delete issue with summary "Login button not working"
+```
+
 ### 🏃 Sprints
 
 ```
@@ -289,6 +313,14 @@ Update sprint 789 to mark it as COMPLETED
 
 ```
 Show sprint details including issue statistics
+```
+
+```
+Delete sprint 321
+```
+
+```
+Delete sprint named "Sprint 15"
 ```
 
 ### 👥 Team Management
@@ -329,8 +361,9 @@ Show all projects in team 456
 - `get_sprint_details` - Get sprint info and statistics
 - `create_sprint` - Create a new sprint
 - `update_sprint` - Update sprint details (partial updates supported)
+- `delete_sprint` - Delete a sprint permanently (supports ID or name)
 
-**Note:** All sprint tools support interactive context selection.
+**Note:** All sprint tools support interactive context selection. Delete operations can be performed using either numeric IDs or names.
 
 </details>
 
@@ -341,10 +374,11 @@ Show all projects in team 456
 - `get_issue` - Get detailed issue information
 - `create_issue` - Create a new bug/issue
 - `update_issue` - Update issue details (partial updates supported)
+- `delete_issue` - Delete an issue permanently (supports ID, issue key like "ISS09", or summary/title)
 - `add_issue_assignees` - Add assignees by name, email, or ID
 - `remove_issue_assignees` - Remove assignees by name, email, or ID
 
-**Note:** All issue tools support interactive context selection.
+**Note:** All issue tools support interactive context selection. Delete operations can be performed using numeric IDs, issue keys (e.g., "ISS09"), or issue summaries.
 
 </details>
 
@@ -355,8 +389,9 @@ Show all projects in team 456
 - `get_test_case` - Get detailed test case information
 - `create_test_case` - Create a new test case
 - `update_test_case` - Update test case (partial updates supported, assignees by name/email/ID)
+- `delete_test_case` - Delete a test case permanently (supports ID, test case key like "TES5", or scenario name)
 
-**Note:** All test case tools support interactive context selection.
+**Note:** All test case tools support interactive context selection. Delete operations can be performed using numeric IDs, test case keys (e.g., "TES5"), or scenario names.
 
 </details>
 
