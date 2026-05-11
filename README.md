@@ -8,6 +8,20 @@ Bugasura MCP Server enables AI tools like Claude, VS Code Copilot, and Cursor to
 
 ---
 
+## ⚠️ Breaking changes in 2.0
+
+If you're upgrading from 1.x, update your client configuration:
+
+| What changed | 1.x | 2.0 |
+|--------------|-----|-----|
+| Tool names | `create_issue`, `list_teams`, … | `bugasura_create_issue`, `bugasura_list_teams`, … (prefixed to coexist with other MCP servers) |
+| Default HTTP endpoint | `/sse` (SSE) | `/mcp` (streamable HTTP) |
+| List/find responses | `{status, project_list, …}` (upstream shape) | Standard pagination envelope `{status, total, count, offset, items, has_more, next_offset}` — legacy keys remain as extras for one release |
+
+1.x clients pointed at `/sse` must migrate to `/mcp` — SSE has been removed.
+
+---
+
 ## Features
 
 - 📋 **Test Case Management** - Create, update, delete, and search test cases
@@ -33,7 +47,7 @@ Bugasura MCP Server enables AI tools like Claude, VS Code Copilot, and Cursor to
 
 ### 2. Install the MCP Server
 
-Choose your AI tool:
+Choose your AI tool and configure with your API key. The server reads the key from the request `X-Bugasura-API-Key` header (HTTP transport) or the `BUGASURA_API_KEY` environment variable (STDIO transport) — when configured, tools use it automatically without prompting. If no key is configured, tools return `status: 'api_key_required'` and the assistant asks you for one.
 
 <details>
 <summary><b>Claude Desktop</b></summary>
@@ -41,7 +55,7 @@ Choose your AI tool:
 Open Claude Desktop → Settings → Connectors → Add Custom Connector
 
 - Name: `Bugasura`
-- URL: `https://mcp.bugasura.io/sse`
+- URL: `https://mcp.bugasura.io/mcp`
 
 </details>
 
@@ -55,7 +69,10 @@ Add to your VS Code MCP config:
   "servers": {
     "bugasura": {
       "type": "https",
-      "url": "https://mcp.bugasura.io/sse"
+      "url": "https://mcp.bugasura.io/mcp",
+      "headers": {
+        "X-Bugasura-API-Key": "your_api_key_here"
+      }
     }
   }
 }
@@ -69,7 +86,7 @@ Add to your VS Code MCP config:
 <summary><b>Claude Code</b></summary>
 
 ```bash
-claude mcp add --transport http bugasura https://mcp.bugasura.io/sse
+claude mcp add --transport http bugasura https://mcp.bugasura.io/mcp --header "X-Bugasura-API-Key: your_api_key_here"
 ```
 
 [Claude Code MCP Documentation](https://docs.anthropic.com/en/docs/claude-code/mcp)
@@ -85,8 +102,11 @@ Add to `~/.cursor/mcp.json`:
 {
   "mcpServers": {
     "bugasura": {
-      "url": "https://mcp.bugasura.io/sse",
-      "type": "https"
+      "url": "https://mcp.bugasura.io/mcp",
+      "type": "https",
+      "headers": {
+        "X-Bugasura-API-Key": "your_api_key_here"
+      }
     }
   }
 }
@@ -103,7 +123,10 @@ Add to your Windsurf MCP config:
 {
   "mcpServers": {
     "bugasura": {
-      "serverUrl": "https://mcp.bugasura.io/sse"
+      "serverUrl": "https://mcp.bugasura.io/mcp",
+      "headers": {
+        "X-Bugasura-API-Key": "your_api_key_here"
+      }
     }
   }
 }
@@ -125,8 +148,11 @@ Add to your Windsurf MCP config:
 {
   "mcpServers": {
     "bugasura": {
-      "url": "https://mcp.bugasura.io/sse",
-      "type": "streamableHttp"
+      "url": "https://mcp.bugasura.io/mcp",
+      "type": "streamableHttp",
+      "headers": {
+        "X-Bugasura-API-Key": "your_api_key_here"
+      }
     }
   }
 }
@@ -142,7 +168,10 @@ Add to your Windsurf MCP config:
   "mcpServers": {
     "bugasura": {
       "type": "streamable-http",
-      "url": "https://mcp.bugasura.io/sse"
+      "url": "https://mcp.bugasura.io/mcp",
+      "headers": {
+        "X-Bugasura-API-Key": "your_api_key_here"
+      }
     }
   }
 }
@@ -540,24 +569,24 @@ Show all projects in team 456
 <details>
 <summary><b>Context & Discovery</b></summary>
 
-- `get_user_context` - Get all teams and projects in one call
-- `find_team_by_name` - Search teams by name
-- `find_project_by_name` - Search projects across all teams
-- `list_teams` - List all teams you belong to
-- `get_team` - Get detailed team information including settings and subscription details (supports team_id or team_name)
-- `create_team` - Create a new team (creator becomes owner/admin)
-- `update_team` - Update team name (admin-only, supports team_id or team_name)
-- `delete_team` - Delete team permanently (admin-only, DESTRUCTIVE, supports team_id or team_name)
-- `list_team_members` - List team members with IDs, names, emails, and roles
-- `list_projects` - List projects for a specific team
-- `get_project_details` - Get detailed project information
-- `create_project` - Create a new project (supports interactive team selection) *(NEW)*
-- `update_project` - Update project name, prefix, and settings (supports project_id or project_name, admin privileges may be required) *(NEW)*
-- `delete_project` - Delete project permanently (supports project_id or project_name, admin-only, DESTRUCTIVE) *(NEW)*
+- `bugasura_get_user_context` - Get all teams and projects in one call
+- `bugasura_find_team_by_name` - Search teams by name
+- `bugasura_find_project_by_name` - Search projects across all teams
+- `bugasura_list_teams` - List all teams you belong to
+- `bugasura_get_team` - Get detailed team information including settings and subscription details (supports team_id or team_name)
+- `bugasura_create_team` - Create a new team (creator becomes owner/admin)
+- `bugasura_update_team` - Update team name (admin-only, supports team_id or team_name)
+- `bugasura_delete_team` - Delete team permanently (admin-only, DESTRUCTIVE, supports team_id or team_name)
+- `bugasura_list_team_members` - List team members with IDs, names, emails, and roles
+- `bugasura_list_projects` - List projects for a specific team
+- `bugasura_get_project_details` - Get detailed project information
+- `bugasura_create_project` - Create a new project (supports interactive team selection) *(NEW)*
+- `bugasura_update_project` - Update project name, prefix, and settings (supports project_id or project_name, admin privileges may be required) *(NEW)*
+- `bugasura_delete_project` - Delete project permanently (supports project_id or project_name, admin-only, DESTRUCTIVE) *(NEW)*
 
-**Smart Team Resolution**: The `get_team`, `update_team`, and `delete_team` tools support both `team_id` (numeric ID) and `team_name` (text name with partial matching). Use whichever is more convenient.
+**Smart Team Resolution**: The `bugasura_get_team`, `bugasura_update_team`, and `bugasura_delete_team` tools support both `team_id` (numeric ID) and `team_name` (text name with partial matching). Use whichever is more convenient.
 
-**Smart Project Resolution**: The `update_project` and `delete_project` tools support both `project_id` (numeric ID) and `project_name` (text name with partial matching) for flexible identification. *(NEW)*
+**Smart Project Resolution**: The `bugasura_update_project` and `bugasura_delete_project` tools support both `project_id` (numeric ID) and `project_name` (text name with partial matching) for flexible identification. *(NEW)*
 
 **Note:** Team deletion is permanent and removes all associated projects, sprints, issues, test cases, and requirements. Project deletion is also permanent and removes all associated sprints, issues, and test cases. Use with extreme caution!
 
@@ -566,13 +595,13 @@ Show all projects in team 456
 <details>
 <summary><b>Team Member Management</b></summary>
 
-- `add_team_members` - Invite users to a team by email addresses (supports team_id or team_name)
-- `update_team_member` - Change team member role (admin/member) (supports team_id or team_name)
-- `delete_team_user` - Remove a user from team (supports team_id or team_name, auto-resolves user by ID/email/name)
+- `bugasura_add_team_members` - Invite users to a team by email addresses (supports team_id or team_name)
+- `bugasura_update_team_member` - Change team member role (admin/member) (supports team_id or team_name)
+- `bugasura_delete_team_user` - Remove a user from team (supports team_id or team_name, auto-resolves user by ID/email/name)
 
 **Smart Team Resolution**: All team member tools support both `team_id` (numeric ID) and `team_name` (text name with partial matching). Use whichever is more convenient.
 
-**Smart User Resolution**: The `delete_team_user` tool can identify users by:
+**Smart User Resolution**: The `bugasura_delete_team_user` tool can identify users by:
 - User IDs (e.g., "123")
 - Email addresses (e.g., "john@example.com")
 - Names or partial names (e.g., "John", "John Doe")
@@ -584,11 +613,11 @@ Show all projects in team 456
 <details>
 <summary><b>Sprint Management</b></summary>
 
-- `list_sprints` - List all sprints for a project
-- `get_sprint_details` - Get sprint info and statistics
-- `create_sprint` - Create a new sprint
-- `update_sprint` - Update sprint details (partial updates supported)
-- `delete_sprint` - Delete a sprint permanently (supports ID or name)
+- `bugasura_list_sprints` - List all sprints for a project
+- `bugasura_get_sprint_details` - Get sprint info and statistics
+- `bugasura_create_sprint` - Create a new sprint
+- `bugasura_update_sprint` - Update sprint details (partial updates supported)
+- `bugasura_delete_sprint` - Delete a sprint permanently (supports ID or name)
 
 **Note:** All sprint tools support interactive context selection. Delete operations can be performed using either numeric IDs or names.
 
@@ -597,14 +626,14 @@ Show all projects in team 456
 <details>
 <summary><b>Issue Management</b></summary>
 
-- `list_issues` - List issues with optional sprint filter
-- `get_issue` - Get detailed issue information
-- `create_issue` - Create a new bug/issue
-- `update_issue` - Update issue details (partial updates supported)
-- `delete_issue` - Delete an issue permanently (supports ID, issue key like "ISS09", or summary/title)
-- `get_issue_assignees` - Get list of assignees for an issue with names, emails, and profile images
-- `add_issue_assignees` - Add assignees by name, email, or ID
-- `remove_issue_assignees` - Remove assignees by name, email, or ID
+- `bugasura_list_issues` - List issues with optional sprint filter
+- `bugasura_get_issue` - Get detailed issue information
+- `bugasura_create_issue` - Create a new bug/issue
+- `bugasura_update_issue` - Update issue details (partial updates supported)
+- `bugasura_delete_issue` - Delete an issue permanently (supports ID, issue key like "ISS09", or summary/title)
+- `bugasura_get_issue_assignees` - Get list of assignees for an issue with names, emails, and profile images
+- `bugasura_add_issue_assignees` - Add assignees by name, email, or ID
+- `bugasura_remove_issue_assignees` - Remove assignees by name, email, or ID
 
 **Note:** All issue tools support interactive context selection. Delete operations can be performed using numeric IDs, issue keys (e.g., "ISS09"), or issue summaries.
 
@@ -613,11 +642,11 @@ Show all projects in team 456
 <details>
 <summary><b>Issue Comments</b></summary>
 
-- `list_issue_comments` - List comments for an issue with pagination and filtering (supports creator_id filter, exclude system comments)
-- `get_issue_comment` - Get single comment details with full content and metadata
-- `add_issue_comment` - Create a new comment on an issue (supports public/private visibility, HTML formatting)
-- `update_issue_comment` - Update existing comment text (author-only, supports interactive comment selection)
-- `delete_issue_comment` - Delete comment permanently (author or admin, supports interactive comment selection)
+- `bugasura_list_issue_comments` - List comments for an issue with pagination and filtering (supports creator_id filter, exclude system comments)
+- `bugasura_get_issue_comment` - Get single comment details with full content and metadata
+- `bugasura_add_issue_comment` - Create a new comment on an issue (supports public/private visibility, HTML formatting)
+- `bugasura_update_issue_comment` - Update existing comment text (author-only, supports interactive comment selection)
+- `bugasura_delete_issue_comment` - Delete comment permanently (author or admin, supports interactive comment selection)
 
 **Key Features:**
 - **Pagination**: List comments with `start_at` and `max_results` parameters (default: 10 results, max: 100)
@@ -634,11 +663,11 @@ Show all projects in team 456
 <details>
 <summary><b>Test Case Management</b></summary>
 
-- `list_test_cases` - List test cases for a project
-- `get_test_case` - Get detailed test case information
-- `create_test_case` - Create a new test case
-- `update_test_case` - Update test case (partial updates supported, assignees by name/email/ID)
-- `delete_test_case` - Delete a test case permanently (supports ID, test case key like "TES5", or scenario name)
+- `bugasura_list_test_cases` - List test cases for a project
+- `bugasura_get_test_case` - Get detailed test case information
+- `bugasura_create_test_case` - Create a new test case
+- `bugasura_update_test_case` - Update test case (partial updates supported, assignees by name/email/ID)
+- `bugasura_delete_test_case` - Delete a test case permanently (supports ID, test case key like "TES5", or scenario name)
 
 **Note:** All test case tools support interactive context selection. Delete operations can be performed using numeric IDs, test case keys (e.g., "TES5"), or scenario names.
 
@@ -647,11 +676,11 @@ Show all projects in team 456
 <details>
 <summary><b>Test Case Comments</b></summary>
 
-- `list_testcase_comments` - List comments for a test case with pagination and filtering (supports creator_id filter, exclude system comments)
-- `get_testcase_comment` - Get single test case comment details with full content and metadata
-- `add_testcase_comment` - Create a new comment on a test case (supports public/private visibility, HTML formatting)
-- `update_testcase_comment` - Update existing test case comment text (author-only, supports interactive comment selection)
-- `delete_testcase_comment` - Delete test case comment permanently (author or admin, supports interactive comment selection)
+- `bugasura_list_testcase_comments` - List comments for a test case with pagination and filtering (supports creator_id filter, exclude system comments)
+- `bugasura_get_testcase_comment` - Get single test case comment details with full content and metadata
+- `bugasura_add_testcase_comment` - Create a new comment on a test case (supports public/private visibility, HTML formatting)
+- `bugasura_update_testcase_comment` - Update existing test case comment text (author-only, supports interactive comment selection)
+- `bugasura_delete_testcase_comment` - Delete test case comment permanently (author or admin, supports interactive comment selection)
 
 **Key Features:**
 - **Pagination**: List comments with `start_at` and `max_results` parameters (default: 10 results, max: 100)
@@ -668,14 +697,14 @@ Show all projects in team 456
 <details>
 <summary><b>Requirements Management</b></summary>
 
-- `list_requirements` - List all requirements for a project or sprint
-- `get_requirement_details` - Get detailed requirement information including parent/child hierarchy
-- `create_requirement` - Create a new requirement with interactive folder selection
-- `update_requirement` - Update requirement details (partial updates supported, preserves all fields)
-- `delete_requirement` - Delete a requirement permanently
-- `link_unlink_requirement_testcases` - Link or unlink test cases to/from a requirement
-- `create_requirement_folder` - Create a folder for organizing requirements
-- `list_requirement_folders` - List all folders in a project
+- `bugasura_list_requirements` - List all requirements for a project or sprint
+- `bugasura_get_requirement_details` - Get detailed requirement information including parent/child hierarchy
+- `bugasura_create_requirement` - Create a new requirement with interactive folder selection
+- `bugasura_update_requirement` - Update requirement details (partial updates supported, preserves all fields)
+- `bugasura_delete_requirement` - Delete a requirement permanently
+- `bugasura_link_unlink_requirement_testcases` - Link or unlink test cases to/from a requirement
+- `bugasura_create_requirement_folder` - Create a folder for organizing requirements
+- `bugasura_list_requirement_folders` - List all folders in a project
 
 **Key Features:**
 - **Folder Organization**: Requirements must be organized in folders. Interactive folder selection helps you choose or create folders during requirement creation.
@@ -774,17 +803,72 @@ List comments by a specific user on issue 456 (using creator_id filter)
 
 Bugasura MCP supports two transport modes:
 
-**STDIO** (Default) - For local MCP clients
+**STDIO** (default) — local MCP clients (subprocess over stdin/stdout)
 ```bash
 python server.py --transport stdio
 ```
 
-**SSE** (Server-Sent Events) - For remote deployment
+**Streamable HTTP** (recommended for remote deployment) — mounted at `/mcp`
 ```bash
-python server.py --transport sse
+python server.py --transport streamable-http --port 8000
 ```
 
-The hosted version at `https://mcp.bugasura.io/sse` uses SSE transport.
+The hosted version at `https://mcp.bugasura.io/mcp` uses streamable HTTP.
+
+---
+
+## Local Development — Sample Client Configs
+
+Use these when you're hacking on the server itself and want your AI client to launch your local checkout as a stdio subprocess instead of hitting the hosted `/mcp` endpoint.
+
+> **Replace `/Applications/MAMP/htdocs/Bugasura-MCP/` with the absolute path of your own clone, and `your_api_key_here` with your Bugasura API key (Settings → API Key).** Never commit a real key.
+
+### VS Code (workspace `.vscode/settings.json`)
+
+```json
+{
+  "settings": {
+    "mcp": {
+      "inputs": [],
+      "servers": {
+        "bugasura-local-mcp": {
+          "type": "stdio",
+          "command": "/Applications/MAMP/htdocs/Bugasura-MCP/.venv/bin/python3",
+          "args": [
+            "/Applications/MAMP/htdocs/Bugasura-MCP/server.py"
+          ],
+          "env": {
+            "BUGASURA_API_KEY": "your_api_key_here"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Claude Desktop (`claude_desktop_config.json`)
+
+macOS path: `~/Library/Application Support/Claude/claude_desktop_config.json`
+Windows path: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "bugasura": {
+      "command": "/Applications/MAMP/htdocs/Bugasura-MCP/.venv/bin/python",
+      "args": [
+        "/Applications/MAMP/htdocs/Bugasura-MCP/server.py"
+      ],
+      "env": {
+        "BUGASURA_API_KEY": "your_api_key_here"
+      }
+    }
+  }
+}
+```
+
+After editing the config, restart the client (VS Code window reload / Claude Desktop quit-and-relaunch) so it picks up the new server. The server logs to stderr — tail your client's MCP server logs to confirm `Bugasura MCP Server | API: ... | Transport: stdio` appears on startup.
 
 ---
 
@@ -821,18 +905,17 @@ The MCP Inspector provides a web-based interface to test and debug your MCP serv
 
 **Test Issue Deletion by Key:**
 ```json
-Tool: delete_issue
+Tool: bugasura_delete_issue
 Parameters: {
-  "api_key": "your_api_key",
   "issue_identifier": "ISS09"
 }
 ```
+> Note: `api_key` is optional if `BUGASURA_API_KEY` is set in the environment.
 
 **Test Interactive Sprint Selection:**
 ```json
-Tool: create_issue
+Tool: bugasura_create_issue
 Parameters: {
-  "api_key": "your_api_key",
   "summary": "Test issue"
 }
 // Returns selection prompt for team → project → sprint
@@ -840,9 +923,8 @@ Parameters: {
 
 **Test Team Member Management with Team Name:**
 ```json
-Tool: add_team_members
+Tool: bugasura_add_team_members
 Parameters: {
-  "api_key": "your_api_key",
   "team_name": "Engineering",
   "email_list": "john@example.com, jane@example.com"
 }
@@ -851,9 +933,8 @@ Parameters: {
 
 **Test User Removal with Smart Resolution:**
 ```json
-Tool: delete_team_user
+Tool: bugasura_delete_team_user
 Parameters: {
-  "api_key": "your_api_key",
   "team_id": 123,
   "user_identifier": "john@example.com"
 }
@@ -869,6 +950,14 @@ For detailed instructions, see [MCP_INSPECTOR_GUIDE.md](./MCP_INSPECTOR_GUIDE.md
 ### API Key
 
 All operations require a Bugasura API key. Get yours from [Bugasura Settings](https://bugasura.io).
+
+**Recommended — configure once in your MCP client** (see setup examples above):
+- **STDIO clients** (Claude Desktop, local Cursor/VS Code STDIO): set `BUGASURA_API_KEY` in the `env` block.
+- **HTTP clients** (hosted `/mcp`, e.g. `mcp.stage.bugasura.io`): set `X-Bugasura-API-Key` in the `headers` block. `Authorization: Basic <key>` is also accepted.
+
+When configured, all tools use the key automatically — no need to provide it on every call. If neither source is configured, the first tool call returns `status: 'api_key_required'` and the assistant will ask you for one.
+
+You can also pass `api_key` explicitly as a tool parameter, which takes precedence over both env and header.
 
 **IMPORTANT:** Do not use placeholders like `$BUGASURA_API_KEY`. The server detects and rejects placeholder values.
 
@@ -896,16 +985,17 @@ Team member management tools support flexible team identification:
 - **Team Names**: `team_name="Acme Corp"` (partial match, case-insensitive)
 
 You can use either parameter for:
-- `add_team_members` - Invite users to a team
-- `update_team_member` - Change member roles
-- `delete_team_user` - Remove team members
+- `bugasura_add_team_members` - Invite users to a team
+- `bugasura_update_team_member` - Change member roles
+- `bugasura_delete_team_user` - Remove team members
 
 **Examples:**
 ```
-add_team_members(api_key, team_name="Engineering", email_list="john@example.com")
-update_team_member(api_key, team_id=123, user_id=456, is_admin=1)
-delete_team_user(api_key, team_name="Sales", user_identifier="john@example.com")
+add_team_members(team_name="Engineering", email_list="john@example.com")
+update_team_member(team_id=123, user_id=456, is_admin=1)
+delete_team_user(team_name="Sales", user_identifier="john@example.com")
 ```
+> Note: `api_key` can be omitted when `BUGASURA_API_KEY` is configured in the environment.
 
 ### Data Requirements
 

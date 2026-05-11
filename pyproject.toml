@@ -1,14 +1,28 @@
+# This project is run in place via `python server.py` — it is not built or
+# distributed as a pip package. The [project] section below is kept for
+# dependency metadata only (install with `pip install -r requirements.txt`).
+# Setuptools is explicitly told there are no packages or modules to install.
+
 [project]
 name = "bugasura-mcp-server"
-version = "1.0.0"
-description = "MCP server for Bugasura/Appachhi API"
+version = "2.0.0"
+description = "MCP server for Bugasura API (run in place, not installable)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.0.0",
+    "fastmcp>=2.14.0,<3.0.0",
+    "httpx>=0.27.0,<1.0.0",
     "requests>=2.31.0",
     "python-dotenv>=1.0.0",
+    "pyjwt>=2.8.0",
+    "uvicorn>=0.30.0",
+    "starlette>=0.38.0",
 ]
+
+[tool.setuptools]
+# Flat layout: no package to discover and install.
+py-modules = []
+packages = []
 
 [dependency-groups]
 dev = []
