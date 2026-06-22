@@ -30,6 +30,8 @@ If you're upgrading from 1.x, update your client configuration:
 - 💬 **Issue Comments** - Add, update, delete, and list comments on issues with pagination and filtering
 - 📝 **Requirements Management** - Create, organize, and manage product requirements with folder structure
 - 🏃 **Sprint Planning** - Create, update, delete, and manage agile sprints
+- 🏁 **Test Runs** - Create one-time or scheduled (recurring) runs, edit/rerun/delete them, pick environments and app builds, and add test cases — all by name or ID
+- 🤖 **Testpert Sprints** - Full AI-driven test enrichment flow: upload specs, answer requirement questions, edit the test plan, and generate test cases automatically
 - 👥 **Team Collaboration** - Assign work using names or emails (auto-resolves to user IDs)
 - 👤 **Team Member Management** - Add, update roles, and remove team members using team names or IDs
 - 🔍 **Smart Discovery** - Find projects and teams without memorizing IDs
@@ -466,6 +468,82 @@ Delete sprint 321
 Delete sprint named "Sprint 15"
 ```
 
+### 🏁 Test Runs
+
+```
+List the test runs for the "Login Sprint"
+```
+
+```
+Show me the environments and app builds for this project
+```
+
+```
+Create a test run called "Smoke run" for the "Login Sprint" using the "Staging" environment
+```
+
+```
+Schedule a daily run "Nightly" for the "Login Sprint" at 09:00, ending after 10 runs
+```
+
+```
+Schedule a run every 2 weeks on Monday and Friday at 09:00
+```
+
+```
+Add test cases 12, 15, 18 to the "Smoke run" run
+```
+
+```
+Rename the "Smoke run" run and mark it COMPLETED
+```
+
+```
+Pause the "Nightly" scheduler
+```
+
+```
+Rerun the "Nightly" scheduler
+```
+
+```
+Delete the "Smoke run" run
+```
+
+**Note:** Reports/suites, environments, app builds, runs, and schedulers can all be referenced by **name or numeric ID** — names are resolved automatically (with a helpful prompt if a name is ambiguous).
+
+### 🤖 Testpert Sprints
+
+TestPert is a paid, project-level feature that uses AI to generate a full test plan and test cases from your requirement documents.
+
+**Normal flow** (with document upload):
+```
+Create a TestPert sprint called "Login Feature Sprint"
+```
+```
+Upload /path/to/login-spec.pdf to the knowledge base
+```
+```
+Start the analysis and answer the requirement questions
+```
+```
+Review the test plan focus areas and feature tree
+```
+```
+Generate test cases for the sprint
+```
+
+**Skip-enrich flow** (driven from existing requirements):
+```
+Create a TestPert sprint with skip_enrich_requirements=true
+```
+```
+Link requirement IDs 101 and 102 to the sprint
+```
+```
+Build the test plan from those requirements
+```
+
 ### 📋 Projects
 
 ```
@@ -674,6 +752,41 @@ Show all projects in team 456
 </details>
 
 <details>
+<summary><b>Test Run Management</b></summary>
+
+- `bugasura_list_test_run_environments` - List test data environments and app builds for a project (use to pick an environment / app build by name)
+- `bugasura_list_test_runs` - List test run executions and schedulers for a test suite (report)
+- `bugasura_get_test_run_details` - Get details for a single test run execution
+- `bugasura_create_test_run` - Create a run — one-time or scheduled (recurring) with friendly recurrence options, environment, app build, and seeded test cases
+- `bugasura_update_test_run` - Update a single execution run (name, status, environment, app build)
+- `bugasura_update_test_run_scheduler` - Edit a run/scheduler (rename, environment/build, switch single↔scheduled, change frequency/recurrence, pause/resume)
+- `bugasura_rerun_test_run` - Trigger a fresh execution from an existing scheduler
+- `bugasura_add_test_cases_to_run` - Add (copy) test cases into an existing run
+- `bugasura_delete_test_run` - Delete one or more execution runs (soft by default, permanent with `is_permanent_delete=1`)
+- `bugasura_delete_test_run_scheduler` - Delete one or more schedulers (soft by default, permanent with `is_permanent_delete=1`)
+
+**Note:** All test run tools support interactive context selection. Reports/suites, environments, app builds, runs, and schedulers can be referenced by **name or numeric ID** (names resolved automatically, with disambiguation when needed). Recurrence is set with friendly options (`frequency`, `repeat_value`/`repeat_unit`, `selected_days`, `recurrence_type`) rather than raw JSON.
+
+**API endpoints used:**
+
+| Tool | Method & endpoint | What it does |
+|------|-------------------|--------------|
+| `bugasura_list_test_run_environments` | `GET /v1/projectTestDataEnvironments/get` | Lists environments and app builds for picking by name. |
+| `bugasura_list_test_runs` | `GET /v1/testrunsExecution/getList` | Lists run executions and schedulers for a suite. |
+| `bugasura_get_test_run_details` | `GET /v1/testrunsExecution/getList` | Fetches one run (filtered by run id). |
+| `bugasura_create_test_run` | `POST /v1/testrunsExecution/add` | Creates a single or scheduled run. |
+| `bugasura_update_test_run` | `POST /v1/testrunsExecution/testruns/update` | Updates a single execution run. |
+| `bugasura_update_test_run_scheduler` | `POST /v1/testrunsExecution/scheduler/update` | Edits a run/scheduler (the UI edit-run modal). |
+| `bugasura_rerun_test_run` | `POST /v1/testrunsExecution/rerun` | Reruns from an existing scheduler. |
+| `bugasura_add_test_cases_to_run` | `POST /v1/testrunsExecution/copy` | Adds test cases into a run. |
+| `bugasura_delete_test_run` | `POST /v1/testrunsExecution/deleteTestRunsExecution` | Deletes execution run(s). |
+| `bugasura_delete_test_run_scheduler` | `POST /v1/testrunsExecution/deleteScheduler` | Deletes scheduler(s). |
+
+Names are resolved via `bugasura_list_sprints` (report ↔ sprint), `bugasura_list_test_run_environments` (environment / app build), and `/v1/testrunsExecution/getList` (run / scheduler).
+
+</details>
+
+<details>
 <summary><b>Test Case Comments</b></summary>
 
 - `bugasura_list_testcase_comments` - List comments for a test case with pagination and filtering (supports creator_id filter, exclude system comments)
@@ -714,6 +827,55 @@ Show all projects in team 456
 - **Test Case Linking**: Link requirements to test cases for traceability.
 
 **Note:** All requirement tools support interactive context selection. The `folder_id` field is required for all requirement operations and will be auto-fetched or interactively selected.
+
+</details>
+
+<details>
+<summary><b>Testpert Sprint Generation</b></summary>
+
+TestPert is a paid, project-level AI feature (`is_testpert_enabled` on the project). It generates a full test plan and test cases from your requirement documents or existing requirements.
+
+**Sprint creation**
+- `bugasura_create_testpert_sprint` - Create a TestPert sprint (confirms options before creating; set `confirm_options=True` to proceed)
+
+**Normal flow** — upload documents → answer questions → edit plan → generate
+- `bugasura_testpert_upload_kb` - Upload requirement docs/images to the sprint knowledge base (`.txt`, `.pdf`, `.docx`, `.md`, `.json`, `.png`, `.jpg`, etc.)
+- `bugasura_testpert_list_kb` - List documents currently in the knowledge base
+- `bugasura_testpert_delete_kb` - Remove a document from the knowledge base
+- `bugasura_testpert_generate_sprint_context` - Start requirement analysis (KB → deepen questions)
+- `bugasura_testpert_answer_context_questions` - Submit answers to the AI's deepen-requirement questions
+- `bugasura_testpert_get_requirements` - Fetch deepen questions, missing requirements, and risks for user review
+- `bugasura_testpert_update_requirements` - Write approve/reject/edit decisions back for missing requirements and risks
+- `bugasura_testpert_get_testplan` - Fetch the generated test plan (focus areas + feature/sub-feature tree)
+- `bugasura_testpert_update_testplan` - Edit focus-area levels and the feature tree
+- `bugasura_testpert_get_features` - List the live feature/sub-feature tree
+- `bugasura_testpert_add_feature` - Add a feature or sub-feature
+- `bugasura_testpert_delete_feature` - Delete a feature or sub-feature
+- `bugasura_testpert_enrich_requirements` - Run the requirements-enrichment phase explicitly (optional — `generate_coverage` runs it automatically)
+- `bugasura_testpert_generate_coverage` - Move the sprint to test coverage (runs enrichment first if needed)
+- `bugasura_testpert_get_coverage` - Fetch the coverage mind map
+- `bugasura_testpert_generate_testcases` - Generate test cases (polls to completion; re-callable)
+
+**Skip-enrich flow** — use existing project requirements instead of documents
+- `bugasura_testpert_link_requirements` - Link existing project requirements to the sprint as its source
+- `bugasura_testpert_start_skip_testplan` - Build the test plan directly from the sprint's linked requirements
+
+**Low-level status driver** (advanced)
+- `bugasura_testpert_advance` - Set a specific status and/or poll until a target status — use this when you need direct control over the pipeline
+
+**Flow overview:**
+```
+Normal:  create → upload_kb → generate_sprint_context → answer_context_questions
+         → (missing reqs) → (risks) → get_testplan → enrich → generate_coverage → generate_testcases
+
+Skip:    create (skip_enrich=true) → link_requirements → start_skip_testplan
+         → get_testplan → generate_coverage → generate_testcases
+```
+
+**Notes:**
+- The project must have TestPert enabled (`is_testpert_enabled`). Use `bugasura_create_sprint` for standard sprints.
+- Polling tools (`generate_sprint_context`, `start_skip_testplan`, `enrich_requirements`, `generate_coverage`, `generate_testcases`) are time-bounded per call and re-callable — if the AI phase is still running, call the same tool again to keep checking.
+- A team-admin API key is required for status transitions and test-plan updates.
 
 </details>
 
@@ -1101,6 +1263,36 @@ delete_team_user(team_name="Sales", user_identifier="john@example.com")
 
 "Update requirement 2036 to change severity to HIGH and assign to john@example.com"
 → Updates requirement fields while preserving all other data
+```
+
+### Testpert Sprint Generation
+
+```
+"Create a TestPert sprint called 'Checkout Flow Sprint'"
+→ Confirms options (testing type, depth, skip enrich), then creates the sprint
+
+"Upload /docs/checkout-spec.pdf and /docs/api-contract.md to the knowledge base"
+→ Uploads both files, moves sprint to KNOWLEDGE_BASE stage
+
+"Start the analysis"
+→ Kicks off requirement analysis, then automatically shows the AI's contextual questions
+
+"Answer: Q1: Users must be able to pay by card or wallet. Q2: Guest checkout is required."
+→ Saves answers and advances to the missing requirements stage
+
+"Approve all missing requirements and proceed"
+→ Approves rows, advances through risks to the test plan
+
+"Set Authentication focus to EXHAUSTIVE and Performance to MINIMAL"
+→ Edits focus-area levels in the test plan
+
+"Generate the test cases"
+→ Runs enrichment + coverage + test case generation; returns sprint link when done
+```
+
+```
+"Create a TestPert sprint with skip enrich, link requirements 101 and 102, then build the test plan"
+→ Creates sprint (skip_enrich=true), links requirements, starts test plan generation
 ```
 
 ### Team Member Management

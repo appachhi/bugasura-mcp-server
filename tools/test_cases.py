@@ -23,61 +23,138 @@ import requests  # for except blocks referencing requests.RequestException
 
 @mcp.tool(
     name = "bugasura_list_test_cases",
-    description = "List test cases for a project with pagination. Returns test case summaries. Interactive team/project selection available.",
+    description = (
+        "List test cases for a project with pagination. When sprint_id is provided, returns full test "
+        "case details for that sprint (grouped by sub-feature): scenario, steps, severity, priority, "
+        "conditions, test data, and execution status. "
+        "Add test_run_execution_run_id to scope to a specific run — at run level, pass_count and "
+        "fail_count per test case are also included (scoped to that run only). "
+        "Without sprint_id, returns all project-level test cases as brief summaries. "
+        "IMPORTANT: always display scenario text exactly as returned — never shorten, rephrase, or summarize it. "
+        "Show test_case_number (e.g. TES123, formed from project prefix + id) as the test case identifier, not the raw numeric test_case_id. "
+        "Interactive team/project selection available."
+    ),
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_cases(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id). When provided, returns full test case details for that sprint, grouped by sub-feature."),
+    test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID (testRunsExecutionRunId). When provided alongside sprint_id, filters test cases to that specific run. Obtain from bugasura_list_test_runs."),
+    sub_feature_name: Optional[str] = Field(default=None, description="Filter sprint test cases by sub-feature name (case-insensitive substring). Only used with sprint_id."),
     start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)"),
-    max_results: int = Field(default=10, description="Number of results to return (default: 10, ge=1, le=100)"),
+    max_results: int = Field(default=20, description="Number of results to return (default: 20, ge=1, le=100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
     api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment."),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
+    """List test cases. With sprint_id: fetches via /testpert/sprintTestCase/get (full details,
+    grouped by sub-feature, includes pass_count/fail_count).
+    Add test_run_execution_run_id to scope to a specific run within the sprint.
+    Without sprint_id: fetches all project test cases via /v1/testcases/list (summaries).
     """
-    List test cases for a project with pagination.
-
-    Interactive flow: If team_id/project_id are not provided, this function
-    will return available options for the user to select from.
-
-    Args:
-        api_key: User's Bugasura API key (required)
-        team_id: Team identifier (optional - will prompt if not provided)
-        project_id: Project identifier (optional - will prompt if not provided)
-        start_at: Pagination offset (default: 0)
-        max_results: Number of results to return (default: 10, min: 10, max: 100)
-
-    Returns:
-        dict: List of test cases with pagination metadata
-        OR a selection prompt if team_id/project_id not provided
-    """
-    # Validate API key before proceeding
     api_key = _get_api_key(api_key)
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
 
-    # Use centralized context selection helper
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_list_test_cases')
-
-    # If context selection is needed, return the selection prompt
     if 'status' in context and context['status'] == 'selection_required':
         return _respond(context, response_format)
 
-    # All required parameters provided - proceed with listing test cases
-    # NOTE: Test case API endpoints use 'app_id' parameter name (not 'project_id')
-    # This is legacy naming from the database 'apps' table
-    if ctx is not None:
-        await ctx.report_progress(0.5, total=1.0, message=f"Fetching test cases for project {context['project_id']}")
-    response = await make_api_request('GET', '/v1/testcases/list', api_key, params={
-        'team_id': context['team_id'],
-        'app_id': context['project_id'],  # API expects 'app_id' (project_id mapped here)
-        'start_at': start_at,
-        'max_results': max_results
-    })
+    tid, pid = context['team_id'], context['project_id']
 
-    # Filter out large unnecessary fields to reduce payload size, then wrap in envelope
+    # --- Sprint-scoped path: full details via testpert endpoint ---
+    if sprint_id:
+        if ctx is not None:
+            await ctx.report_progress(0.3, total=1.0, message=f"Fetching sprint {sprint_id} test cases")
+        params = {'teamId': tid, 'appId': pid, 'sprintId': sprint_id}
+        if test_run_execution_run_id:
+            params['testRunsExecutionRunId'] = test_run_execution_run_id
+        resp = await make_api_request('GET', '/testpert/sprintTestCase/get', api_key, params=params)
+        if not (isinstance(resp, dict) and resp.get('status') == 'OK'):
+            return _respond({
+                'status': 'failed',
+                'error': 'Could not fetch sprint test cases',
+                'message': (resp.get('message') if isinstance(resp, dict) else None)
+                           or 'Failed to fetch test cases. Ensure the sprint has reached TEST_CASES.',
+            }, response_format)
+
+        all_cases = resp.get('testCaseDetails') or []
+
+        # Optional sub-feature filter.
+        if sub_feature_name:
+            needle = sub_feature_name.lower()
+            all_cases = [
+                tc for tc in all_cases
+                if needle in str(tc.get('sub_feature_name') or '').lower()
+                or needle in str(tc.get('feature_name') or '').lower()
+            ]
+
+        total = len(all_cases)
+        page = all_cases[start_at: start_at + max_results]
+
+        # Group by sub_feature_name (fall back to feature_name).
+        groups: dict = {}
+        for tc in page:
+            group_key = str(tc.get('sub_feature_name') or tc.get('feature_name') or 'Uncategorised')
+            if group_key not in groups:
+                groups[group_key] = []
+            steps_raw = tc.get('test_steps') or []
+            if isinstance(steps_raw, str):
+                try:
+                    steps_raw = json.loads(steps_raw)
+                except Exception:
+                    steps_raw = [{'action': steps_raw}]
+            entry = {
+                'test_case_number': tc.get('test_case_number'),
+                'test_case_id': tc.get('test_case_id'),
+                'scenario': tc.get('scenario'),
+                'severity': tc.get('severity'),
+                'priority': tc.get('priority'),
+                'testing_type': tc.get('testing_type'),
+                'platform': tc.get('platform_type'),
+                'test_conditions': tc.get('test_conditions') or '',
+                'test_idea': tc.get('test_idea') or '',
+                'test_data': tc.get('test_data') or '',
+                'steps': [s.get('action') for s in steps_raw if isinstance(s, dict) and s.get('action')],
+                'acceptance_criteria': tc.get('acceptance_criteria') or '',
+                'execution_status': tc.get('execution_status') or '',
+            }
+            # pass/fail counts are only scoped correctly at run level; at sprint level the
+            # backend join has no execution_run_id filter and aggregates across all runs.
+            if test_run_execution_run_id:
+                entry['pass_count'] = tc.get('total_pass_count') or 0
+                entry['fail_count'] = tc.get('total_fail_count') or 0
+            groups[group_key].append(entry)
+
+        result = {
+            'status': 'OK',
+            'sprint_id': sprint_id,
+            'total': total,
+            'offset': start_at,
+            'returned': len(page),
+            'by_sub_feature': groups,
+        }
+        if test_run_execution_run_id:
+            result['test_run_execution_run_id'] = test_run_execution_run_id
+        if total > start_at + max_results:
+            result['next_offset'] = start_at + max_results
+            result['message'] = (f"Showing {start_at + 1}–{start_at + len(page)} of {total}. "
+                                 f"Call again with start_at={start_at + max_results} for the next page.")
+        else:
+            result['message'] = f"Showing all {len(page)} of {total} test cases for sprint {sprint_id}."
+        return _respond(result, response_format)
+
+    # --- Project-wide path: all test cases (summaries, server-side pagination) ---
+    if ctx is not None:
+        await ctx.report_progress(0.5, total=1.0, message=f"Fetching test cases for project {pid}")
+    response = await make_api_request('GET', '/v1/testcases/list', api_key, params={
+        'team_id': tid,
+        'app_id': pid,
+        'start_at': start_at,
+        'max_results': max_results,
+    })
     response = filter_large_fields(response)
     return _respond(_paginate_upstream(response, offset=start_at), response_format)
 
@@ -308,7 +385,7 @@ async def get_test_case(
 
 @mcp.tool(
     name = "bugasura_update_test_case",
-    description = "Update test case details (partial updates supported). Can update any field including scenario, feature tags, testing type, severity, priority, conditions, assignees, status, and sprint associations. Interactive selection available.",
+    description = "Update test case details (partial updates supported). Can update any field including scenario, feature tags, testing type, severity, priority, conditions, assignees, status, and sprint associations. To assign a sprint-level test case to an agent for automated execution, set assign_to_agent=True along with sprint_id — functional test cases are routed to the Browser Agent, API test cases to the Testpert Agent (the backend decides based on is_api_test_case). Interactive selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_test_case(
@@ -330,6 +407,9 @@ async def update_test_case(
     assignees: Optional[str] = Field(default=None, description="New assignees, comma-separated names/emails/IDs (optional)"),
     folder_id: Optional[int] = Field(default=None, description="New folder ID for organization (optional, ge=1)"),
     sprint_ids: Optional[str] = Field(default=None, description="New sprint associations, comma-separated sprint IDs (optional)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (report_id) for sprint-level operations such as agent assignment (optional, ge=1)"),
+    test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID (testRunsExecutionRunId). When provided with assign_to_agent=True, scopes the agent assignment to that specific test run execution."),
+    assign_to_agent: bool = Field(default=False, description="When True (and sprint_id is provided), assigns this test case to an agent for automated execution within that sprint. Functional test cases go to the Browser Agent; API test cases go to the API Agent. The project must have the relevant agent enabled."),
     api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
@@ -368,9 +448,12 @@ async def update_test_case(
         assignees: Comma-separated names, emails, or user IDs (optional)
         folder_id: Folder ID for organization (optional)
         sprint_ids: Comma-separated sprint IDs (optional)
+        sprint_id: Sprint identifier for agent assignment context (optional)
+        assign_to_agent: True to assign this sprint test case to an agent (optional)
 
     Returns:
-        dict: API response with update status
+        dict: API response with update status. When assign_to_agent=True, also includes
+              agent_assignment with the result of the agent assignment call.
 
     Examples:
         # Update only the scenario
@@ -387,6 +470,9 @@ async def update_test_case(
 
         # Move to different folder
         update_test_case(api_key, team_id, project_id, testcase_id, folder_id=123)
+
+        # Assign a sprint test case to an agent (functional → Browser Agent, API → Testpert Agent)
+        update_test_case(api_key, team_id, project_id, testcase_id, sprint_id=42, assign_to_agent=True)
     """
     # Validate API key before proceeding
     api_key = _get_api_key(api_key)
@@ -475,14 +561,19 @@ async def update_test_case(
     # - feature_name, sub_feature_name, test_case_scenario, testing_type (mandatory)
     # - severity, priority (backend validation may require these)
 
-    # Start with baseline fields from existing test case
+    # Start with all existing fields so a partial update never clears untouched data.
     tc_details = {
         'feature_name': tc_data.get('feature_name', ''),
         'sub_feature_name': tc_data.get('sub_feature_name', ''),
-        'test_case_scenario': tc_data.get('test_case_scenario', ''),
+        'test_case_scenario': tc_data.get('test_case_scenario') or tc_data.get('scenario', ''),
         'testing_type': tc_data.get('testing_type', ''),
         'severity': tc_data.get('severity', 'MEDIUM'),
-        'priority': tc_data.get('priority', 'P2')
+        'priority': tc_data.get('priority', 'P2'),
+        'test_conditions': tc_data.get('test_conditions') or '',
+        'test_idea': tc_data.get('test_idea') or '',
+        'test_data': tc_data.get('test_data') or '',
+        'acceptance_criteria': tc_data.get('acceptance_criteria') or '',
+        'test_steps': _normalise_steps(tc_data.get('test_steps') or tc_data.get('steps')),
     }
 
     # Override mandatory fields if user provided new values
@@ -551,149 +642,226 @@ async def update_test_case(
 
     # Step 5: Make the update request
     logger.info(f"Sending update request for testcase_id={testcase_id}")
-    return await make_api_request('POST', '/v1/testcases/update', api_key, data=payload)
+    result = await make_api_request('POST', '/v1/testcases/update', api_key, data=payload)
+
+    # Step 6 (optional): Assign to agent within a sprint.
+    # Mirrors the UI's "Assign to Agent" action: calls /testpert/sprintTestCase/update
+    # with isTestAgentEnabled=1.
+    # Routing: functional test cases → Browser Agent; API test cases → Testpert Agent.
+    # The UI hides Browser Agent for API test cases and hides Testpert Agent for functional ones.
+    if assign_to_agent:
+        if not sprint_id:
+            if isinstance(result, dict):
+                result['agent_assignment'] = {
+                    'status': 'failed',
+                    'error': 'sprint_id is required for agent assignment',
+                    'message': 'Provide sprint_id together with assign_to_agent=True.',
+                }
+            return result
+
+        logger.info(f"Assigning testcase_id={testcase_id} to agent in sprint_id={sprint_id}")
+
+        # Fetch test case list to determine is_api_test_case and discover agent user IDs.
+        # The backend requires testCaseAssignees (agent user_id) + isTestCaseAssigneesUpdate=1
+        # alongside isTestAgentEnabled=1, otherwise testpert_executor stays 0.
+        agent_user_id = ''
+        tc_params = {'teamId': str(team_id), 'appId': str(project_id), 'sprintId': str(sprint_id)}
+        if test_run_execution_run_id:
+            tc_params['testRunsExecutionRunId'] = str(test_run_execution_run_id)
+        tc_resp = await make_api_request('GET', '/testpert/sprintTestCase/get', api_key, params=tc_params)
+        if not (isinstance(tc_resp, dict) and tc_resp.get('status') == 'OK'):
+            if isinstance(result, dict):
+                result['agent_assignment'] = {
+                    'status': 'failed',
+                    'error': 'Could not fetch sprint test case data for agent assignment',
+                    'message': 'Testpert may not be enabled for this project, or the sprint_id is invalid.',
+                }
+            return result
+
+        # Determine if this specific test case is an API test case
+        tc_cases = tc_resp.get('testCaseDetails') or []
+        tc_detail = next(
+            (t for t in tc_cases if str(t.get('test_case_id', '')) == str(testcase_id)),
+            None
+        )
+        is_api_tc = bool(tc_detail.get('is_api_test_case')) if tc_detail else False
+
+        # Collect Browser Agent and Testpert Agent user IDs separately
+        browser_agent_id = ''
+        testpert_agent_id = ''
+        for member in (tc_resp.get('teamMembersDetails') or []):
+            member_type = str(member.get('type') or member.get('user_type') or '').upper()
+            if member_type == 'AGENT':
+                if member.get('is_browser_agent_enabled') == 1:
+                    browser_agent_id = str(member.get('user_id', ''))
+                else:
+                    testpert_agent_id = str(member.get('user_id', ''))
+
+        # Route to the correct agent (mirrors UI: API tc → Testpert Agent, functional → Browser Agent)
+        if is_api_tc:
+            agent_user_id = testpert_agent_id or browser_agent_id
+        else:
+            agent_user_id = browser_agent_id or testpert_agent_id
+
+        if not agent_user_id:
+            if isinstance(result, dict):
+                result['agent_assignment'] = {
+                    'status': 'failed',
+                    'error': 'No agent found for this sprint',
+                    'message': 'No Testpert agent is enabled for this project. Enable agents in the project settings before assigning.',
+                }
+            return result
+
+        agent_payload = {
+            'appId': str(project_id),
+            'teamId': str(team_id),
+            'sprintId': str(sprint_id),
+            'testCaseId': str(testcase_id),
+            'executionStatus': 'NEW',
+            'isTestAgentEnabled': '1',
+            'isTestCaseAssigneesUpdate': '1',
+        }
+        if agent_user_id:
+            agent_payload['testCaseAssignees'] = agent_user_id
+        if test_run_execution_run_id:
+            agent_payload['testRunsExecutionRunId'] = str(test_run_execution_run_id)
+        agent_resp = await make_api_request('POST', '/testpert/sprintTestCase/update', api_key, data=agent_payload)
+        if isinstance(result, dict):
+            result['agent_assignment'] = agent_resp
+
+    return result
 
 
 @mcp.tool(
     name = "bugasura_delete_test_case",
-    description = "Delete a test case permanently by numeric ID, test case key (e.g., 'TES5', 'MCP11'), or exact/partial scenario match. Uses 3-step matching: exact key → exact scenario → partial scenario. Interactive selection available.",
-    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
+    description = (
+        "Delete or unlink a test case at three scopes — choose the right one:\n"
+        "• Project-level (default): permanently deletes the test case from the project. WARNING: irreversible.\n"
+        "• Sprint-level (provide sprint_id): unlinks the test case from the sprint only; it stays in the project.\n"
+        "• Run-level (provide sprint_id + test_run_execution_run_id): removes the test case from that specific test run execution only.\n"
+        "Accepts numeric ID, test case key (e.g. 'TES5', 'MCP11'), or exact/partial scenario text. "
+        "Interactive team/project selection available."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
 )
 async def delete_test_case(
     testcase_identifier: str = Field(description="Test case identifier: numeric ID (e.g., '123'), test case key (e.g., 'TES5', 'MCP11'), or scenario text for matching"),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id). When provided, unlinks the test case from the sprint instead of deleting it from the project. Get from bugasura_list_sprints."),
+    test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID. When provided together with sprint_id, removes the test case from that specific run only (not from the sprint). Get from bugasura_list_test_runs."),
     api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
-    Delete a test case from Bugasura by ID, test case key, or scenario name.
-
-    Interactive flow: If team_id/project_id are not provided, this function
-    will guide you through selection.
-
-    WARNING: This action cannot be undone. The test case and all its execution
-    history will be permanently removed.
-
-    Args:
-        api_key: User's Bugasura API key (required)
-        testcase_identifier: Test case ID (numeric), test case key (e.g., "TES5", "MCP11"), or scenario name (string) to delete (required)
-        team_id: Team identifier (optional - will prompt if not provided)
-        project_id: Project identifier (optional - will prompt if not provided)
-
-    Returns:
-        dict: {
-            'status': 'OK',
-            'message': 'Test case deleted successfully'
-        }
-
-    Examples:
-        # Delete a test case by numeric ID
-        delete_test_case(api_key, testcase_identifier="123", team_id=456, project_id=789)
-
-        # Delete a test case by test case key
-        delete_test_case(api_key, testcase_identifier="TES5", team_id=456, project_id=789)
-
-        # Delete a test case by scenario name
-        delete_test_case(api_key, testcase_identifier="Verify login with valid credentials", team_id=456, project_id=789)
-
-        # Delete with interactive context selection
-        delete_test_case(api_key, testcase_identifier="MCP11")
+    Delete or unlink a test case at three scopes:
+    - Project-level (no sprint_id): permanent hard delete from the project.
+    - Sprint-level (sprint_id only): unlinks from sprint (removes from tcTags +
+      testRunTestCasesTable default template row); test case stays in the project.
+    - Run-level (sprint_id + test_run_execution_run_id): removes from that
+      specific execution run's testRunTestCasesTable row only.
     """
-    # Validate API key before proceeding
     api_key = _get_api_key(api_key)
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
 
-    # Use centralized context selection helper
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_delete_test_case', f', testcase_identifier={testcase_identifier}')
-
-    # If context selection is needed, return the selection prompt
     if 'status' in context and context['status'] == 'selection_required':
         return context
 
-    # Extract validated team_id and project_id
     team_id = context['team_id']
     project_id = context['project_id']
 
-    # Resolve testcase_identifier to testcase_id
-    testcase_id = None
-
-    # Check if it's a numeric ID
-    if testcase_identifier.isdigit():
-        testcase_id = int(testcase_identifier)
+    # --- Resolve testcase_identifier to a numeric testcase_id ---
+    testcase_id = int(testcase_identifier) if testcase_identifier.isdigit() else None
+    if testcase_id:
         logger.info(f"delete_test_case: Using numeric testcase_id={testcase_id}")
-    else:
-        # It could be a test case key (e.g., "TES5", "MCP11") or a scenario name - search for it
-        logger.info(f"delete_test_case: Searching for test case by key or scenario: '{testcase_identifier}'")
 
-        # NOTE: Test case endpoints use 'app_id' not 'project_id'
-        params = {
+    # --- Branch by scope ---
+
+    if sprint_id is not None:
+        scope = 'run' if test_run_execution_run_id else 'sprint'
+
+        # Resolve non-numeric identifier from sprint listing (covers all test cases, not just first 100).
+        if testcase_id is None:
+            logger.info(f"delete_test_case: Searching sprint {sprint_id} for '{testcase_identifier}'")
+            sprint_params = {'teamId': str(team_id), 'appId': str(project_id), 'sprintId': str(sprint_id)}
+            if test_run_execution_run_id:
+                sprint_params['testRunsExecutionRunId'] = str(test_run_execution_run_id)
+            sprint_resp = await make_api_request('GET', '/testpert/sprintTestCase/get', api_key, params=sprint_params)
+            sprint_tcs = sprint_resp.get('testCaseDetails', []) if isinstance(sprint_resp, dict) else []
+
+            ident_upper = testcase_identifier.upper()
+            match = next((tc for tc in sprint_tcs if tc.get('test_case_number', '').upper() == ident_upper), None)
+            if not match:
+                match = next((tc for tc in sprint_tcs if tc.get('scenario', '').lower() == testcase_identifier.lower()), None)
+            if not match:
+                matches = [tc for tc in sprint_tcs if testcase_identifier.lower() in tc.get('scenario', '').lower()]
+                if len(matches) > 1:
+                    tc_list = '\n'.join([f"  - ID: {tc.get('test_case_id')}, Key: {tc.get('test_case_number', 'N/A')}, Scenario: {tc.get('scenario')}" for tc in matches[:10]])
+                    return {'status': 'failed', 'error': 'Multiple test cases found', 'message': f"Multiple test cases match '{testcase_identifier}'. Please use a unique key or ID:\n{tc_list}"}
+                match = matches[0] if matches else None
+
+            if not match:
+                return {'status': 'failed', 'error': 'Test case not found', 'message': f"No test case '{testcase_identifier}' found in sprint {sprint_id}."}
+            testcase_id = match.get('test_case_id')
+            logger.info(f"delete_test_case: Resolved '{testcase_identifier}' to testcase_id={testcase_id} from sprint listing")
+
+        logger.info(f"delete_test_case: {scope}-level unlink for testcase_id={testcase_id}, sprint_id={sprint_id}, run_id={test_run_execution_run_id}")
+        payload = {
             'team_id': str(team_id),
-            'app_id': str(project_id),  # API expects 'app_id'
-            'start_at': 0,
-            'max_results': 100  # Get more results for better matching
+            'app_id': str(project_id),
+            'testcaseids': str(testcase_id),
+            'sprintId': str(sprint_id),
         }
+        if test_run_execution_run_id:
+            payload['testRunsExecutionRunId'] = str(test_run_execution_run_id)
+        result = await make_api_request('POST', '/v1/testcases/delete', api_key, data=payload)
+        if isinstance(result, dict):
+            result['delete_scope'] = scope
+            result['testcase_id'] = testcase_id
+            result['sprint_id'] = sprint_id
+            if test_run_execution_run_id:
+                result['test_run_execution_run_id'] = test_run_execution_run_id
+        return result
 
-        testcases_response = await make_api_request('GET', '/v1/testcases/list', api_key, params=params)
-
+    # Project-level: permanent delete.
+    if testcase_id is None:
+        logger.info(f"delete_test_case: Searching project {project_id} for '{testcase_identifier}'")
+        testcases_response = await make_api_request('GET', '/v1/testcases/list', api_key, params={
+            'team_id': str(team_id), 'app_id': str(project_id), 'start_at': 0, 'max_results': 100,
+        })
         if testcases_response.get('status') != 'OK':
-            return {
-                'status': 'failed',
-                'error': 'Failed to fetch test cases',
-                'message': testcases_response.get('message', 'Could not retrieve test cases list')
-            }
+            return {'status': 'failed', 'error': 'Failed to fetch test cases', 'message': testcases_response.get('message', 'Could not retrieve test cases list')}
 
         testcases = testcases_response.get('testCases', [])
-
-        # Step 1: Try exact match by test case key (case-insensitive)
-        # Test case keys are usually in format like "TES5", "MCP11", etc.
         matching_testcases = [tc for tc in testcases if tc.get('test_case_key', '').upper() == testcase_identifier.upper()]
-
-        if matching_testcases:
-            logger.info(f"delete_test_case: Found test case by key: {matching_testcases[0].get('test_case_key')}")
-        else:
-            # Step 2: Try exact match by scenario (case-insensitive)
+        if not matching_testcases:
             matching_testcases = [tc for tc in testcases if tc.get('scenario', '').lower() == testcase_identifier.lower()]
-
-            if not matching_testcases:
-                # Step 3: Try partial match by scenario
-                matching_testcases = [tc for tc in testcases if testcase_identifier.lower() in tc.get('scenario', '').lower()]
+        if not matching_testcases:
+            matching_testcases = [tc for tc in testcases if testcase_identifier.lower() in tc.get('scenario', '').lower()]
 
         if not matching_testcases:
-            return {
-                'status': 'failed',
-                'error': 'Test case not found',
-                'message': f"No test case found with key or scenario '{testcase_identifier}' in project {project_id}"
-            }
-
+            return {'status': 'failed', 'error': 'Test case not found', 'message': f"No test case found with key or scenario '{testcase_identifier}' in project {project_id}"}
         if len(matching_testcases) > 1:
             testcase_list = '\n'.join([f"  - ID: {tc['project_test_case_id']}, Key: {tc.get('test_case_key', 'N/A')}, Scenario: {tc['scenario']}" for tc in matching_testcases[:10]])
-            return {
-                'status': 'failed',
-                'error': 'Multiple test cases found',
-                'message': f"Multiple test cases match '{testcase_identifier}'. Please use the test case ID or unique test case key instead:\n{testcase_list}"
-            }
+            return {'status': 'failed', 'error': 'Multiple test cases found', 'message': f"Multiple test cases match '{testcase_identifier}'. Please use the test case ID or unique key:\n{testcase_list}"}
 
         testcase_id = matching_testcases[0]['project_test_case_id']
-        logger.info(f"delete_test_case: Found test case '{testcase_identifier}' with ID {testcase_id}")
+        logger.info(f"delete_test_case: Resolved '{testcase_identifier}' to testcase_id={testcase_id}")
 
-    # Build payload
-    # NOTE: Test case endpoints use 'app_id' not 'project_id'
-    # The API expects 'testcaseids' (comma-separated list) not 'testcase_id'
-    # IMPORTANT: The API requires either sprintId OR isDeleteTestCases=true
-    # - If isDeleteTestCases=false (default), sprintId is REQUIRED
-    # - If isDeleteTestCases=true, sprintId is optional
-    # We set isDeleteTestCases=true to allow deletion without sprint context
+    logger.info(f"delete_test_case: project-level delete for testcase_id={testcase_id}, team_id={team_id}, project_id={project_id}")
     payload = {
-        "app_id": project_id,      # API expects 'app_id' (project_id mapped here)
-        "testcaseids": str(testcase_id),  # API expects comma-separated string
+        "app_id": project_id,
+        "testcaseids": str(testcase_id),
         "team_id": team_id,
-        "isDeleteTestCases": "true"  # Set to true to bypass sprint_id requirement
+        "isDeleteTestCases": "true",
     }
-
-    logger.info(f"Deleting testcase_id={testcase_id} for team_id={team_id}, project_id={project_id}")
-    return await make_api_request('POST', '/v1/testcases/delete', api_key, data=payload)
+    result = await make_api_request('POST', '/v1/testcases/delete', api_key, data=payload)
+    if isinstance(result, dict):
+        result['delete_scope'] = 'project'
+        result['testcase_id'] = testcase_id
+    return result
 
 
 @mcp.tool(
@@ -1549,3 +1717,18 @@ async def delete_test_case_comment(
         response['test_cases_refresh_error'] = str(e)
 
     return response
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _normalise_steps(steps):
+    """Return steps as a JSON string so the backend can json_decode it correctly.
+    The GET endpoint may return test_steps as a list or a JSON string; the update
+    endpoint must receive a JSON string, else PHP implodes nested arrays into garbage."""
+    if not steps:
+        return ''
+    if isinstance(steps, list):
+        return json.dumps(steps)
+    return steps

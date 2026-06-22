@@ -1,10 +1,43 @@
 """Internal resolvers and context helpers used by tools."""
+import os
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import requests  # needed for except clauses referencing requests.RequestException
 
 from auth import _get_api_key, _fetch_user_context, validate_api_key
 from client import logger, make_api_request
+
+
+# API host -> customer-facing web app base URL.
+# Set WEB_BASE_URL in .env to override for deployments not listed here.
+_KNOWN_WEB_BASES = {
+    "api.bugasura.io":       "https://my.bugasura.io/",
+    "api.stage.bugasura.io": "https://stage.bugasura.io/",
+    "api.appachhi.net":      "http://appachhi.net/",
+    "localhost":             "http://localhost/Appachhi/chhiscore/",
+    "127.0.0.1":             "http://127.0.0.1/Appachhi/chhiscore/",
+}
+
+
+def _derive_web_base(api_base: str) -> str:
+    """Return the customer-facing web app base URL derived from an API base URL."""
+    try:
+        p = urlparse(api_base)
+        host = p.netloc.split('@')[-1].split(':')[0]
+        if host in _KNOWN_WEB_BASES:
+            return _KNOWN_WEB_BASES[host]
+        if p.scheme and p.netloc:
+            return f"{p.scheme}://{p.netloc}/"
+    except Exception:
+        pass
+    return ""
+
+
+_api_base = os.getenv("API_BASE_URL", "http://localhost/api.appachhi.com")
+WEB_BASE_URL = os.getenv("WEB_BASE_URL", "").strip() or _derive_web_base(_api_base)
+if WEB_BASE_URL and not WEB_BASE_URL.endswith("/"):
+    WEB_BASE_URL += "/"
 
 
 def filter_large_fields(data: dict) -> dict:

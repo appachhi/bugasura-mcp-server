@@ -623,64 +623,90 @@ async def delete_issue(
 
 @mcp.tool(
     name = "bugasura_list_issues",
-    description = "List issues for a project with optional sprint filter and pagination. Returns issue summaries with key details. Interactive team/project selection available.",
+    description = (
+        "List issues for a project with optional sprint or run-level filter and pagination. "
+        "Returns issue summaries with key details. "
+        "Provide sprint_id to scope to a sprint; add test_run_execution_run_id to scope to a specific run execution. "
+        "Interactive team/project selection available."
+    ),
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_issues(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier to filter issues (optional, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id) to filter issues by sprint (optional, ge=1)"),
+    test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID. When provided, scopes issues to that specific run only. Obtain from bugasura_list_test_runs."),
     start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)"),
     max_results: int = Field(default=10, description="Number of results to return (default: 10, ge=1, le=100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
     api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment."),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
-    """
-    List issues for a project with optional sprint filter and pagination.
-
-    Interactive flow: If team_id/project_id are not provided, this function
-    will return available options for the user to select from.
-
-    Args:
-        api_key: User's Bugasura API key (required)
-        team_id: Team identifier (optional - will prompt if not provided)
-        project_id: Project identifier (optional - will prompt if not provided)
-        sprint_id: Optional sprint ID to filter issues by sprint
-        start_at: Pagination offset (default: 0)
-        max_results: Number of results to return (default: 10, min: 10, max: 100)
-
-    Returns:
-        dict: List of issues with pagination metadata
-        OR a selection prompt if team_id/project_id not provided
-    """
-    # Validate API key before proceeding
     api_key = _get_api_key(api_key)
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
 
-    # Use centralized context selection helper
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_list_issues')
-
-    # If context selection is needed, return the selection prompt
     if 'status' in context and context['status'] == 'selection_required':
         return _respond(context, response_format)
 
-    # All required parameters provided - proceed with listing issues
-    params = {"team_id": context['team_id'], "project_id": context['project_id'], "start_at": start_at, "max_results": max_results}
+    project_id = context['project_id']
+    max_results = max(1, min(100, max_results))
+
+    if ctx is not None:
+        await ctx.report_progress(0.25, total=1.0, message=f"Fetching issues for project {project_id}")
+
+    page_to_load = (start_at // max_results) + 1
+    params = {
+        'appId': project_id,
+        'isGetIssueList': 1,
+        'isGetStatsCount': 1,
+        'pageToLoad': page_to_load,
+        'customMaxIssuesPerPage': max_results,
+    }
     if sprint_id:
-        params["sprint_id"] = sprint_id
+        params['reportId'] = sprint_id
+    if test_run_execution_run_id:
+        params['testRunsExecutionRunId'] = test_run_execution_run_id
+
+    response = await make_api_request('GET', '/issues/getListDetails', api_key, params=params)
 
     if ctx is not None:
-        await ctx.report_progress(0.25, total=1.0, message=f"Fetching issues for project {context['project_id']}")
-    response = await make_api_request('GET', '/v1/issues/list', api_key, params=params)
+        await ctx.report_progress(0.75, total=1.0, message="Normalizing response")
 
-    if ctx is not None:
-        await ctx.report_progress(0.75, total=1.0, message="Filtering response payload")
-    # Filter out large unnecessary fields to reduce payload size, then wrap in pagination envelope
-    response = filter_large_fields(response)
-    return _respond(_paginate_upstream(response, offset=start_at), response_format)
+    if not isinstance(response, dict) or response.get('status') != 'OK':
+        return _respond(response, response_format)
+
+    issue_list_details = response.get('issueListDetails') or {}
+    raw_issues = issue_list_details.get('bugsList') or []
+    total_count = (issue_list_details.get('bugsStats') or {}).get('totalBugCount')
+
+    issues = [
+        {
+            'issue_key': bug.get('testresults_id'),
+            'issue_id': bug.get('issue_id'),
+            'summary': bug.get('summary', ''),
+            'description': bug.get('description', ''),
+            'status': bug.get('bug_status'),
+            'issue_type': bug.get('failure_type'),
+            'tags': bug.get('bug_types'),
+            'severity': bug.get('severity'),
+            'priority': bug.get('priority'),
+            'created_date': bug.get('created_dt'),
+            'last_modified_date': bug.get('last_modified'),
+            'creator_id': bug.get('creator_id'),
+            'sprint_id': bug.get('report_id'),
+            'sprint_name': bug.get('report_name'),
+            'project_id': bug.get('app_id'),
+            'project_name': bug.get('app_name'),
+            'team_id': bug.get('team_id'),
+            'is_public': bug.get('is_public'),
+        }
+        for bug in raw_issues
+    ]
+    normalized = {'status': 'OK', 'issue_list': issues, 'total_rows': total_count or len(issues)}
+    return _respond(_paginate_upstream(normalized, items_key='issue_list', offset=start_at), response_format)
 
 
 @mcp.tool(

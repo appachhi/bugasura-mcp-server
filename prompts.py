@@ -66,6 +66,61 @@ Welcome to Bugasura MCP! To get started, I need your Bugasura API key.
 
 
 @mcp.prompt()
+def kb_upload_guide() -> str:
+    """
+    Instructions for AI assistants on how to handle file uploads to a Bugasura
+    TestPert knowledge base. Invoke this prompt whenever a user asks to upload
+    a document or image to a TestPert sprint.
+    """
+    return """
+# Bugasura KB File Upload — AI Assistant Guide
+
+## The correct upload flow
+
+### When the user attaches a file or asks to upload one
+Respond immediately with this message (adapt the wording naturally):
+
+  "To upload your file, please share a Google Drive or Dropbox link to it:
+   1. Upload the file to Google Drive (or use an existing file there)
+   2. Right-click the file → Share → Change to 'Anyone with the link' → Copy link
+   3. Paste the link here and I'll upload it directly to the sprint."
+
+Do NOT read, encode, or process the attached file. Do NOT run Script, Analysis,
+Bash, or any other tool on it. Just ask for the link.
+
+### Once the user shares the link
+Call bugasura_testpert_upload_kb with:
+  - source_url = the link they shared
+  - source_url_filename = the original filename with extension (e.g. 'PRD.pdf', 'wireframe.png')
+  - sprint_id, team_id, project_id, kb_type as appropriate
+
+The MCP server downloads the file and uploads it to Bugasura — no base64 ever
+enters the conversation. Google Drive and Dropbox share links are auto-converted.
+
+### For terminal / CLI users
+Ask for the exact absolute path to the file on their machine
+(e.g. '/home/user/docs/PRD.pdf') and use file_paths=[...].
+
+### kb_type guide
+| File                                      | kb_type             |
+|-------------------------------------------|---------------------|
+| PRD, spec, doc, PDF, DOCX, MD             | document            |
+| API documentation                         | api_docs            |
+| Meeting notes                             | meeting_notes       |
+| User flow documents                       | user_flow           |
+| Test data files                           | test_data           |
+| Architecture diagrams                     | architecture_image  |
+| Database schema diagrams                  | db_schema_image     |
+| Wireframes                                | wireframe_image     |
+| UI / design images                        | design_image        |
+| Flow diagrams, screenshots                | flow_image          |
+
+### Multiple files
+Make one call per file. Each call to bugasura_testpert_upload_kb handles one source.
+"""
+
+
+@mcp.prompt()
 def search_projects_guidance() -> str:
     """
     Guidance for AI assistants on how to handle project search/listing when user
