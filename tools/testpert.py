@@ -20,7 +20,10 @@ from output_types import ToolResponse
 from app import mcp
 from auth import _get_api_key, validate_api_key
 from client import logger, make_api_request
-from helpers import select_team_project_context, WEB_BASE_URL
+from helpers import (
+    _download_url_tmp, _infer_filename_from_url_path, _normalise_share_url,
+    select_team_project_context, WEB_BASE_URL,
+)
 from tools.projects import get_project_details
 
 import asyncio
@@ -28,11 +31,8 @@ import base64
 import json
 import mimetypes
 import os
-import re
 import tempfile
 import time
-import urllib.parse
-import urllib.request
 
 # --- Polling ------------------------------------------------------------------
 _KB_POLL_INTERVAL_SECONDS = 5
@@ -85,14 +85,14 @@ _FRIENDLY_STATUS = {
 _REACHED = {
     'DEEPEN_REQUIREMENTS_QUESTIONS': (
         "I've reviewed your documents and prepared some questions to refine the requirements.",
-        "Immediately fetch and show the user these questions (get_requirements category='deepen_questions'), "
+        "Immediately fetch and show the user these questions (bugasura_testpert_get_requirement_contexts category='deepen_questions'), "
         "one at a time. Do NOT ask whether to pull them."),
     'MISSING_REQUIREMENTS': (
         "I've identified the missing requirements.",
-        "Immediately show them to the user for approve/edit (get_requirements category='missing'). Do NOT ask first."),
+        "Immediately show them to the user for approve/edit (bugasura_testpert_get_requirement_contexts category='missing'). Do NOT ask first."),
     'RISKS_IN_REQUIREMENTS': (
         "I've flagged the potential requirement risks.",
-        "Immediately show them for approve/reject (get_requirements category='risk'). Do NOT ask first."),
+        "Immediately show them for approve/reject (bugasura_testpert_get_requirement_contexts category='risk'). Do NOT ask first."),
     'TEST_PLANING': (
         "Your test plan is ready.",
         "Immediately call bugasura_testpert_get_testplan and show the user the focus areas from "
@@ -309,11 +309,13 @@ async def create_testpert_sprint(
     name = "bugasura_prepare_kb_upload",
     description = (
         "CALL THIS FIRST — before doing anything else — whenever the user wants to upload a file "
-        "(PDF, DOCX, image, screenshot, or any other file) to a Bugasura TestPert sprint. "
+        "(PDF, DOCX, image, screenshot, or any other file) to a Bugasura TestPert sprint or to a "
+        "project's Knowledge Base. "
         "Do NOT encode, read, or process any attached file before calling this tool. "
         "This tool returns the exact instructions to show the user so they can provide the file "
-        "in a way that works. Only call bugasura_testpert_upload_kb after the user has responded "
-        "to these instructions with a shareable link or a file path."
+        "in a way that works. Only call the matching upload tool — bugasura_testpert_upload_kb for a "
+        "sprint, bugasura_upload_knowledge_base_document for the project knowledge base — after the "
+        "user has responded to these instructions with a shareable link or a file path."
     ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 )
@@ -338,8 +340,11 @@ async def prepare_kb_upload(
         ),
         'next_step': (
             "Show message_to_user to the user verbatim. Wait for them to paste a link. "
-            "Then call bugasura_testpert_upload_kb with source_url=<link> and sprint_id as "
-            "appropriate. source_url_filename is optional — omit it and the filename will be "
+            "Then call the upload tool that matches what the user asked for, with source_url=<link>: "
+            "bugasura_testpert_upload_kb (with sprint_id) for a TestPert sprint's knowledge base, or "
+            "bugasura_upload_knowledge_base_document (with folder_name when they named a folder) for "
+            "the project's Knowledge Base. "
+            "source_url_filename is optional — omit it and the filename will be "
             "detected from the URL or response headers. Only pass source_url_filename if the "
             "user explicitly provides a filename or if detection fails. "
             "Do not run any Script, Analysis, or Bash tool at any point in this flow."
@@ -976,17 +981,17 @@ async def advance_testpert(
 
 
 @mcp.tool(
-    name = "bugasura_testpert_get_requirements",
+    name = "bugasura_testpert_get_requirement_contexts",
     description = (
         "Fetch a TestPert sprint's requirement-analysis context for user review: the engine's "
         "deepen-requirement questions, missing requirements, and requirement risks. Use after a "
         "phase lands on DEEPEN_REQUIREMENTS_QUESTIONS / MISSING_REQUIREMENTS / RISKS_IN_REQUIREMENTS "
         "to show the items, then collect the user's answers / approve-reject-edit decisions and "
-        "write them back with bugasura_testpert_update_requirements."
+        "write them back with bugasura_testpert_update_requirement_contexts."
     ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
-async def get_testpert_requirements(
+async def get_testpert_requirement_contexts(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     category: Literal['all', 'deepen_questions', 'missing', 'risk'] = Field(default='all', description="Which context set to return (default: all)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
@@ -1010,7 +1015,7 @@ async def get_testpert_requirements(
         return validation
 
     context = await select_team_project_context(api_key, team_id, project_id,
-                                                'bugasura_testpert_get_requirements')
+                                                'bugasura_testpert_get_requirement_contexts')
     if 'status' in context and context['status'] == 'selection_required':
         return context
     if not sprint_id:
@@ -1090,7 +1095,7 @@ async def get_testpert_requirements(
     else:
         result['message'] = (
             "Show these to the user in plain language for their approve/reject/edit decision, then save "
-            "with bugasura_testpert_update_requirements and continue. No internal codes in what the user sees."
+            "with bugasura_testpert_update_requirement_contexts and continue. No internal codes in what the user sees."
         )
     return await _attach_link_for_sprint(result, api_key, context['team_id'], context['project_id'], sprint_id)
 
@@ -1100,7 +1105,7 @@ async def get_testpert_requirements(
     description = (
         "Add a new contextual (deepen-requirement) question to a TestPert sprint, like the "
         "'Add Question' button in the platform's Deepen Requirements tab. The sprint must be at "
-        "DEEPEN_REQUIREMENTS_QUESTIONS. After adding, call bugasura_testpert_get_requirements "
+        "DEEPEN_REQUIREMENTS_QUESTIONS. After adding, call bugasura_testpert_get_requirement_contexts "
         "(category='deepen_questions') to show the updated list."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
@@ -1149,7 +1154,7 @@ async def add_testpert_context_question(
     })
     if isinstance(resp, dict) and resp.get('status') == 'OK':
         resp['next_step'] = (
-            "Question added. Call bugasura_testpert_get_requirements(category='deepen_questions') "
+            "Question added. Call bugasura_testpert_get_requirement_contexts(category='deepen_questions') "
             "to show the updated list."
         )
     return resp
@@ -1160,13 +1165,13 @@ async def add_testpert_context_question(
     description = (
         "Delete a contextual (deepen-requirement) question from a TestPert sprint, like the "
         "delete/remove action in the platform's Deepen Requirements tab. Pass the "
-        "requirement_context_id from bugasura_testpert_get_requirements(category='deepen_questions'). "
+        "requirement_context_id from bugasura_testpert_get_requirement_contexts(category='deepen_questions'). "
         "The sprint must be at DEEPEN_REQUIREMENTS_QUESTIONS."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
 )
 async def delete_testpert_context_question(
-    requirement_context_id: int = Field(description="ID of the context question to delete (from get_requirements deepen_questions_list)."),
+    requirement_context_id: int = Field(description="ID of the context question to delete (from bugasura_testpert_get_requirement_contexts deepen_questions_list)."),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
@@ -1191,23 +1196,23 @@ async def delete_testpert_context_question(
     })
     if isinstance(resp, dict) and resp.get('status') == 'OK':
         resp['next_step'] = (
-            "Question deleted. Call bugasura_testpert_get_requirements(category='deepen_questions') "
+            "Question deleted. Call bugasura_testpert_get_requirement_contexts(category='deepen_questions') "
             "to show the updated list."
         )
     return resp
 
 
 @mcp.tool(
-    name = "bugasura_testpert_update_requirements",
+    name = "bugasura_testpert_update_requirement_contexts",
     description = (
         "Write the user's review back to a TestPert sprint's requirement contexts: answers to "
         "deepen-requirement questions, and approve/reject/edit decisions on missing requirements "
-        "and risks. Accepts a batch of per-row updates. Call after bugasura_testpert_get_requirements, "
+        "and risks. Accepts a batch of per-row updates. Call after bugasura_testpert_get_requirement_contexts, "
         "before advancing to the next status."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
-async def update_testpert_requirements(
+async def update_testpert_requirement_contexts(
     updates: List[dict] = Field(description=(
         "List of row updates. Each item: {'requirement_context_id': <int, required>, "
         "'details': <str answer/edited text, optional>, 'title': <str, optional>, "
@@ -1231,7 +1236,7 @@ async def update_testpert_requirements(
         return validation
 
     context = await select_team_project_context(api_key, team_id, project_id,
-                                                'bugasura_testpert_update_requirements')
+                                                'bugasura_testpert_update_requirement_contexts')
     if 'status' in context and context['status'] == 'selection_required':
         return context
     if not sprint_id:
@@ -2646,14 +2651,14 @@ async def generate_testpert_sprint_context(
         "row's details column, isEdited=1) — no status change on save. Partial answers are fine (answer "
         "only the questions you want). By default this then advances to GENERATE_MISSING_REQUIREMENTS and "
         "polls until MISSING_REQUIREMENTS. Requires a team-admin API key. "
-        "Use this for the DEEPEN questions; use bugasura_testpert_update_requirements for missing-req / risk edits."
+        "Use this for the DEEPEN questions; use bugasura_testpert_update_requirement_contexts for missing-req / risk edits."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def answer_testpert_context_questions(
     answers: List[dict] = Field(description=(
         "List of answers, each {'requirement_context_id': <int>, 'response': <str>}. "
-        "Use the requirement_context_id and query from bugasura_testpert_get_requirements(category='deepen_questions'). "
+        "Use the requirement_context_id and query from bugasura_testpert_get_requirement_contexts(category='deepen_questions'). "
         "Only the questions you include are answered; the rest keep their current response."
     )),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
@@ -2810,7 +2815,7 @@ async def answer_testpert_context_questions(
             result['reached'] = True
             result['message'] += " I've also identified the missing requirements."
             result['next_step'] = ("Immediately show the user the missing requirements for approve/edit "
-                                   "(get_requirements category='missing'). Do NOT ask first.")
+                                   "(bugasura_testpert_get_requirement_contexts category='missing'). Do NOT ask first.")
         elif poll['outcome'] == 'error':
             result['status'] = 'failed'
             result['current_status'] = poll['current']
@@ -3875,93 +3880,6 @@ def _write_text_tmp(text: str, suffix: str) -> str:
         raise
     tmp.close()
     return tmp.name
-
-
-def _normalise_share_url(url: str) -> str:
-    """Convert well-known sharing URLs to direct download URLs.
-
-    Handles Google Drive share links and Dropbox share links.
-    All other URLs are returned unchanged.
-    """
-    # Google Drive: https://drive.google.com/file/d/FILE_ID/view?...
-    #           or: https://drive.google.com/open?id=FILE_ID
-    parsed = urllib.parse.urlparse(url)
-    if 'drive.google.com' in parsed.netloc:
-        # /file/d/FILE_ID/... form
-        parts = parsed.path.split('/')
-        try:
-            file_id = parts[parts.index('d') + 1]
-            return f'https://drive.google.com/uc?export=download&id={file_id}'
-        except (ValueError, IndexError):
-            pass
-        # ?id=FILE_ID form
-        qs = urllib.parse.parse_qs(parsed.query)
-        if 'id' in qs:
-            return f'https://drive.google.com/uc?export=download&id={qs["id"][0]}'
-    # Dropbox: replace dl=0 with dl=1 (or add dl=1)
-    if 'dropbox.com' in parsed.netloc:
-        qs = urllib.parse.parse_qs(parsed.query)
-        qs['dl'] = ['1']
-        new_query = urllib.parse.urlencode({k: v[0] for k, v in qs.items()})
-        return urllib.parse.urlunparse(parsed._replace(query=new_query))
-    return url
-
-
-def _infer_filename_from_url_path(url: str) -> Optional[str]:
-    """Extract a filename from the URL path if it looks like a real file.
-
-    Works for Dropbox-style URLs where the filename is in the path.
-    Returns None for Google Drive and other URLs where there is no filename.
-    """
-    try:
-        path = urllib.parse.urlparse(url).path.rstrip('/')
-        if not path:
-            return None
-        basename = urllib.parse.unquote(path.split('/')[-1])
-        # Only accept if it has a recognisable extension.
-        if '.' in basename and not basename.startswith('.'):
-            return basename
-    except Exception:
-        pass
-    return None
-
-
-def _download_url_tmp(url: str, suffix: str, timeout: int = 30) -> tuple:
-    """Download a URL to a delete=False temp file; return (path, inferred_filename_or_None).
-
-    Streams the response in 64 KB chunks to avoid loading the whole file into
-    memory. Extracts the filename from the Content-Disposition response header
-    when available (works for Google Drive and similar services). Cleans up the
-    temp file if the download fails before the path is returned.
-    Raises: urllib.error.URLError / urllib.error.HTTPError / OSError on failure.
-    """
-    req = urllib.request.Request(url, headers={'User-Agent': 'BugasuraMCP/1.0'})
-    tmp = tempfile.NamedTemporaryFile(mode='wb', suffix=suffix, delete=False)
-    inferred_name: Optional[str] = None
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            cd = resp.headers.get('Content-Disposition', '')
-            if cd:
-                m = re.search(r'filename[^;=\n]*=[\s"\']*([^;"\']+)[\s"\']*', cd, re.IGNORECASE)
-                if m:
-                    candidate = urllib.parse.unquote(m.group(1).strip('" \''))
-                    if '.' in candidate:
-                        inferred_name = candidate
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                tmp.write(chunk)
-    except Exception:
-        tmp.close()
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        raise
-    tmp.close()
-    return tmp.name, inferred_name
-
 
 # ---------------------------------------------------------------------------
 # Guidance helpers

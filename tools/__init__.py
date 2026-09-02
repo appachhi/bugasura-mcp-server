@@ -7,5 +7,6 @@ from . import sprints  # noqa: F401
 from . import issues  # noqa: F401
 from . import test_cases  # noqa: F401
 from . import requirements  # noqa: F401
+from . import knowledge_base  # noqa: F401
 from . import runs  # noqa: F401
 from . import discovery  # noqa: F401

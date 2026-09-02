@@ -38,7 +38,23 @@ def get_api_endpoints() -> str:
         "sprints": ["GET /v1/sprints/list", "GET /v1/sprints/get", "POST /v1/sprints/add", "POST /v1/sprints/update", "POST /v1/sprints/delete"],
         "testcases": ["GET /v1/testcases/list", "GET /v1/testcases/get", "POST /v1/testcases/add", "POST /v1/testcases/update", "POST /v1/testcases/delete"],
         "testcases_comments": ["GET /v1/testcasecomments/list", "GET /v1/testcasecomments/get", "POST /v1/testcasecomments/add", "POST /v1/testcasecomments/update", "POST /v1/testcasecomments/delete"],
-        "requirements": ["GET /v1/requirements/list", "GET /v1/requirement/get", "POST /v1/requirement/add", "POST /v1/requirement/update", "POST /v1/requirement/delete"]
+        "requirements": ["GET /v1/requirements/list", "GET /v1/requirement/get", "POST /v1/requirement/add", "POST /v1/requirement/update", "POST /v1/requirement/delete"],
+        "knowledge_base": ["GET /v1/knowledgebase/getDocs", "GET /v1/knowledgebase/list", "POST /v1/knowledgebase/add",
+                           "POST /v1/knowledgebase/update", "POST /v1/knowledgebase/importDocPages", "POST /v1/knowledgebase/delete",
+                           "GET /v1/projectFolders/get?folderType=KNOWLEDGE_BASE", "POST /v1/projectFolders/add",
+                           "POST /v1/projectFolders/update", "POST /v1/projectFolders/delete"],
+        "testpert": ["POST /v1/sprint/create", "GET /v1/testpert/sprint/getStatus", "POST /v1/testpert/sprint/updateStatus",
+                     "GET /v1/testpertKB/sprint/get", "POST /v1/testpertKB/sprint/add", "POST /v1/testpertKB/sprint/delete",
+                     "POST /v1/testpert/updateSprintKBStatus",
+                     "GET /v1/testpertrequirementcontexts/get", "POST /v1/testpertrequirementcontexts/add",
+                     "POST /v1/testpertrequirementcontexts/update", "POST /v1/testpertrequirementcontexts/delete",
+                     "GET /v1/testpert/sprint/testplan/get", "POST /v1/testpert/sprint/testplan/update",
+                     "GET /v1/testpert/testpertfeatures/getTestpertFeatures", "POST /v1/testpert/testpertfeatures/addTestpertFeatures",
+                     "POST /v1/testpert/testpertfeatures/updateTestpertFeatures", "POST /v1/testpert/testpertfeatures/deleteTestpertFeatures",
+                     "GET /v1/testpert/getSprintCoverageMindMap", "GET /v1/requirements/sprint/link"],
+        "knowledge_base_connectors": ["POST /v1/coda/getDocs", "POST /v1/coda/getPages", "POST /v1/coda/getDocDetails",
+                                      "POST /v1/bugTracker/getProjectList", "POST /v1/testpert/searchToolsProjectIssues",
+                                      "POST /v1/confluence/getSpaceList", "POST /v1/confluence/getPagesBySpace"]
     }, indent=2)
 
 

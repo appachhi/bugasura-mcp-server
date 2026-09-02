@@ -29,6 +29,7 @@ If you're upgrading from 1.x, update your client configuration:
 - 🐛 **Issue Tracking** - Report, manage, and delete bugs with rich context
 - 💬 **Issue Comments** - Add, update, delete, and list comments on issues with pagination and filtering
 - 📝 **Requirements Management** - Create, organize, and manage product requirements with folder structure
+- 📚 **Knowledge Base** - Upload, list, star, and delete documents in a project's knowledge base, with folders created on demand; import from a website, Coda, Jira, Confluence or Figma
 - 🏃 **Sprint Planning** - Create, update, delete, and manage agile sprints
 - 🏁 **Test Runs** - Create one-time or scheduled (recurring) runs, edit/rerun/delete them, pick environments and app builds, and add test cases — all by name or ID
 - 🤖 **Testpert Sprints** - Full AI-driven test enrichment flow: upload specs, answer requirement questions, edit the test plan, and generate test cases automatically
@@ -831,6 +832,75 @@ Names are resolved via `bugasura_list_sprints` (report ↔ sprint), `bugasura_li
 </details>
 
 <details>
+<summary><b>Knowledge Base</b></summary>
+
+The knowledge base is a project-level document library, organized in folders and shown on the project's Knowledge Base page. It is separate from a TestPert sprint's own knowledge base (see the Testpert tools below).
+
+**Documents**
+- `bugasura_list_knowledge_base_documents` - List documents in a folder or across the whole project (supports `starred_only` and pagination)
+- `bugasura_download_knowledge_base_document` - Get a direct download link for an uploaded document, and optionally save it to disk
+- `bugasura_star_knowledge_base_document` - Star or unstar a document (`starred=False` removes the star)
+- `bugasura_delete_knowledge_base_document` - Delete a document permanently (admin-only, DESTRUCTIVE)
+
+**Imports** (all in `tools/knowledge_base.py`)
+
+The six entries in the Knowledge Base page's "+" menu, plus the document editor's own Import menu. Everything except the file upload runs in the background — the tool returns as soon as the crawl/sync is queued, and `bugasura_list_knowledge_base_documents` shows its progress in `stage`. Connector credentials are supplied per call and are never stored by this server.
+
+- `bugasura_upload_knowledge_base_document` - Upload document(s) (`.txt`, `.pdf`, `.doc`, `.docx`, `.md`) from a local path or a share link
+- `bugasura_import_website_to_knowledge_base` - Crawl a website (`max_pages`, `include_linked_pages`)
+- `bugasura_import_coda_to_knowledge_base` - Import a Coda doc's pages ("Superhuman Import"); needs a Coda API key and the doc's URL, id or name
+- `bugasura_import_jira_to_knowledge_base` - Import Jira issues, one page per Jira project; whole projects by default, or specific `issue_keys`
+- `bugasura_import_confluence_to_knowledge_base` - Import Confluence spaces, one page tree per space; whole spaces by default, or specific `page_ids`
+- `bugasura_import_figma_to_knowledge_base` - Import Figma frames as design context (DESTRUCTIVE — see Key Features below)
+- `bugasura_import_file_to_knowledge_base_document` - The document editor's Import menu: a `.md` file becomes a new page, a `.csv`/`.xlsx`/`.xls` file becomes a Markdown table appended to an existing page
+
+Pick what a connector should import with the listing tools first:
+
+- `bugasura_list_coda_docs` / `bugasura_list_coda_pages` - The docs a Coda API key can see, and one doc's page tree
+- `bugasura_list_jira_projects` / `bugasura_list_jira_issues` - The projects an account can see (with issue counts), and one project's issues
+- `bugasura_list_confluence_spaces` / `bugasura_list_confluence_pages` - The spaces an account can see, and one space's pages
+
+**Folders**
+- `bugasura_list_knowledge_base_folders` - List the knowledge base folders with the document count in each
+- `bugasura_create_knowledge_base_folder` - Create a folder, optionally nested under an existing one
+- `bugasura_rename_knowledge_base_folder` - Rename a folder in place (keeps its parent and its contents)
+- `bugasura_delete_knowledge_base_folder` - Delete a folder (admin-only, DESTRUCTIVE)
+
+**Page Documents**
+
+A page document is written in Bugasura instead of uploaded — the web app's "Create Document" flow. Its body is a tree of pages, each with its own markdown content. Documents synced from Coda, Jira, Confluence or a URL are stored in the same shape, so the page tools work on those too.
+
+- `bugasura_create_knowledge_base_document` - Create a page document (starts with one empty page)
+- `bugasura_rename_knowledge_base_document` - Rename a page document
+- `bugasura_list_knowledge_base_pages` - List a document's pages, with `page_path`, `depth` and `has_content`
+- `bugasura_create_knowledge_base_page` - Add a page, optionally nested under a page or placed after one, with its content
+- `bugasura_rename_knowledge_base_page` - Rename a page
+- `bugasura_get_knowledge_base_page_content` - Read a page's current markdown body (call before editing one)
+- `bugasura_update_knowledge_base_page_content` - Write a page's markdown: replace the whole body (`''` clears it), or `mode='append'` / `mode='prepend'` to add to it
+- `bugasura_duplicate_knowledge_base_page` - Copy a page, with or without its sub pages
+- `bugasura_move_knowledge_base_page` - Re-parent or reorder a page (`parent_page` / `after_page` / `to_root`)
+- `bugasura_delete_knowledge_base_page` - Delete a page and its sub pages (DESTRUCTIVE)
+
+**Key Features:**
+- **Automatic Folder Handling**: Pass `folder_name` to file the document in that folder — it is matched case-insensitively and created when the project doesn't have one by that name. Omit it and the project's first knowledge base folder is used, or a `Knowledge Base` folder is created when the project has none.
+- **Two Ways to Provide a File**: `file_paths` (absolute paths, for terminal/CLI use) or `source_url` (Google Drive / Dropbox / any public download link — the server fetches it). Files are never encoded by the assistant.
+- **Multiple Files**: Several paths in one call are uploaded into the same folder.
+- **Folder Names**: A folder name cannot contain `<`, `>`, `/` or `\`, and two folders cannot share a name under the same parent — `bugasura_rename_knowledge_base_folder` reports both cases up front, and renaming a folder to the name it already has is answered without a write.
+- **Smart Document Resolution**: Documents are identified by file name (exact match, then partial) or by numeric id. Ambiguous names come back with the matching documents so the user can pick one; add `folder_name` to narrow the search.
+- **Background Processing**: Bugasura processes uploaded documents automatically; they become searchable project context once processing finishes.
+- **Downloads Are Links First**: Bugasura has no download endpoint — an uploaded file's bytes live on the CDN, and `bugasura_download_knowledge_base_document` turns the stored path into a direct, login-free `download_url`. That link is the answer for most clients; add `save_to_path` to also write the file to the machine running the server, which only helps when that is the user's own machine (terminal use). Set `CDN_BASE_URL` in the server's `.env` for deployments the known-host map doesn't cover — the CDN is a separate CloudFront/S3 host and cannot be derived from `API_BASE_URL`.
+- **Only Uploaded Files Are Downloadable**: Page documents, website entries and Jira/Confluence imports have no file of their own, and Bugasura has no PDF export — so a page document cannot be handed over as a PDF. Read those with `bugasura_list_knowledge_base_pages` instead.
+- **Smart Page Resolution**: Pages are identified by page name (exact match, then partial) or by page id (`page_20250104120500`). Ambiguous names come back with the matching pages so the user can pick one.
+- **Connector Credentials Are Per Call**: Jira, Confluence, Coda and Figma credentials are asked for on every call and forwarded straight through — this server stores none of them. Jira Cloud and Confluence take an API token, a self-hosted Jira (`deployment_type="SERVER"`) takes the account password, Coda takes an API key, and Figma takes a personal access token. Confluence is the one exception: leave its three credential arguments out and the listing tools fall back to the project's saved Confluence integration.
+- **Import Into an Existing Document**: `bugasura_import_jira_to_knowledge_base` and `bugasura_import_confluence_to_knowledge_base` create a new document by default; pass `document_identifier` to merge the selection into an existing page document instead, the way the web app's "Import → Jira / Confluence" works from inside a document. A document that is already importing is reported rather than queued twice.
+- **Figma Replaces the Project's Frame Set**: Bugasura keeps one set of Figma frames per project, and an import rewrites that set — any stored frame missing from the payload is deleted. `bugasura_import_figma_to_knowledge_base` reads the existing frames back and carries them forward, so an import only *adds*; `replace_existing=True` drops them, and is only for when the user has asked for that. Each link must point at a frame (carry a `node-id`, i.e. Figma's "Copy link to selection"); a link to a whole file is rejected.
+- **Editing a Page is Read-Modify-Write**: The API only ever writes a page's markdown, so `bugasura_get_knowledge_base_page_content` reads it back off the CDN the way the web editor does (needs `CDN_BASE_URL`, same as downloads). Because the write replaces the *whole* body, changing part of a page means reading it, editing that text, and writing the full result back with `mode='replace'`. To only add to a page, `mode='append'` / `mode='prepend'` do the read for you — pass just the new text. A page too large to read safely is refused rather than truncated, so a partial copy can never be written back over the full one.
+
+**Note:** Documents are limited to 100MB each, except `bugasura_import_file_to_knowledge_base_document` (the document editor's Markdown/CSV/Excel import), which is capped at 10MB. Call `bugasura_prepare_kb_upload` first when the user wants to share a file — it returns the instructions to show them. Deleting a document removes its file and everything the AI learned from it, and cannot be undone; deleting a folder that still holds documents requires `delete_documents=True` and takes its documents with it. Both deletes require team or project admin rights. Deleting a page that has sub pages likewise requires `delete_sub_pages=True` and takes them with it.
+
+</details>
+
+<details>
 <summary><b>Testpert Sprint Generation</b></summary>
 
 TestPert is a paid, project-level AI feature (`is_testpert_enabled` on the project). It generates a full test plan and test cases from your requirement documents or existing requirements.
@@ -844,8 +914,10 @@ TestPert is a paid, project-level AI feature (`is_testpert_enabled` on the proje
 - `bugasura_testpert_delete_kb` - Remove a document from the knowledge base
 - `bugasura_testpert_generate_sprint_context` - Start requirement analysis (KB → deepen questions)
 - `bugasura_testpert_answer_context_questions` - Submit answers to the AI's deepen-requirement questions
-- `bugasura_testpert_get_requirements` - Fetch deepen questions, missing requirements, and risks for user review
-- `bugasura_testpert_update_requirements` - Write approve/reject/edit decisions back for missing requirements and risks
+- `bugasura_testpert_get_requirement_contexts` - Fetch deepen questions, missing requirements, and risks for user review
+- `bugasura_testpert_update_requirement_contexts` - Write approve/reject/edit decisions back for missing requirements and risks
+- `bugasura_testpert_add_context_question` - Add a deepen-requirement question to the sprint (the 'Add Question' button)
+- `bugasura_testpert_delete_context_question` - Remove a deepen-requirement question from the sprint
 - `bugasura_testpert_get_testplan` - Fetch the generated test plan (focus areas + feature/sub-feature tree)
 - `bugasura_testpert_update_testplan` - Edit focus-area levels and the feature tree
 - `bugasura_testpert_get_features` - List the live feature/sub-feature tree
@@ -855,6 +927,7 @@ TestPert is a paid, project-level AI feature (`is_testpert_enabled` on the proje
 - `bugasura_testpert_generate_coverage` - Move the sprint to test coverage (runs enrichment first if needed)
 - `bugasura_testpert_get_coverage` - Fetch the coverage mind map
 - `bugasura_testpert_generate_testcases` - Generate test cases (polls to completion; re-callable)
+- `bugasura_testpert_regenerate_testcases` - Regenerate/retry one sub-feature's test cases after `TEST_CASES` (needs the user's answers to the 3-section context modal; max 5 attempts per sub-feature)
 
 **Skip-enrich flow** — use existing project requirements instead of documents
 - `bugasura_testpert_link_requirements` - Link existing project requirements to the sprint as its source

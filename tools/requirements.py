@@ -23,7 +23,13 @@ import requests  # for except blocks referencing requests.RequestException
 
 @mcp.tool(
     name="bugasura_list_requirements",
-    description="List requirements for a project with pagination and filtering. Returns requirement summaries with support for folders, sprints, sorting, and search. Interactive team/project selection available.",
+    description=(
+        "List requirements for a project with pagination and filtering. Returns requirement summaries "
+        "with support for folders, sprints, sorting, and search. Interactive team/project selection "
+        "available. Each requirement's `id` is the REQ number the user sees in Bugasura (REQ1, REQ2...) "
+        "— show the user that id and the title, exactly as the requirements page does; `requirement_id` "
+        "is the internal id for other tools and must not be shown."
+    ),
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_requirements(
@@ -134,7 +140,21 @@ async def list_requirements(
 
     # Filter out large unnecessary fields to reduce payload size, then wrap in envelope
     response = filter_large_fields(response)
-    return _respond(_paginate_upstream(response, offset=start_at), response_format)
+
+    # Show `id` as the REQ number the requirements page renders; `requirement_id` stays as is.
+    requirements_list = response.get('requirementsList')
+    groups = (requirements_list.values() if isinstance(requirements_list, dict)
+              else [requirements_list])
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for requirement in group:
+            if isinstance(requirement, dict) and requirement.get('id') not in (None, ''):
+                requirement['id'] = f"REQ{requirement['id']}"
+
+    # Name the list explicitly: requirementsList is a dict, so the first list picked was the priorities.
+    return _respond(_paginate_upstream(response, items_key='requirementsList', offset=start_at),
+                    response_format)
 
 
 @mcp.tool(

@@ -152,10 +152,16 @@ def _render_markdown(data: Any, title: Optional[str] = None) -> str:
                 ident = (item.get('issue_id') or item.get('issue_key') or
                          item.get('project_id') or item.get('team_id') or
                          item.get('sprint_id') or item.get('testcase_id') or
-                         item.get('requirement_id') or item.get('id') or '?')
+                         item.get('requirement_id') or item.get('kb_id') or
+                         item.get('page_id') or item.get('doc_id') or
+                         item.get('space_key') or item.get('project_key') or
+                         item.get('id') or item.get('folder_id') or '?')
                 name = (item.get('summary') or item.get('project_name') or
                         item.get('team_name') or item.get('sprint_name') or
-                        item.get('name') or item.get('title') or '')
+                        item.get('doc_name') or item.get('page_name') or
+                        item.get('page_title') or item.get('space_name') or
+                        item.get('name') or item.get('title') or
+                        item.get('folder_name') or '')
                 extras = []
                 for fk in ('bug_status', 'status', 'severity', 'priority',
                            'platform', 'assignees'):

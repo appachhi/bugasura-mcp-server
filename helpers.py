@@ -1,5 +1,10 @@
-"""Internal resolvers and context helpers used by tools."""
+"""Internal resolvers, file-upload utilities, and context helpers used by tools."""
 import os
+import re
+import shutil
+import tempfile
+import urllib.parse
+import urllib.request
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -33,11 +38,38 @@ def _derive_web_base(api_base: str) -> str:
         pass
     return ""
 
+# API host -> CDN base that serves stored files (config.application.cdnUrl upstream).
+# Uploaded files are public objects under this base, so `CDN_BASE_URL + <file path>` is a
+# working download link. Set CDN_BASE_URL in .env for deployments not listed here — the CDN
+# is a separate CloudFront/S3 host, so unlike the web base it can never be guessed from the
+# API host. localhost -> stage CloudFront is intentional: the backend's own LOCAL config
+# resolves cdnUrl to that same distribution, so a local API still serves files from it.
+_KNOWN_CDN_BASES = {
+    "api.bugasura.io":       "https://dp891r6qeu0kb.cloudfront.net/",
+    "api.stage.bugasura.io": "https://dfpr5nkt5jhxf.cloudfront.net/",
+    "api.appachhi.net":      "https://dfpr5nkt5jhxf.cloudfront.net/",
+    "localhost":             "https://dfpr5nkt5jhxf.cloudfront.net/",
+    "127.0.0.1":             "https://dfpr5nkt5jhxf.cloudfront.net/",
+}
+
+
+def _derive_cdn_base(api_base: str) -> str:
+    """Return the CDN base URL for a known API host, or '' when it is not known."""
+    try:
+        host = urlparse(api_base).netloc.split('@')[-1].split(':')[0]
+        return _KNOWN_CDN_BASES.get(host, "")
+    except Exception:
+        return ""
+
 
 _api_base = os.getenv("API_BASE_URL", "http://localhost/api.appachhi.com")
 WEB_BASE_URL = os.getenv("WEB_BASE_URL", "").strip() or _derive_web_base(_api_base)
 if WEB_BASE_URL and not WEB_BASE_URL.endswith("/"):
     WEB_BASE_URL += "/"
+
+CDN_BASE_URL = os.getenv("CDN_BASE_URL", "").strip() or _derive_cdn_base(_api_base)
+if CDN_BASE_URL and not CDN_BASE_URL.endswith("/"):
+    CDN_BASE_URL += "/"
 
 
 def filter_large_fields(data: dict) -> dict:
@@ -546,3 +578,185 @@ async def _resolve_issue_identifier_to_id(api_key: str, team_id: int, project_id
     issue_id = matching_issues[0].get('testresults_id') or matching_issues[0].get('issue_key')
     logger.info(f"{log_prefix}Found issue '{issue_identifier}' with ID {issue_id}")
     return {'status': 'OK', 'issue_id': issue_id}
+
+
+# Schemes the file-fetch helpers below may open. urllib's default opener also handles
+# file://, ftp:// and data:, so an unguarded urlopen() would turn a caller-supplied
+# `source_url` into an arbitrary local-file read — the bytes are uploaded to Bugasura,
+# and the extension check upstream only ever sees the *display* filename, not the URL.
+_FETCHABLE_URL_SCHEMES = ('http', 'https')
+
+
+def _require_fetchable_url(url: str) -> None:
+    """Raise ValueError unless `url` is an http(s) URL with a host.
+
+    Every helper that opens a caller-supplied URL calls this first. Callers already
+    wrap these helpers in `except Exception` and surface the message, so a ValueError
+    here reaches the user as a normal actionable failure.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url or '')
+    except Exception:
+        raise ValueError(f"'{url}' is not a valid URL.")
+    scheme = (parsed.scheme or '').lower()
+    if scheme not in _FETCHABLE_URL_SCHEMES:
+        raise ValueError(
+            f"Only http:// and https:// links can be fetched, but this one uses "
+            f"'{scheme or 'no'}' scheme. Ask the user for a shareable https link "
+            f"(Google Drive, Dropbox, or any public download URL). Local paths belong "
+            f"in file_paths, not source_url."
+        )
+    if not parsed.netloc:
+        raise ValueError(f"'{url}' has no host — it is not a fetchable link.")
+
+
+def _normalise_share_url(url: str) -> str:
+    """Convert well-known sharing URLs to direct download URLs.
+
+    Handles Google Drive share links and Dropbox share links.
+    All other URLs are returned unchanged.
+    """
+    # Google Drive: https://drive.google.com/file/d/FILE_ID/view?...
+    #           or: https://drive.google.com/open?id=FILE_ID
+    parsed = urllib.parse.urlparse(url)
+    if 'drive.google.com' in parsed.netloc:
+        # /file/d/FILE_ID/... form
+        parts = parsed.path.split('/')
+        try:
+            file_id = parts[parts.index('d') + 1]
+            return f'https://drive.google.com/uc?export=download&id={file_id}'
+        except (ValueError, IndexError):
+            pass
+        # ?id=FILE_ID form
+        qs = urllib.parse.parse_qs(parsed.query)
+        if 'id' in qs:
+            return f'https://drive.google.com/uc?export=download&id={qs["id"][0]}'
+    # Dropbox: replace dl=0 with dl=1 (or add dl=1)
+    if 'dropbox.com' in parsed.netloc:
+        qs = urllib.parse.parse_qs(parsed.query)
+        qs['dl'] = ['1']
+        new_query = urllib.parse.urlencode({k: v[0] for k, v in qs.items()})
+        return urllib.parse.urlunparse(parsed._replace(query=new_query))
+    return url
+
+
+def _infer_filename_from_url_path(url: str) -> Optional[str]:
+    """Extract a filename from the URL path if it looks like a real file.
+
+    Works for Dropbox-style URLs where the filename is in the path.
+    Returns None for Google Drive and other URLs where there is no filename.
+    """
+    try:
+        path = urllib.parse.urlparse(url).path.rstrip('/')
+        if not path:
+            return None
+        basename = urllib.parse.unquote(path.split('/')[-1])
+        # Only accept if it has a recognisable extension.
+        if '.' in basename and not basename.startswith('.'):
+            return basename
+    except Exception:
+        pass
+    return None
+
+
+def _download_url_tmp(url: str, suffix: str, timeout: int = 30,
+                      max_bytes: Optional[int] = None) -> tuple:
+    """Download a URL to a delete=False temp file; return (path, inferred_filename_or_None).
+
+    Streams the response in 64 KB chunks to avoid loading the whole file into
+    memory. Extracts the filename from the Content-Disposition response header
+    when available (works for Google Drive and similar services). Cleans up the
+    temp file if the download fails before the path is returned.
+
+    `max_bytes` aborts the transfer as soon as the response passes the cap, so an
+    oversized link is rejected without filling the temp directory first — the
+    callers' own size checks can only run once the whole file is already on disk.
+    Only http(s) URLs are accepted; see _require_fetchable_url.
+    Raises: ValueError on a rejected URL or an oversized response;
+            urllib.error.URLError / urllib.error.HTTPError / OSError on failure.
+    """
+    _require_fetchable_url(url)
+    req = urllib.request.Request(url, headers={'User-Agent': 'BugasuraMCP/1.0'})
+    tmp = tempfile.NamedTemporaryFile(mode='wb', suffix=suffix, delete=False)
+    inferred_name: Optional[str] = None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            cd = resp.headers.get('Content-Disposition', '')
+            if cd:
+                m = re.search(r'filename[^;=\n]*=[\s"\']*([^;"\']+)[\s"\']*', cd, re.IGNORECASE)
+                if m:
+                    candidate = urllib.parse.unquote(m.group(1).strip('" \''))
+                    if '.' in candidate:
+                        inferred_name = candidate
+            written = 0
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if max_bytes is not None and written > max_bytes:
+                    limit = (f"{max_bytes / (1024 * 1024):.0f}MB" if max_bytes >= 1024 * 1024
+                             else f"{max_bytes / 1024:.0f}KB")
+                    raise ValueError(
+                        f"The file at this link is larger than {limit}, so the download was "
+                        f"stopped. Ask the user for a smaller file."
+                    )
+                tmp.write(chunk)
+    except Exception:
+        tmp.close()
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+    tmp.close()
+    return tmp.name, inferred_name
+
+
+def _fetch_url_bytes(url: str, max_bytes: int, timeout: int = 30) -> tuple:
+    """Read a URL into memory; return (content, exceeded_limit).
+
+    Stops reading once max_bytes has been passed and reports it through the
+    second element, so an oversized file is detected without ever buffering
+    the whole thing. `content` is truncated in that case and must not be
+    treated as the complete file.
+    Only http(s) URLs are accepted; see _require_fetchable_url.
+    Raises: ValueError on a rejected URL;
+            urllib.error.URLError / urllib.error.HTTPError / OSError on failure.
+    """
+    _require_fetchable_url(url)
+    req = urllib.request.Request(url, headers={'User-Agent': 'BugasuraMCP/1.0'})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # One byte past the cap is enough to tell "at the limit" from "over it".
+        content = resp.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        return content[:max_bytes], True
+    return content, False
+
+
+def _download_url_to_path(url: str, dest_path: str, timeout: int = 60,
+                          max_bytes: Optional[int] = None) -> int:
+    """Download a URL onto the local filesystem at dest_path; return the byte size.
+
+    Streams through _download_url_tmp() so the transfer never buffers the whole
+    file in memory, then moves the temp file into place — shutil.move rather than
+    os.replace, since the temp directory is often on a different filesystem. The
+    destination is only written once the download has fully succeeded, and the temp
+    file is removed if the move itself fails.
+
+    The http(s)-only guard and the optional `max_bytes` cap are inherited from
+    _download_url_tmp, so nothing lands on disk from a rejected or oversized URL.
+    Raises: ValueError on a rejected URL or an oversized response;
+            urllib.error.URLError / urllib.error.HTTPError / OSError on failure.
+    """
+    suffix = os.path.splitext(dest_path)[1] or '.tmp'
+    tmp_path, _ = _download_url_tmp(url, suffix, timeout, max_bytes)
+    try:
+        shutil.move(tmp_path, dest_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return os.path.getsize(dest_path)
