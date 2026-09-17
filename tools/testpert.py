@@ -12,9 +12,9 @@ This module mirrors the web frontend's createFunctionalReport payload for an
 existing project.
 """
 
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Literal, Optional, Union
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from output_types import ToolResponse
 from app import mcp
@@ -45,11 +45,15 @@ _KB_POLL_MAX_BUDGET_SECONDS = 45
 # GENERATE_TEST_COVERAGE is absent — it goes through test-plan endpoints.
 _TESTPERT_EXPECTED_TERMINAL = {
     'KNOWLEDGE_BASE': 'KNOWLEDGE_BASE',
-    'GENERATE_SPRINT_CONTEXT': 'DEEPEN_REQUIREMENTS_QUESTIONS',
+    'GENERATE_SPRINT_CONTEXT': 'SPRINT_CONTEXT',
+    'REGENERATE_SPRINT_CONTEXT': 'SPRINT_CONTEXT',
     'GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS': 'DEEPEN_REQUIREMENTS_QUESTIONS',
     'GENERATE_MISSING_REQUIREMENTS': 'MISSING_REQUIREMENTS',
+    'REGENERATE_MISSING_REQUIREMENTS': 'MISSING_REQUIREMENTS',
     'RISKS_IN_REQUIREMENTS': 'RISKS_IN_REQUIREMENTS',
+    'REGENERATE_RISKS_IN_REQUIREMENTS': 'RISKS_IN_REQUIREMENTS',
     'GENERATE_TEST_PLANING': 'TEST_PLANING',
+    'REGENERATE_TEST_PLANING': 'TEST_PLANING',
     'GENERATE_ENRICH_REQUIREMENTS': 'ENRICH_REQUIREMENTS',
     'TEST_COVERAGE': 'TEST_COVERAGE',
     'GENERATE_TEST_CASES': 'TEST_CASES',
@@ -59,19 +63,23 @@ _TESTPERT_EXPECTED_TERMINAL = {
 _STATUS_ORDER = {
     'SPRINT_DETAILS': 0,
     'KNOWLEDGE_BASE': 1,
-    'DEEPEN_REQUIREMENTS_QUESTIONS': 2,
-    'MISSING_REQUIREMENTS': 3,
-    'RISKS_IN_REQUIREMENTS': 4,
-    'TEST_PLANING': 5,
+    'SPRINT_CONTEXT': 2,
+    'SPRINT_CONTEXT_USER_VALIDATION': 2,
+    'DEEPEN_REQUIREMENTS_QUESTIONS': 3,
+    'MISSING_REQUIREMENTS': 4,
+    'RISKS_IN_REQUIREMENTS': 5,
     'ENRICH_REQUIREMENTS': 6,
-    'TEST_COVERAGE': 7,
-    'TEST_CASES': 8,
+    'TEST_PLANING': 7,
+    'TEST_COVERAGE': 8,
+    'TEST_CASES': 9,
 }
 
 # --- User-facing labels -------------------------------------------------------
 _FRIENDLY_STATUS = {
     'SPRINT_DETAILS': 'sprint setup',
     'KNOWLEDGE_BASE': 'knowledge base',
+    'SPRINT_CONTEXT': 'sprint context review',
+    'SPRINT_CONTEXT_USER_VALIDATION': 'document review',
     'DEEPEN_REQUIREMENTS_QUESTIONS': 'requirement questions',
     'MISSING_REQUIREMENTS': 'missing requirements',
     'RISKS_IN_REQUIREMENTS': 'requirement risks',
@@ -83,6 +91,22 @@ _FRIENDLY_STATUS = {
 
 # Per terminal status: (message to user, auto-show directive).
 _REACHED = {
+    'SPRINT_CONTEXT': (
+        "I've analyzed the knowledge base and built the sprint context.",
+        "This is an instruction for you, not a summary to relay — do not describe this plan to the user. "
+        "Just call bugasura_testpert_get_sprint_context right now, and show the user the actual affected "
+        "modules, user roles, and feature/sub-feature tree it returns. Let them add, remove, or edit any "
+        "of these (features via add_feature/delete_feature; modules/roles via confirm_sprint_context's "
+        "params), then call bugasura_testpert_confirm_sprint_context to advance to the requirement "
+        "questions."),
+    'SPRINT_CONTEXT_USER_VALIDATION': (
+        "I couldn't confidently classify one or more of the uploaded documents.",
+        "This is an instruction for you, not a summary to relay — do not describe this plan to the user. "
+        "Call bugasura_testpert_get_kb_validation to get the flagged files and their reasons. Then, for "
+        "EACH flagged file, ASK THE USER which role to assign — Requirements, Reference, or Constraints — "
+        "or whether to delete the file instead. Do NOT choose a role yourself; this is the user's call, "
+        "one file at a time. Once every remaining file has the user's chosen role, submit them with "
+        "bugasura_testpert_resolve_kb_validation to continue."),
     'DEEPEN_REQUIREMENTS_QUESTIONS': (
         "I've reviewed your documents and prepared some questions to refine the requirements.",
         "Immediately fetch and show the user these questions (bugasura_testpert_get_requirement_contexts category='deepen_questions'), "
@@ -736,10 +760,9 @@ async def start_skip_testplan(
             'message': "The test plan is ready.",
             'next_step': "Show the focus areas (get_testplan). This is a skip-enrich sprint, so do NOT show/edit features (no get_features). Do NOT ask first.",
         }, testrun_id, sprint_id)
-    # Forward-only guard, SKIP-AWARE: in the skip flow the predecessor is ENRICH_REQUIREMENTS,
-    # which sits *after* TEST_PLANING in the normal linear order (_STATUS_ORDER) — so the generic
-    # _is_backward_transition() would wrongly reject a legitimate ENRICH_REQUIREMENTS re-entry.
-    # Only block when the sprint is genuinely past the plan (coverage / test cases already done).
+    # Forward-only guard: only block when the sprint is genuinely past the plan
+    # (coverage / test cases already done). Checked manually rather than via
+    # _is_backward_transition() since that compares terminals, not raw statuses.
     if current in ('TEST_COVERAGE', 'GENERATE_TEST_CASES', 'TEST_CASES_IN_PROGRESS',
                    'TEST_CASES', 'TEST_CASES_ERROR'):
         return _backward_blocked_response(current, 'GENERATE_TEST_PLANING')
@@ -806,8 +829,7 @@ async def start_skip_testplan(
             'next_step': "Show the focus areas (get_testplan). This is a skip-enrich sprint, so do NOT show/edit features (no get_features). Do NOT ask first.",
         }, testrun_id, sprint_id)
     if poll['outcome'] == 'error':
-        return _engine_error_response(poll['current'],
-                                      "Re-run bugasura_testpert_start_skip_testplan to retry.")
+        return _engine_error_response(poll['current'], _retry_hint_for(poll['current']))
     if poll['outcome'] == 'read_error':
         return {
             'status': 'failed', 'error': 'Could not read sprint status',
@@ -839,11 +861,14 @@ async def start_skip_testplan(
 async def advance_testpert(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     to_status: Optional[Literal[
-        'KNOWLEDGE_BASE', 'GENERATE_SPRINT_CONTEXT', 'GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS',
-        'GENERATE_MISSING_REQUIREMENTS', 'RISKS_IN_REQUIREMENTS', 'GENERATE_TEST_PLANING',
-        'GENERATE_ENRICH_REQUIREMENTS', 'TEST_COVERAGE', 'GENERATE_TEST_CASES'
-    ]] = Field(default=None, description="Status to set before polling. Omit to only read/poll the current status. To continue polling a phase already kicked off, call again with this omitted."),
-    wait_for: Optional[str] = Field(default=None, description="Status to poll until (e.g. 'DEEPEN_REQUIREMENTS_QUESTIONS', 'MISSING_REQUIREMENTS', 'TEST_PLANING', 'TEST_CASES'). Omit to skip polling. If omitted but to_status is set, the expected terminal is suggested in next_step."),
+        'KNOWLEDGE_BASE', 'GENERATE_SPRINT_CONTEXT', 'REGENERATE_SPRINT_CONTEXT',
+        'GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS',
+        'GENERATE_MISSING_REQUIREMENTS', 'REGENERATE_MISSING_REQUIREMENTS',
+        'RISKS_IN_REQUIREMENTS', 'REGENERATE_RISKS_IN_REQUIREMENTS', 'GENERATE_TEST_PLANING',
+        'REGENERATE_TEST_PLANING', 'GENERATE_ENRICH_REQUIREMENTS', 'TEST_COVERAGE',
+        'GENERATE_TEST_CASES'
+    ]] = Field(default=None, description="Status to set before polling. Omit to only read/poll the current status. To continue polling a phase already kicked off, call again with this omitted. Use REGENERATE_TEST_PLANING (not GENERATE_TEST_PLANING) to retry a failed test plan."),
+    wait_for: Optional[Union[str, List[str]]] = Field(default=None, description="Status to poll until (e.g. 'DEEPEN_REQUIREMENTS_QUESTIONS', 'MISSING_REQUIREMENTS', 'TEST_PLANING', 'TEST_CASES'). Pass a list when a phase has more than one valid stop, e.g. ['SPRINT_CONTEXT', 'SPRINT_CONTEXT_USER_VALIDATION']. Omit to skip polling. If omitted but to_status is set, the expected terminal is suggested in next_step."),
     requirement_analysis_json: Optional[str] = Field(default=None, description="JSON string for data-bearing transitions (sent as requirementAnalysisJsonData), e.g. when moving to RISKS_IN_REQUIREMENTS with the approved data."),
     testpert_flow_attempt: Optional[int] = Field(default=None, description="Retry attempt counter for REGENERATE flows (0-99). Usually omit."),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response). When provided, a clickable sprint link is included once a phase is reached."),
@@ -859,8 +884,8 @@ async def advance_testpert(
       so the admin gate is bypassed). Data-bearing transitions can carry
       `requirement_analysis_json`.
     - With `wait_for`: poll /v1/testpert/sprint/getStatus every few seconds (up to
-      `max_wait_seconds`) until the status equals `wait_for`, hits an `*_ERROR`, or the
-      budget runs out (returns in-progress so the caller can poll again).
+      `max_wait_seconds`) until the status matches any of `wait_for`, hits an `*_ERROR`,
+      or the budget runs out (returns in-progress so the caller can poll again).
 
     Returns:
         dict: {status, current_status, advanced_to?, reached?, in_progress?, message, next_step?}
@@ -917,48 +942,48 @@ async def advance_testpert(
     # 2. Poll, if requested.
     if wait_for:
         budget = max(0, min(int(max_wait_seconds), _KB_POLL_MAX_BUDGET_SECONDS))
-        deadline = time.monotonic() + budget
-        while True:
-            status_resp = await _get_sprint_testpert_status_raw(api_key, tid, pid, sprint_id)
-            current = _extract_sprint_status(status_resp)
-            if current is None:
-                return {
-                    'status': 'failed',
-                    'error': 'Could not read sprint TestPert status',
-                    'error_type': 'StatusReadError',
-                    'message': 'getStatus did not return a sprint_testpert_status.',
-                    'raw': status_resp,
-                }
-            if current == wait_for:
-                if not testrun_id:
-                    testrun_id = _extract_testrun_id(status_resp)
-                msg, ns = _REACHED.get(current, (f"The {_friendly(current)} is ready.", ""))
-                out = {
-                    'status': 'OK',
-                    'current_status': current,
-                    'advanced_to': to_status,
-                    'reached': True,
-                    'message': msg,
-                }
-                if ns:
-                    out['next_step'] = ns
-                return _attach_sprint_link(out, testrun_id, sprint_id,
-                                           tab='testcase' if current == 'TEST_CASES' else None)
-            if current.endswith('_ERROR'):
-                return _engine_error_response(
-                    current, "Re-run the matching GENERATE/REGENERATE step to retry.")
-            if time.monotonic() >= deadline:
-                return {
-                    'status': 'OK',
-                    'current_status': current,
-                    'advanced_to': to_status,
-                    'reached': False,
-                    'in_progress': True,
-                    'message': _working_message(),
-                    'next_step': (f"Call bugasura_testpert_advance again with to_status omitted and "
-                                  f"wait_for='{wait_for}' to keep checking."),
-                }
-            await asyncio.sleep(_KB_POLL_INTERVAL_SECONDS)
+        targets = [wait_for] if isinstance(wait_for, str) else list(wait_for)
+        poll = await _poll_sprint_until(api_key, tid, pid, sprint_id, targets, budget)
+        if poll['outcome'] == 'read_error':
+            return {
+                'status': 'failed',
+                'error': 'Could not read sprint TestPert status',
+                'error_type': 'StatusReadError',
+                'message': 'getStatus did not return a sprint_testpert_status.',
+                'raw': poll.get('raw'),
+            }
+        if poll['outcome'] == 'reached':
+            current = poll['current']
+            if not testrun_id:
+                testrun_id = _extract_testrun_id(poll.get('raw'))
+            msg, ns = _REACHED.get(current, (f"The {_friendly(current)} is ready.", ""))
+            out = {
+                'status': 'OK',
+                'current_status': current,
+                'advanced_to': to_status,
+                'reached': True,
+                'message': msg,
+            }
+            if ns:
+                out['next_step'] = ns
+            return _attach_sprint_link(out, testrun_id, sprint_id,
+                                       tab='testcase' if current == 'TEST_CASES' else None)
+        if poll['outcome'] == 'error':
+            return _engine_error_response(poll['current'], _retry_hint_for(poll['current']))
+        # timeout — still running
+        return {
+            'status': 'OK',
+            'current_status': poll['current'],
+            'advanced_to': to_status,
+            'reached': False,
+            'in_progress': True,
+            'message': _working_message(),
+            'next_step': (f"Call bugasura_testpert_advance again with to_status omitted and "
+                          f"wait_for={targets[0]!r} to keep checking."
+                          if len(targets) == 1 else
+                          f"Call bugasura_testpert_advance again with to_status omitted and "
+                          f"wait_for={targets!r} to keep checking."),
+        }
 
     # 3. No polling requested — return the current status.
     status_resp = await _get_sprint_testpert_status_raw(api_key, tid, pid, sprint_id)
@@ -1207,8 +1232,11 @@ async def delete_testpert_context_question(
     description = (
         "Write the user's review back to a TestPert sprint's requirement contexts: answers to "
         "deepen-requirement questions, and approve/reject/edit decisions on missing requirements "
-        "and risks. Accepts a batch of per-row updates. Call after bugasura_testpert_get_requirement_contexts, "
-        "before advancing to the next status."
+        "and risks. Accepts a batch of per-row updates. Call after bugasura_testpert_get_requirement_contexts. "
+        "If the sprint is at MISSING_REQUIREMENTS, this advances it to RISKS_IN_REQUIREMENTS once every "
+        "missing requirement has an approve/reject decision (advance=True by default) — that transition "
+        "is a synchronous status flip, no polling needed. Batches that leave some rows undecided just "
+        "save and report how many are left. Set advance=False to only save."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
@@ -1219,6 +1247,7 @@ async def update_testpert_requirement_contexts(
         "'is_approved': <bool, optional>, 'is_edited': <bool, optional>}. "
         "If details/title are given and is_edited is omitted, is_edited defaults to true."
     )),
+    advance: bool = Field(default=True, description="If True (default) and the sprint is at MISSING_REQUIREMENTS, advance to RISKS_IN_REQUIREMENTS once every missing requirement has a decision. Undecided rows left over keep the sprint where it is (the count comes back as undecided_missing_requirements). No effect at other stages (e.g. deepen-questions or risks) — advance those manually with bugasura_testpert_advance."),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
@@ -1228,7 +1257,10 @@ async def update_testpert_requirement_contexts(
     Apply per-row updates to requirement contexts via /v1/testpertrequirementcontexts/update.
 
     Each update targets one requirement_context_id and sends only the fields provided
-    (partial update). Returns a per-item result list plus a summary count.
+    (partial update). Returns a per-item result list plus a summary count, always including
+    `advanced` (whether the sprint moved on). When advance=True (default) and the save succeeds
+    while the sprint is at MISSING_REQUIREMENTS, re-reads the rows and POSTs RISKS_IN_REQUIREMENTS
+    (a synchronous flip — no engine dispatch, no polling) only once none are left undecided.
     """
     api_key = _get_api_key(api_key)
     validation = await validate_api_key(api_key)
@@ -1295,7 +1327,7 @@ async def update_testpert_requirement_contexts(
         })
 
     overall_ok = succeeded == len(results) and succeeded > 0
-    return {
+    result = {
         'status': 'OK' if overall_ok else 'failed',
         'sprint_id': sprint_id,
         'updated': succeeded,
@@ -1303,13 +1335,69 @@ async def update_testpert_requirement_contexts(
         'results': results,
         'message': (f"Saved {succeeded} of {len(results)} item(s)." +
                     ("" if overall_ok else " A few couldn't be saved — see results.")),
-        'next_step': (
-            "Once the user has reviewed everything, continue with bugasura_testpert_advance "
-            "(to_status='GENERATE_MISSING_REQUIREMENTS' after the questions, 'RISKS_IN_REQUIREMENTS' "
-            "after missing requirements, 'GENERATE_TEST_PLANING' after risks). Describe each step to "
-            "the user in plain words — never show status codes or field names."
-        ),
     }
+
+    result['advanced'] = False
+
+    # Auto-advance MISSING_REQUIREMENTS -> RISKS_IN_REQUIREMENTS: this is a synchronous status
+    # flip (no engine dispatch, no polling — see Testpert.php's $statusAgent map), so it's safe
+    # to do right here instead of relying on the caller to remember a separate advance call.
+    #
+    # Only once EVERY missing requirement has a decision, though: the flip is one-way (the API
+    # only reaches RISKS_IN_REQUIREMENTS from MISSING_REQUIREMENTS) and callers are told partial
+    # batches are fine, so advancing on the first batch would strand the rest unreviewed.
+    if advance and overall_ok:
+        status_resp = await _get_sprint_testpert_status_raw(
+            api_key, context['team_id'], context['project_id'], sprint_id)
+        current = _extract_sprint_status(status_resp)
+        if current == 'MISSING_REQUIREMENTS':
+            pending = await _count_undecided_missing(api_key, context['project_id'], sprint_id)
+            if pending is None:
+                result['next_step'] = (
+                    "Saved. I couldn't check whether every missing requirement has been reviewed, so "
+                    "I've left the sprint where it is — confirm with the user, then move on with "
+                    "bugasura_testpert_advance(to_status='RISKS_IN_REQUIREMENTS')."
+                )
+                return result
+            undecided, total = pending
+            if undecided:
+                result['undecided_missing_requirements'] = undecided
+                result['next_step'] = (
+                    f"Saved. {undecided} of {total} missing requirement(s) still have no approve/reject "
+                    f"decision, so I've kept the sprint on this step. Show the user the ones still "
+                    f"pending (bugasura_testpert_get_requirement_contexts category='missing') and save "
+                    f"their decisions; the sprint moves on by itself once none are left."
+                )
+                return result
+
+            testrun_id = _extract_testrun_id(status_resp)
+            adv = await make_api_request('POST', '/v1/testpert/sprint/updateStatus', api_key, data={
+                'appId': str(context['project_id']),
+                'teamId': str(context['team_id']),
+                'sprintId': str(sprint_id),
+                'testpertStatus': 'RISKS_IN_REQUIREMENTS',
+            })
+            if isinstance(adv, dict) and adv.get('status') == 'OK':
+                msg, ns = _REACHED['RISKS_IN_REQUIREMENTS']
+                result['current_status'] = 'RISKS_IN_REQUIREMENTS'
+                result['advanced'] = True
+                result['message'] += ' ' + msg
+                result['next_step'] = ns
+                return _attach_sprint_link(result, testrun_id, sprint_id)
+            result['next_step'] = (
+                "Saved, but advancing to RISKS_IN_REQUIREMENTS failed — retry with "
+                "bugasura_testpert_advance(to_status='RISKS_IN_REQUIREMENTS')."
+            )
+            return result
+
+    result['next_step'] = (
+        "Once the user has reviewed everything, continue with bugasura_testpert_advance "
+        "(to_status='GENERATE_MISSING_REQUIREMENTS' after the questions). After risks, call "
+        "bugasura_testpert_enrich_requirements (or bugasura_testpert_generate_coverage directly — "
+        "it drives enrichment and the test plan itself). Describe each step to the user in plain "
+        "words — never show status codes or field names."
+    )
+    return result
 
 
 @mcp.tool(
@@ -1680,8 +1768,7 @@ async def generate_testpert_testcases(
         if current == 'TEST_CASES':
             return _done("Test cases generated.", last_completed, last_total)
         if current and current.endswith('_ERROR'):
-            return _engine_error_response(current,
-                                          "Re-run bugasura_testpert_generate_testcases to retry.")
+            return _engine_error_response(current, _retry_hint_for(current))
 
         # Secondary: fetch sub-features for progress display and as a fallback completion signal.
         # Includes the default Business Critical Flow feature in the count.
@@ -2099,16 +2186,17 @@ async def regenerate_testpert_testcases(
     return _attach_sprint_link(out, testrun_id, sprint_id, tab='testcase')
 
 
-# --- Enrich requirements (TEST_PLANING -> ENRICH_REQUIREMENTS) — visible step --
+# --- Enrich requirements (RISKS_IN_REQUIREMENTS -> ENRICH_REQUIREMENTS) — visible step --
 @mcp.tool(
     name = "bugasura_testpert_enrich_requirements",
     description = (
         "Run the requirements-enrichment phase as a visible step: set GENERATE_ENRICH_REQUIREMENTS and "
-        "poll until ENRICH_REQUIREMENTS. Use this after the test plan (TEST_PLANING) and before coverage "
-        "so enrichment is explicit. Re-callable; if it's still enriching, call again. NOT used for "
-        "skip-enrich sprints (those already reach ENRICH_REQUIREMENTS via the requirements step). "
-        "After this, continue with bugasura_testpert_generate_coverage. (generate_coverage can also run "
-        "enrichment itself, so this tool is optional — it just makes the phase visible.)"
+        "poll until ENRICH_REQUIREMENTS. Use this after the requirement risks (RISKS_IN_REQUIREMENTS) "
+        "and before the test plan so enrichment is explicit. Re-callable; if it's still enriching, call "
+        "again. NOT used for skip-enrich sprints (those already reach ENRICH_REQUIREMENTS via the "
+        "requirements step). After this, continue with bugasura_testpert_generate_coverage — it builds "
+        "the test plan and moves to coverage. (generate_coverage can also run enrichment itself, so this "
+        "tool is optional — it just makes the phase visible.)"
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
@@ -2121,12 +2209,14 @@ async def enrich_testpert_requirements(
     api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
-    Drive the enrichment phase TEST_PLANING -> GENERATE_ENRICH_REQUIREMENTS -> ENRICH_REQUIREMENTS.
+    Drive the enrichment phase RISKS_IN_REQUIREMENTS -> GENERATE_ENRICH_REQUIREMENTS -> ENRICH_REQUIREMENTS.
 
     Re-callable: returns done if already ENRICH_REQUIREMENTS; if already generating it just polls;
-    otherwise (at TEST_PLANING / *_ERROR) it sets GENERATE_ENRICH_REQUIREMENTS then polls. Skip-enrich
-    sprints don't use this (they reach ENRICH_REQUIREMENTS via start_skip_testplan). generate_coverage
-    still bundles enrichment, so this tool is an optional, visible front-half of that.
+    otherwise (at RISKS_IN_REQUIREMENTS) it sets GENERATE_ENRICH_REQUIREMENTS then polls. A failed
+    enrichment is reported as unrecoverable rather than retried — the status switch only accepts
+    GENERATE_ENRICH_REQUIREMENTS from RISKS_IN_REQUIREMENTS and has no REGENERATE_* counterpart.
+    Skip-enrich sprints don't use this (they reach ENRICH_REQUIREMENTS via start_skip_testplan).
+    generate_coverage still bundles enrichment, so this tool is an optional, visible front-half of that.
     """
     api_key = _get_api_key(api_key)
     validation = await validate_api_key(api_key)
@@ -2166,24 +2256,30 @@ async def enrich_testpert_requirements(
             'status': 'OK', 'current_status': 'ENRICH_REQUIREMENTS', 'reached': True,
             'message': "The requirements are enriched.",
             'next_step': (
-                "Next phase is coverage: call bugasura_testpert_generate_coverage, then "
-                "bugasura_testpert_get_coverage (show the user the coverage mind map), then "
-                "bugasura_testpert_generate_testcases."
+                "Next: call bugasura_testpert_generate_coverage — it builds the test plan and moves to "
+                "coverage — then bugasura_testpert_get_coverage (show the user the coverage mind map), "
+                "then bugasura_testpert_generate_testcases."
             ),
         }, testrun_id, sprint_id)
+
+    # A failed enrichment can't be restarted through the API (see _ERROR_RETRY) — the status
+    # switch only accepts GENERATE_ENRICH_REQUIREMENTS from RISKS_IN_REQUIREMENTS and has no
+    # REGENERATE_ENRICH_REQUIREMENTS case at all.
+    if current == 'ENRICH_REQUIREMENTS_ERROR':
+        return _engine_error_response(current, _retry_hint_for(current))
 
     # Don't step backward into enrichment from a later phase.
     if _is_backward_transition(current, 'GENERATE_ENRICH_REQUIREMENTS'):
         return _backward_blocked_response(current, 'GENERATE_ENRICH_REQUIREMENTS')
 
     # Set GENERATE_ENRICH_REQUIREMENTS unless it's already generating.
-    if current != 'GENERATE_ENRICH_REQUIREMENTS':
-        if current not in ('TEST_PLANING', 'ENRICH_REQUIREMENTS_ERROR'):
+    if current not in ('GENERATE_ENRICH_REQUIREMENTS', 'ENRICH_REQUIREMENTS_IN_PROGRESS'):
+        if current != 'RISKS_IN_REQUIREMENTS':
             return {
                 'status': 'failed',
-                'error': 'Enrichment runs after the test plan',
+                'error': 'Enrichment runs after the requirement risks',
                 'error_type': 'StatusTransitionError',
-                'message': ("Requirements enrichment runs from the test plan stage (TEST_PLANING). "
+                'message': ("Requirements enrichment runs from the risks stage (RISKS_IN_REQUIREMENTS). "
                             f"The sprint is at the {_friendly(current)} stage."),
                 'current_status': current,
             }
@@ -2214,8 +2310,7 @@ async def enrich_testpert_requirements(
             ),
         }, testrun_id, sprint_id)
     if poll['outcome'] == 'error':
-        return _engine_error_response(poll['current'],
-                                      "Re-run bugasura_testpert_enrich_requirements to retry.")
+        return _engine_error_response(poll['current'], _retry_hint_for(poll['current']))
     if poll['outcome'] == 'read_error':
         return {
             'status': 'failed', 'error': 'Could not read sprint status',
@@ -2229,33 +2324,41 @@ async def enrich_testpert_requirements(
     }, testrun_id, sprint_id)
 
 
-# --- Move to test coverage (ENRICH_REQUIREMENTS -> TEST_COVERAGE) -----------
+# --- Move to test coverage (RISKS_IN_REQUIREMENTS -> ... -> TEST_PLANING -> TEST_COVERAGE) ---
 @mcp.tool(
     name = "bugasura_testpert_generate_coverage",
     description = (
-        "Move a TestPert sprint to TEST_COVERAGE (required before generating test cases). Honors the "
-        "sprint's enrich setting: if requirements-enrichment is NOT skipped, this first runs the enrich "
-        "phase (GENERATE_ENRICH_REQUIREMENTS -> ENRICH_REQUIREMENTS) and only then sets TEST_COVERAGE, "
-        "so the enrich step is never silently jumped. If enrich is skipped for the sprint, it goes "
-        "TEST_PLANING -> TEST_COVERAGE directly. Re-callable; if enrich is still running it reports "
-        "progress and you call again."
+        "Move a TestPert sprint to TEST_COVERAGE (required before generating test cases). TEST_COVERAGE "
+        "is only valid from TEST_PLANING, so unless the sprint skips enrichment, this drives it there "
+        "first — RISKS_IN_REQUIREMENTS -> GENERATE_ENRICH_REQUIREMENTS -> ENRICH_REQUIREMENTS -> "
+        "GENERATE_TEST_PLANING -> TEST_PLANING — one phase at a time, then sets TEST_COVERAGE. For "
+        "skip-enrich sprints, run bugasura_testpert_start_skip_testplan first to reach TEST_PLANING. "
+        "Re-callable; if a phase is still running it reports progress and you call again."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def generate_testpert_coverage(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
-    max_wait_seconds: int = Field(default=45, description="Upper bound on polling while the enrich phase runs (0-45, default 45). Capped at 45s; re-call to keep waiting."),
+    max_wait_seconds: int = Field(default=45, description="Upper bound on polling for whichever phase is currently running — enrich or test plan (0-45, default 45). Capped at 45s; re-call to keep waiting."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
-    Set TEST_COVERAGE via /v1/testpert/sprint/updateStatus.
+    Drive to TEST_PLANING (unless already there) then set TEST_COVERAGE via
+    /v1/testpert/sprint/updateStatus.
 
-    TEST_COVERAGE is a valid direct transition from ENRICH_REQUIREMENTS / TEST_PLANING in the
-    status switch (Testpert.php:1540), so this is a single synchronous status update — no
-    GENERATE_TEST_COVERAGE marker, no test-plan write, no admin requirement.
+    TEST_COVERAGE is a valid transition ONLY from TEST_PLANING in the status switch
+    (Testpert.php). For the non-skip flow this means enrichment and the test plan must both
+    run first — each is one POST + one bounded poll per call, so a single call advances at
+    most one phase; re-call to keep going. Setting TEST_COVERAGE itself is synchronous (no
+    GENERATE_TEST_COVERAGE marker, no admin requirement).
+
+    Error handling follows what the status switch actually accepts: a failed test plan is
+    retried with REGENERATE_TEST_PLANING (GENERATE_TEST_PLANING is only legal straight after
+    enrichment), while a failed enrichment has no API retry path at all and is reported as
+    such instead of being re-posted.
     """
     api_key = _get_api_key(api_key)
     validation = await validate_api_key(api_key)
@@ -2293,11 +2396,15 @@ async def generate_testpert_coverage(
     if _is_backward_transition(current, 'TEST_COVERAGE'):
         return _backward_blocked_response(current, 'TEST_COVERAGE')
 
-    # Enrich gate: unless the sprint was created to skip enrichment, we must NOT jump straight
-    # from TEST_PLANING to TEST_COVERAGE (the status machine allows it, but doing so skips the
-    # GENERATE_ENRICH_REQUIREMENTS -> ENRICH_REQUIREMENTS phase). Drive enrich first, then poll.
-    if not skip_enrich and current in ('TEST_PLANING', 'GENERATE_ENRICH_REQUIREMENTS', 'ENRICH_REQUIREMENTS_ERROR'):
-        if current in ('TEST_PLANING', 'ENRICH_REQUIREMENTS_ERROR'):
+    # A failed enrichment can't be restarted through the API (see _ERROR_RETRY), so say that
+    # rather than firing a GENERATE_ENRICH_REQUIREMENTS the status switch will reject.
+    if current == 'ENRICH_REQUIREMENTS_ERROR':
+        return _engine_error_response(current, _retry_hint_for(current))
+
+    # Phase 1 (non-skip only): RISKS_IN_REQUIREMENTS -> GENERATE_ENRICH_REQUIREMENTS -> ENRICH_REQUIREMENTS.
+    if not skip_enrich and current in ('RISKS_IN_REQUIREMENTS', 'GENERATE_ENRICH_REQUIREMENTS',
+                                       'ENRICH_REQUIREMENTS_IN_PROGRESS'):
+        if current == 'RISKS_IN_REQUIREMENTS':
             enr = await make_api_request('POST', '/v1/testpert/sprint/updateStatus', api_key, data={
                 'appId': str(pid),
                 'teamId': str(tid),
@@ -2315,11 +2422,10 @@ async def generate_testpert_coverage(
                     'raw': enr,
                 }
 
-        # Poll until the engine finishes enrichment.
+        # Poll until the engine finishes enrichment (one bounded poll per call).
         poll = await _poll_sprint_until(api_key, tid, pid, sprint_id, 'ENRICH_REQUIREMENTS', budget)
         if poll['outcome'] == 'error':
-            return _engine_error_response(poll['current'],
-                                          "Re-run bugasura_testpert_generate_coverage to retry enrichment.")
+            return _engine_error_response(poll['current'], _retry_hint_for(poll['current']))
         if poll['outcome'] == 'read_error':
             return {
                 'status': 'failed', 'error': 'Could not read sprint status',
@@ -2330,9 +2436,93 @@ async def generate_testpert_coverage(
             return _attach_sprint_link({
                 'status': 'OK', 'current_status': poll['current'], 'reached': False, 'in_progress': True,
                 'message': "Enriching the requirements — " + _working_message(),
-                'next_step': "Call bugasura_testpert_generate_coverage again to keep going (it will move to coverage once enrichment finishes).",
+                'next_step': "Call bugasura_testpert_generate_coverage again to keep going.",
             }, testrun_id, sprint_id)
-        current = 'ENRICH_REQUIREMENTS'
+
+        # Enrichment done — kick off the test plan now; poll it on the NEXT call so each call
+        # stays within one bounded poll (well under the MCP client timeout).
+        tp = await make_api_request('POST', '/v1/testpert/sprint/updateStatus', api_key, data={
+            'appId': str(pid),
+            'teamId': str(tid),
+            'sprintId': str(sprint_id),
+            'testpertStatus': 'GENERATE_TEST_PLANING',
+        })
+        if not (isinstance(tp, dict) and tp.get('status') == 'OK'):
+            return {
+                'status': 'failed',
+                'error': 'Could not start test-plan generation',
+                'error_type': 'StatusTransitionError',
+                'message': (tp.get('message') if isinstance(tp, dict) else None)
+                           or "The API rejected GENERATE_TEST_PLANING.",
+                'current_status': tp.get('currentTestpertStatus') if isinstance(tp, dict) else 'ENRICH_REQUIREMENTS',
+                'raw': tp,
+            }
+        return _attach_sprint_link({
+            'status': 'OK', 'current_status': 'GENERATE_TEST_PLANING', 'reached': False, 'in_progress': True,
+            'message': "Enrichment done — building the test plan. " + _working_message(),
+            'next_step': "Call bugasura_testpert_generate_coverage again to keep going.",
+        }, testrun_id, sprint_id)
+
+    # Phase 2: ENRICH_REQUIREMENTS -> GENERATE_TEST_PLANING -> TEST_PLANING (both flows use the
+    # same predecessor here). ENRICH_REQUIREMENTS is included so this picks up cleanly when
+    # enrichment was already run separately (e.g. via bugasura_testpert_enrich_requirements).
+    if current in ('ENRICH_REQUIREMENTS', 'GENERATE_TEST_PLANING', 'REGENERATE_TEST_PLANING',
+                   'TEST_PLANING_IN_PROGRESS', 'TEST_PLANING_ERROR'):
+        if current in ('ENRICH_REQUIREMENTS', 'TEST_PLANING_ERROR'):
+            # GENERATE_TEST_PLANING is only legal straight after enrichment; a failed plan has to
+            # be retried with REGENERATE_TEST_PLANING, which is the case that accepts *_ERROR.
+            plan_status = ('GENERATE_TEST_PLANING' if current == 'ENRICH_REQUIREMENTS'
+                           else 'REGENERATE_TEST_PLANING')
+            tp = await make_api_request('POST', '/v1/testpert/sprint/updateStatus', api_key, data={
+                'appId': str(pid),
+                'teamId': str(tid),
+                'sprintId': str(sprint_id),
+                'testpertStatus': plan_status,
+            })
+            if not (isinstance(tp, dict) and tp.get('status') == 'OK'):
+                return {
+                    'status': 'failed',
+                    'error': 'Could not start test-plan generation',
+                    'error_type': 'StatusTransitionError',
+                    'message': (tp.get('message') if isinstance(tp, dict) else None)
+                               or f"The API rejected {plan_status}.",
+                    'current_status': tp.get('currentTestpertStatus') if isinstance(tp, dict) else current,
+                    'raw': tp,
+                }
+
+        poll = await _poll_sprint_until(api_key, tid, pid, sprint_id, 'TEST_PLANING', budget)
+        if poll['outcome'] == 'error':
+            return _engine_error_response(poll['current'], _retry_hint_for(poll['current']))
+        if poll['outcome'] == 'read_error':
+            return {
+                'status': 'failed', 'error': 'Could not read sprint status',
+                'error_type': 'StatusReadError', 'raw': poll.get('raw'),
+                'message': "I couldn't read the sprint's progress just now — please try again.",
+            }
+        if poll['outcome'] != 'reached':  # timeout — still building
+            return _attach_sprint_link({
+                'status': 'OK', 'current_status': poll['current'], 'reached': False, 'in_progress': True,
+                'message': "Building the test plan — " + _working_message(),
+                'next_step': "Call bugasura_testpert_generate_coverage again to keep going.",
+            }, testrun_id, sprint_id)
+        current = 'TEST_PLANING'
+
+    if current != 'TEST_PLANING':
+        if skip_enrich:
+            return {
+                'status': 'failed', 'error': 'Test plan not ready yet', 'error_type': 'ValidationError',
+                'current_status': current,
+                'message': ("This skip-enrich sprint hasn't reached the test plan yet. Run "
+                            "bugasura_testpert_start_skip_testplan first."),
+            }
+        return {
+            'status': 'failed',
+            'error': 'Coverage runs after the test plan',
+            'error_type': 'ValidationError',
+            'current_status': current,
+            'message': (f"Test coverage needs the test plan (TEST_PLANING) first. The sprint is at the "
+                        f"{_friendly(current)} stage."),
+        }
 
     adv = await make_api_request('POST', '/v1/testpert/sprint/updateStatus', api_key, data={
         'appId': str(pid),
@@ -2346,7 +2536,7 @@ async def generate_testpert_coverage(
             'error': 'Could not set TEST_COVERAGE',
             'error_type': 'StatusTransitionError',
             'message': (adv.get('message') if isinstance(adv, dict) else None)
-                       or "The API rejected TEST_COVERAGE. It is valid only from ENRICH_REQUIREMENTS or TEST_PLANING.",
+                       or "The API rejected TEST_COVERAGE. It is valid only from TEST_PLANING.",
             'current_status': adv.get('currentTestpertStatus') if isinstance(adv, dict) else current,
             'raw': adv,
         }
@@ -2544,14 +2734,19 @@ async def delete_testpert_feature(
     return resp
 
 
-# --- Start requirement analysis (GENERATE_SPRINT_CONTEXT -> DEEPEN_REQUIREMENTS_QUESTIONS) ---
+# --- Start requirement analysis (GENERATE_SPRINT_CONTEXT -> SPRINT_CONTEXT) ---
 @mcp.tool(
     name = "bugasura_testpert_generate_sprint_context",
     description = (
         "Start requirement analysis after the knowledge base is uploaded: set the status to "
-        "GENERATE_SPRINT_CONTEXT and poll until it becomes DEEPEN_REQUIREMENTS_QUESTIONS. The sprint "
+        "GENERATE_SPRINT_CONTEXT and poll until it becomes SPRINT_CONTEXT (or, if some uploaded "
+        "document couldn't be confidently classified, SPRINT_CONTEXT_USER_VALIDATION). The sprint "
         "must be at KNOWLEDGE_BASE (where bugasura_testpert_upload_kb leaves it) and have at least one "
-        "connected KB. If it's still running when the time budget ends, call again to keep polling."
+        "connected KB. If it's still running when the time budget ends, call again to keep polling. "
+        "Once SPRINT_CONTEXT is reached, review it with bugasura_testpert_get_sprint_context / "
+        "bugasura_testpert_get_features, then call bugasura_testpert_confirm_sprint_context to continue "
+        "to the requirement questions. If SPRINT_CONTEXT_USER_VALIDATION is reached instead, "
+        "use bugasura_testpert_get_kb_validation and bugasura_testpert_resolve_kb_validation."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
@@ -2564,12 +2759,11 @@ async def generate_testpert_sprint_context(
     api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
-    Kick off sprint-context / requirement analysis and poll to the questions stage.
+    Kick off sprint-context / requirement analysis and poll to the SPRINT_CONTEXT stage.
 
-    Reads the current status first (re-callable): returns done if already
-    DEEPEN_REQUIREMENTS_QUESTIONS; if already generating it just polls; otherwise it sets
-    GENERATE_SPRINT_CONTEXT (valid from KNOWLEDGE_BASE) then polls until
-    DEEPEN_REQUIREMENTS_QUESTIONS.
+    Reads the current status first (re-callable): returns done if already at SPRINT_CONTEXT or
+    SPRINT_CONTEXT_USER_VALIDATION; if already generating it just polls; otherwise it sets
+    GENERATE_SPRINT_CONTEXT (valid from KNOWLEDGE_BASE) then polls until either status.
     """
     api_key = _get_api_key(api_key)
     validation = await validate_api_key(api_key)
@@ -2591,9 +2785,9 @@ async def generate_testpert_sprint_context(
     if not testrun_id:
         testrun_id = _extract_testrun_id(status_resp)
 
-    if current == 'DEEPEN_REQUIREMENTS_QUESTIONS':
-        msg, ns = _REACHED['DEEPEN_REQUIREMENTS_QUESTIONS']
-        return _attach_sprint_link({'status': 'OK', 'current_status': 'DEEPEN_REQUIREMENTS_QUESTIONS',
+    if current in ('SPRINT_CONTEXT', 'SPRINT_CONTEXT_USER_VALIDATION'):
+        msg, ns = _REACHED[current]
+        return _attach_sprint_link({'status': 'OK', 'current_status': current,
                 'reached': True, 'message': msg, 'next_step': ns}, testrun_id, sprint_id)
 
     # Don't restart requirement analysis from a later phase — that's a backward move.
@@ -2620,14 +2814,450 @@ async def generate_testpert_sprint_context(
                 'raw': adv,
             }
 
+    poll = await _poll_sprint_until(api_key, tid, pid, sprint_id,
+                                    ('SPRINT_CONTEXT', 'SPRINT_CONTEXT_USER_VALIDATION'), budget)
+    if poll['outcome'] == 'reached':
+        msg, ns = _REACHED[poll['current']]
+        return _attach_sprint_link({'status': 'OK', 'current_status': poll['current'],
+                'reached': True, 'message': msg, 'next_step': ns}, testrun_id, sprint_id)
+    if poll['outcome'] == 'error':
+        return _engine_error_response(poll['current'], _retry_hint_for(poll['current']))
+    if poll['outcome'] == 'read_error':
+        return {
+            'status': 'failed', 'error': 'Could not read sprint status',
+            'error_type': 'StatusReadError', 'raw': poll.get('raw'),
+            'message': "I couldn't read the sprint's progress just now — please try again.",
+        }
+    # timeout
+    return _attach_sprint_link({
+        'status': 'OK', 'current_status': poll['current'], 'reached': False, 'in_progress': True,
+        'message': _working_message(),
+        'next_step': "Call bugasura_testpert_generate_sprint_context again to keep checking.",
+    }, testrun_id, sprint_id)
+
+
+# --- KB validation (SPRINT_CONTEXT_USER_VALIDATION) -------------------------
+@mcp.tool(
+    name = "bugasura_testpert_get_kb_validation",
+    description = (
+        "Read the KB-validation verdict for a sprint parked at SPRINT_CONTEXT_USER_VALIDATION: the "
+        "uploaded documents the engine couldn't confidently classify, each with a reason. Call this "
+        "first, then ASK THE USER (not an automatic choice) for each file's role — Requirements, "
+        "Reference, or Constraints — or whether to remove it (bugasura_testpert_delete_kb). Submit the "
+        "user's chosen roles with bugasura_testpert_resolve_kb_validation to continue."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def get_testpert_kb_validation(
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
+) -> ToolResponse:
+    """GET /v1/testpert/sprint/getContext (dataType=USER_VALIDATION) and extract the flagged files."""
+    api_key = _get_api_key(api_key)
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    context = await select_team_project_context(api_key, team_id, project_id,
+                                                'bugasura_testpert_get_kb_validation')
+    if 'status' in context and context['status'] == 'selection_required':
+        return context
+    if not sprint_id:
+        return _sprint_selection_required(context['team_id'], context['project_id'])
+
+    tid, pid = context['team_id'], context['project_id']
+    resp = await _get_sprint_context_raw(api_key, tid, pid, sprint_id, 'USER_VALIDATION')
+    if not (isinstance(resp, dict) and resp.get('status') == 'OK'):
+        return {
+            'status': 'failed', 'error': 'Could not read KB validation details',
+            'error_type': 'ApiRequestError', 'raw': resp,
+            'message': "I couldn't read the flagged documents just now — please try again.",
+        }
+
+    details = resp.get('kbValidationDetails') or {}
+    files = resp.get('kbValidationFiles') or []
+    items = [{'kb_id': f.get('kb_id'), 'filename': f.get('filename'), 'reason': f.get('reason')}
+             for f in files if isinstance(f, dict)]
+
+    result = {
+        'status': 'OK',
+        'sprint_id': sprint_id,
+        'overall_confidence': details.get('overall_confidence'),
+        'files': items,
+        'count': len(items),
+    }
+    if items:
+        result['message'] = f"{len(items)} document(s) need a role before the sprint can continue."
+        result['next_step'] = (
+            "This is an instruction for you, not a summary to relay. For EACH file, show its "
+            "filename and reason, then ASK THE USER (one file at a "
+            "time is fine) to choose: remove it (bugasura_testpert_delete_kb), or a role — "
+            "REQUIREMENTS, REFERENCE, or CONSTRAINTS. Do NOT pick a role yourself. Once every "
+            "remaining file has the user's chosen role, call bugasura_testpert_resolve_kb_validation "
+            "with {kb_id, role} for each.")
+        return result
+
+    # Nothing flagged: say which of the two reasons applies rather than an empty success.
+    current = _extract_sprint_status(
+        await _get_sprint_testpert_status_raw(api_key, tid, pid, sprint_id))
+    result['current_status'] = current
+    if current == 'SPRINT_CONTEXT_USER_VALIDATION':
+        result['message'] = ("The sprint is waiting on document review but no flagged documents came "
+                             "back — the verdict file may not have been written yet.")
+        result['next_step'] = "Try bugasura_testpert_get_kb_validation again in a moment."
+    else:
+        result['message'] = (f"Nothing to review — this sprint is at the {_friendly(current)} stage, "
+                             f"not waiting on document classification.")
+        result['next_step'] = ("Check where the sprint actually is with bugasura_testpert_advance "
+                               "(to_status omitted) and continue from there.")
+    return result
+
+
+def _kb_validation_poll_result(poll: dict, testrun_id: Any, sprint_id: Any) -> dict:
+    """
+    Shape a poll that was waiting on SPRINT_CONTEXT / SPRINT_CONTEXT_USER_VALIDATION.
+
+    Shared by resolve_kb_validation's submit and resume paths. The timeout hint deliberately
+    names BOTH statuses — a regenerate can land back on user-validation, and polling for only
+    SPRINT_CONTEXT would never match.
+    """
+    if poll['outcome'] == 'reached':
+        msg, ns = _REACHED[poll['current']]
+        return _attach_sprint_link({'status': 'OK', 'current_status': poll['current'],
+                'reached': True, 'message': msg, 'next_step': ns}, testrun_id, sprint_id)
+    if poll['outcome'] == 'error':
+        return _engine_error_response(poll['current'], _retry_hint_for(poll['current']))
+    if poll['outcome'] == 'read_error':
+        return {
+            'status': 'failed', 'error': 'Could not read sprint status',
+            'error_type': 'StatusReadError', 'raw': poll.get('raw'),
+            'message': "I couldn't read the sprint's progress just now — please try again.",
+        }
+    return _attach_sprint_link({
+        'status': 'OK', 'current_status': poll['current'], 'reached': False, 'in_progress': True,
+        'message': _working_message(),
+        'next_step': ("Call bugasura_testpert_resolve_kb_validation again with the same roles to keep "
+                      "checking — it will not re-submit while the regenerate is running. (Equivalently: "
+                      "bugasura_testpert_advance with to_status omitted and "
+                      "wait_for=['SPRINT_CONTEXT', 'SPRINT_CONTEXT_USER_VALIDATION'].)"),
+    }, testrun_id, sprint_id)
+
+
+class KbFileRole(BaseModel):
+    """One flagged KB document plus the role the user picked for it."""
+    kb_id: int = Field(description="kb_id of the flagged document, from bugasura_testpert_get_kb_validation.")
+    role: Literal['REQUIREMENTS', 'REFERENCE', 'CONSTRAINTS'] = Field(
+        description=("What the document is to this sprint, as chosen BY THE USER: REQUIREMENTS (defines "
+                     "what to build/test), REFERENCE (background material), or CONSTRAINTS (rules and "
+                     "limits to respect). Never pick this yourself."))
+
+
+@mcp.tool(
+    name = "bugasura_testpert_resolve_kb_validation",
+    description = (
+        "Submit the user's role choices for the documents flagged by bugasura_testpert_get_kb_validation "
+        "and resume sprint-context generation. Only include files the user is keeping — remove others "
+        "first with bugasura_testpert_delete_kb. Sets REGENERATE_SPRINT_CONTEXT and polls until "
+        "SPRINT_CONTEXT (or SPRINT_CONTEXT_USER_VALIDATION again, if the engine is still unsure). "
+        "Re-callable: once the regenerate is running, calling again just keeps polling — it never "
+        "re-submits."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+)
+async def resolve_testpert_kb_validation(
+    roles: List[KbFileRole] = Field(description=(
+        "One entry per remaining flagged file, each {'kb_id': <int>, 'role': <REQUIREMENTS|REFERENCE|"
+        "CONSTRAINTS>}. Include every file the user is keeping — any flagged file left out is dropped "
+        "from the verdict. Get kb_id/reason from bugasura_testpert_get_kb_validation."
+    )),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
+    max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
+) -> ToolResponse:
+    """
+    Attach roles to the currently-flagged KB files and POST REGENERATE_SPRINT_CONTEXT with
+    sprintContextUserValidationData, then poll to SPRINT_CONTEXT / SPRINT_CONTEXT_USER_VALIDATION.
+    """
+    api_key = _get_api_key(api_key)
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    context = await select_team_project_context(api_key, team_id, project_id,
+                                                'bugasura_testpert_resolve_kb_validation')
+    if 'status' in context and context['status'] == 'selection_required':
+        return context
+    if not sprint_id:
+        return _sprint_selection_required(context['team_id'], context['project_id'])
+    if not roles:
+        return {'status': 'failed', 'error': 'No roles provided', 'error_type': 'ValidationError',
+                'message': 'Provide at least one {kb_id, role} in roles.'}
+
+    tid, pid = context['team_id'], context['project_id']
+    budget = max(0, min(int(max_wait_seconds), _KB_POLL_MAX_BUDGET_SECONDS))
+
+    status_resp = await _get_sprint_testpert_status_raw(api_key, tid, pid, sprint_id)
+    current = _extract_sprint_status(status_resp)
+    if not testrun_id:
+        testrun_id = _extract_testrun_id(status_resp)
+
+    # Already resolved by a previous call — don't re-fetch/re-post.
+    if current == 'SPRINT_CONTEXT':
+        msg, ns = _REACHED['SPRINT_CONTEXT']
+        return _attach_sprint_link({'status': 'OK', 'current_status': 'SPRINT_CONTEXT',
+                'reached': True, 'message': msg, 'next_step': ns}, testrun_id, sprint_id)
+
+    # A regenerate kicked off by an earlier call is still running — keep polling, never re-submit
+    # (the roles are already stored in the verdict file the engine is reading).
+    if current in ('REGENERATE_SPRINT_CONTEXT', 'SPRINT_CONTEXT_IN_PROGRESS'):
+        return _kb_validation_poll_result(
+            await _poll_sprint_until(api_key, tid, pid, sprint_id,
+                                     ('SPRINT_CONTEXT', 'SPRINT_CONTEXT_USER_VALIDATION'), budget),
+            testrun_id, sprint_id)
+
+    if _is_backward_transition(current, 'REGENERATE_SPRINT_CONTEXT'):
+        return _backward_blocked_response(current, 'REGENERATE_SPRINT_CONTEXT')
+
+    # Re-read the flagged files so the resubmitted verdict keeps its reason/confidence intact —
+    # only the role is ours to add.
+    ctx_resp = await _get_sprint_context_raw(api_key, tid, pid, sprint_id, 'USER_VALIDATION')
+    if not (isinstance(ctx_resp, dict) and ctx_resp.get('status') == 'OK'):
+        return {
+            'status': 'failed', 'error': 'Could not read KB validation details',
+            'error_type': 'ApiRequestError', 'raw': ctx_resp,
+            'message': "I couldn't re-read the flagged documents just now — please try again.",
+        }
+    details = ctx_resp.get('kbValidationDetails') or {}
+    flagged = [f for f in (details.get('irrelevant_files') or []) if isinstance(f, dict)]
+    role_by_kb_id = {str(r.kb_id): r.role for r in roles}
+    resolved, dropped = [], []
+    for f in flagged:
+        kb_id = str(f.get('kb_id'))
+        if kb_id in role_by_kb_id:
+            resolved.append({**f, 'role': role_by_kb_id[kb_id]})
+        else:
+            dropped.append(f.get('filename') or kb_id)
+    if not resolved:
+        return {
+            'status': 'failed', 'error': 'No matching flagged files', 'error_type': 'ValidationError',
+            'message': ("None of the given kb_id values match the currently flagged documents — "
+                        "re-check with bugasura_testpert_get_kb_validation."),
+        }
+    # Leaving a flagged file out removes it from the verdict entirely, which is a real choice the
+    # user may not have made — never let that happen silently.
+    if dropped:
+        return {
+            'status': 'failed', 'error': 'Some flagged documents have no role',
+            'error_type': 'ValidationError',
+            'unresolved_files': dropped,
+            'message': (f"{len(dropped)} flagged document(s) aren't in the roles list: "
+                        f"{', '.join(str(d) for d in dropped)}. Leaving them out drops them from the "
+                        f"verdict, so ask the user what they want for each — a role, or removal with "
+                        f"bugasura_testpert_delete_kb — then call this again with every remaining file "
+                        f"included."),
+        }
+    details['irrelevant_files'] = resolved
+
+    adv = await make_api_request('POST', '/v1/testpert/sprint/updateStatus', api_key, data={
+        'appId': str(pid),
+        'teamId': str(tid),
+        'sprintId': str(sprint_id),
+        'testpertStatus': 'REGENERATE_SPRINT_CONTEXT',
+        'sprintContextUserValidationData': json.dumps(details),
+    })
+    if not (isinstance(adv, dict) and adv.get('status') == 'OK'):
+        return {
+            'status': 'failed',
+            'error': 'Could not resolve KB validation',
+            'error_type': 'StatusTransitionError',
+            'message': (adv.get('message') if isinstance(adv, dict) else None)
+                       or "The API rejected REGENERATE_SPRINT_CONTEXT.",
+            'current_status': adv.get('currentTestpertStatus') if isinstance(adv, dict) else current,
+            'raw': adv,
+        }
+
+    return _kb_validation_poll_result(
+        await _poll_sprint_until(api_key, tid, pid, sprint_id,
+                                 ('SPRINT_CONTEXT', 'SPRINT_CONTEXT_USER_VALIDATION'), budget),
+        testrun_id, sprint_id)
+
+
+# --- Sprint context review (affected modules / user roles) -----------------
+@mcp.tool(
+    name = "bugasura_testpert_get_sprint_context",
+    description = (
+        "Read the sprint context the engine built at SPRINT_CONTEXT: its guessed platform, the user "
+        "roles/personas it identified (if any), the affected modules it flagged, and the "
+        "feature/sub-feature tree. Use this to show the user everything the engine found before they "
+        "confirm or edit it with bugasura_testpert_confirm_sprint_context. Covers features too, so "
+        "there's no need to also call bugasura_testpert_get_features here."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def get_testpert_sprint_context(
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
+) -> ToolResponse:
+    """GET /v1/testpert/sprint/getContext (dataType=SPRINT_CONTEXT) and extract the parked verdict."""
+    api_key = _get_api_key(api_key)
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    context = await select_team_project_context(api_key, team_id, project_id,
+                                                'bugasura_testpert_get_sprint_context')
+    if 'status' in context and context['status'] == 'selection_required':
+        return context
+    if not sprint_id:
+        return _sprint_selection_required(context['team_id'], context['project_id'])
+
+    tid, pid = context['team_id'], context['project_id']
+    resp = await _get_sprint_context_raw(api_key, tid, pid, sprint_id, 'SPRINT_CONTEXT')
+    if not (isinstance(resp, dict) and resp.get('status') == 'OK'):
+        return {
+            'status': 'failed', 'error': 'Could not read sprint context',
+            'error_type': 'ApiRequestError', 'raw': resp,
+            'message': "I couldn't read the sprint context just now — please try again.",
+        }
+
+    details = resp.get('sprintContextDetails') or {}
+    personas = details.get('user_personas') or {}
+    current = _extract_sprint_status(
+        await _get_sprint_testpert_status_raw(api_key, tid, pid, sprint_id))
+    return {
+        'status': 'OK',
+        'sprint_id': sprint_id,
+        'current_status': current,
+        'engine_guessed_platform': details.get('platform'),
+        'user_roles': personas.get('personas') or [],
+        'user_roles_applicable': personas.get('applicable'),
+        'affected_modules': details.get('affected_modules') or [],
+        'features': resp.get('features') or [],
+        'message': "Sprint context read.",
+        'next_step': ("This is an instruction for you, not a summary to relay. Show the user the actual "
+                      "affected modules, user roles and features values above (not this instruction). "
+                      "Ask if they want to add, remove, or edit any before continuing, then call "
+                      "bugasura_testpert_confirm_sprint_context — with affected_modules/user_roles if they "
+                      "changed anything, or with neither to just confirm and continue as-is. Features are "
+                      "edited separately with bugasura_testpert_add_feature / _delete_feature."),
+    }
+
+
+@mcp.tool(
+    name = "bugasura_testpert_confirm_sprint_context",
+    description = (
+        "Confirm the sprint context and advance to the requirement questions (SPRINT_CONTEXT -> "
+        "GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS -> DEEPEN_REQUIREMENTS_QUESTIONS). Optionally pass "
+        "affected_modules and/or user_roles to REPLACE the engine's lists with the user's edits — read "
+        "the current ones first with bugasura_testpert_get_sprint_context. There's no way to save edits "
+        "without also advancing; the API only accepts this data on the confirm transition. The sprint "
+        "must currently be at SPRINT_CONTEXT."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+)
+async def confirm_testpert_sprint_context(
+    affected_modules: Optional[List[str]] = Field(default=None, description="Replace the affected-modules list with these (omit to keep the engine's list unchanged)."),
+    user_roles: Optional[List[str]] = Field(default=None, description="Replace the user-roles/personas list with these (omit to keep the engine's list unchanged)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
+    max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
+) -> ToolResponse:
+    """
+    If affected_modules/user_roles are given, merge them into the current sprintContextDetails and
+    resubmit as sprintContextData on the SPRINT_CONTEXT -> GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS
+    transition (the only write the API accepts for this data). Otherwise just advance. Then poll to
+    DEEPEN_REQUIREMENTS_QUESTIONS.
+    """
+    api_key = _get_api_key(api_key)
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    context = await select_team_project_context(api_key, team_id, project_id,
+                                                'bugasura_testpert_confirm_sprint_context')
+    if 'status' in context and context['status'] == 'selection_required':
+        return context
+    if not sprint_id:
+        return _sprint_selection_required(context['team_id'], context['project_id'])
+
+    tid, pid = context['team_id'], context['project_id']
+    budget = max(0, min(int(max_wait_seconds), _KB_POLL_MAX_BUDGET_SECONDS))
+
+    status_resp = await _get_sprint_testpert_status_raw(api_key, tid, pid, sprint_id)
+    current = _extract_sprint_status(status_resp)
+    if not testrun_id:
+        testrun_id = _extract_testrun_id(status_resp)
+
+    if current == 'DEEPEN_REQUIREMENTS_QUESTIONS':
+        msg, ns = _REACHED['DEEPEN_REQUIREMENTS_QUESTIONS']
+        return _attach_sprint_link({'status': 'OK', 'current_status': 'DEEPEN_REQUIREMENTS_QUESTIONS',
+                'reached': True, 'message': msg, 'next_step': ns}, testrun_id, sprint_id)
+
+    if current not in ('SPRINT_CONTEXT', 'GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS'):
+        return {
+            'status': 'failed', 'error': 'Sprint is not at SPRINT_CONTEXT', 'error_type': 'ValidationError',
+            'current_status': current,
+            'message': (f"This sprint is at {_friendly(current)}, not SPRINT_CONTEXT — context edits can "
+                        f"only be confirmed from there. If it's SPRINT_CONTEXT_USER_VALIDATION, resolve "
+                        f"that first with bugasura_testpert_resolve_kb_validation."),
+        }
+
+    # Only build/send the confirm payload once — if a previous call already kicked off the
+    # transition (current == GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS), just resume polling below.
+    if current == 'SPRINT_CONTEXT':
+        data = {
+            'appId': str(pid),
+            'teamId': str(tid),
+            'sprintId': str(sprint_id),
+            'testpertStatus': 'GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS',
+        }
+        if affected_modules is not None or user_roles is not None:
+            ctx_resp = await _get_sprint_context_raw(api_key, tid, pid, sprint_id, 'SPRINT_CONTEXT')
+            if not (isinstance(ctx_resp, dict) and ctx_resp.get('status') == 'OK'):
+                return {
+                    'status': 'failed', 'error': 'Could not read sprint context', 'error_type': 'ApiRequestError',
+                    'raw': ctx_resp,
+                    'message': "I couldn't read the current sprint context just now — please try again.",
+                }
+            details = ctx_resp.get('sprintContextDetails') or {}
+            if affected_modules is not None:
+                details['affected_modules'] = affected_modules
+            if user_roles is not None:
+                personas = details.get('user_personas') or {}
+                personas['personas'] = user_roles
+                personas['applicable'] = bool(user_roles)
+                details['user_personas'] = personas
+            data['sprintContextData'] = json.dumps(details)
+
+        adv = await make_api_request('POST', '/v1/testpert/sprint/updateStatus', api_key, data=data)
+        if not (isinstance(adv, dict) and adv.get('status') == 'OK'):
+            return {
+                'status': 'failed',
+                'error': 'Could not confirm sprint context',
+                'error_type': 'StatusTransitionError',
+                'message': (adv.get('message') if isinstance(adv, dict) else None)
+                           or "The API rejected GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS.",
+                'current_status': adv.get('currentTestpertStatus') if isinstance(adv, dict) else current,
+                'raw': adv,
+            }
+
     poll = await _poll_sprint_until(api_key, tid, pid, sprint_id, 'DEEPEN_REQUIREMENTS_QUESTIONS', budget)
     if poll['outcome'] == 'reached':
         msg, ns = _REACHED['DEEPEN_REQUIREMENTS_QUESTIONS']
         return _attach_sprint_link({'status': 'OK', 'current_status': 'DEEPEN_REQUIREMENTS_QUESTIONS',
                 'reached': True, 'message': msg, 'next_step': ns}, testrun_id, sprint_id)
     if poll['outcome'] == 'error':
-        return _engine_error_response(
-            poll['current'], "Re-run bugasura_testpert_generate_sprint_context to retry, or revisit the knowledge base.")
+        return _engine_error_response(poll['current'], _retry_hint_for(poll['current']))
     if poll['outcome'] == 'read_error':
         return {
             'status': 'failed', 'error': 'Could not read sprint status',
@@ -2638,7 +3268,8 @@ async def generate_testpert_sprint_context(
     return {
         'status': 'OK', 'current_status': poll['current'], 'reached': False, 'in_progress': True,
         'message': _working_message(),
-        'next_step': "Call bugasura_testpert_generate_sprint_context again to keep checking.",
+        'next_step': ("Call bugasura_testpert_advance (to_status omitted, wait_for='DEEPEN_REQUIREMENTS_QUESTIONS') "
+                      "to keep checking — do not re-submit the edits."),
     }
 
 
@@ -3353,7 +3984,14 @@ def _is_backward_transition(current: Optional[str], to_status: str) -> bool:
 
     Fails open: returns False whenever either status can't be placed on the
     pipeline (unknown / in-progress), so we never block on an ambiguous status.
+
+    A REGENERATE_* out of an `*_ERROR` is always allowed: the guard is there to stop a
+    healthy sprint being silently rewound, and a failed phase is neither healthy nor
+    silent — the API sanctions these retries and the caller is told to confirm the cost
+    with the user first (see _ERROR_RETRY).
     """
+    if (current or '').endswith('_ERROR') and to_status.startswith('REGENERATE_'):
+        return False
     cur = _status_ordinal(current)
     tgt = _status_ordinal(to_status)
     if cur is None or tgt is None:
@@ -3374,6 +4012,22 @@ def _backward_blocked_response(current: Optional[str], to_status: str) -> dict:
                     f"{_friendly(target)} stage. The TestPert flow only moves forward — you can "
                     f"re-run the current stage or continue to the next one, but it can't go back."),
     }
+
+
+async def _get_sprint_context_raw(api_key: str, team_id: int, project_id: int, sprint_id: int,
+                                  data_type: str = 'ALL') -> dict:
+    """
+    GET the verdicts the engine parked for a sprint via /v1/testpert/sprint/getContext.
+
+    Purpose-built for this data (unlike the manage-requirement tab, which also builds the
+    whole requirements screen): `dataType` selects sprintContextDetails + features/testFeature
+    ('SPRINT_CONTEXT'), kbValidationDetails + kbValidationFiles ('USER_VALIDATION'), or both
+    ('ALL'). Reads the parked json directly, so the verdict stays readable after the sprint
+    has moved on — the tab endpoint only returns it while the sprint sits on the status.
+    """
+    return await make_api_request('GET', '/v1/testpert/sprint/getContext', api_key, params={
+        'appId': project_id, 'teamId': team_id, 'sprintId': sprint_id, 'dataType': data_type,
+    })
 
 
 async def _get_sprint_testpert_status_raw(api_key: str, team_id: int, project_id: int,
@@ -3510,6 +4164,23 @@ def _group_requirement_contexts(rows: List[dict]) -> dict:
     return {'deepen_questions': deepen, 'missing': missing, 'risk': risk}
 
 
+async def _count_undecided_missing(api_key: str, project_id: int, sprint_id: int) -> Optional[tuple]:
+    """
+    (undecided, total) for the sprint's missing-requirement rows, or None if they can't be read.
+
+    A row counts as decided once `is_approved` carries a value — '1' (approved) or '0'
+    (rejected). NULL/'' means the user hasn't ruled on it yet.
+    """
+    resp = await make_api_request('GET', '/v1/testpertrequirementcontexts/get', api_key, params={
+        'appId': project_id, 'reportId': sprint_id,
+    })
+    if not (isinstance(resp, dict) and resp.get('status') == 'OK'):
+        return None
+    missing = _group_requirement_contexts(resp.get('testpertRequirementContexts') or [])['missing']
+    undecided = sum(1 for m in missing if m.get('approved') in (None, ''))
+    return undecided, len(missing)
+
+
 def _deepen_questions_flat(deepen: dict) -> list:
     """
     Flatten grouped deepen questions into an ordered, numbered list for asking one at a time.
@@ -3535,15 +4206,57 @@ def _deepen_questions_flat(deepen: dict) -> list:
 
 
 def _friendly(status: Optional[str]) -> str:
-    """Human label for a status (never the raw code)."""
+    """Human label for a status (never the raw code). *_ERROR maps to the stage it failed in."""
     if not status:
         return 'this step'
-    return _FRIENDLY_STATUS.get(status, status.replace('_ERROR', '').replace('_', ' ').lower())
+    base = status[:-6] if status.endswith('_ERROR') else status
+    return _FRIENDLY_STATUS.get(base, base.replace('_', ' ').lower())
 
 
 def _working_message() -> str:
     """Friendly 'still working' message (no raw status, no time numbers to obsess over)."""
     return "Still working on this — I'll keep checking and let you know the moment it's ready."
+
+
+# Recovery transition per *_ERROR status, as the API's status switch actually allows it
+# (Testpert.php). A phase is only retryable when its REGENERATE_* (or GENERATE_*) case lists
+# the error status as a valid predecessor — statuses absent here have no API retry path, so
+# we say so instead of firing a request the switch will reject.
+_ERROR_RETRY = {
+    'SPRINT_CONTEXT_ERROR': (
+        "Re-run bugasura_testpert_generate_sprint_context to retry, or revisit the knowledge base."),
+    # The API's only route out is REGENERATE_SPRINT_CONTEXT, which rebuilds the sprint context
+    # from scratch and so discards the confirmed one — a real step back, not a plain retry.
+    'DEEPEN_REQUIREMENTS_QUESTIONS_ERROR': (
+        "Getting the questions again means rebuilding the sprint context from scratch, which "
+        "throws away the modules and features already confirmed. Ask the user whether they want "
+        "that before doing anything — only then run bugasura_testpert_advance("
+        "to_status='REGENERATE_SPRINT_CONTEXT', wait_for=['SPRINT_CONTEXT', "
+        "'SPRINT_CONTEXT_USER_VALIDATION'])."),
+    'MISSING_REQUIREMENTS_ERROR': (
+        "Retry with bugasura_testpert_advance(to_status='GENERATE_MISSING_REQUIREMENTS', "
+        "wait_for='MISSING_REQUIREMENTS')."),
+    'RISKS_IN_REQUIREMENTS_ERROR': (
+        "Retry with bugasura_testpert_advance(to_status='REGENERATE_RISKS_IN_REQUIREMENTS', "
+        "wait_for='RISKS_IN_REQUIREMENTS')."),
+    'TEST_PLANING_ERROR': (
+        "Retry with bugasura_testpert_advance(to_status='REGENERATE_TEST_PLANING', "
+        "wait_for='TEST_PLANING') — GENERATE_TEST_PLANING only works straight after enrichment."),
+    'TEST_CASES_ERROR': (
+        "Re-run bugasura_testpert_generate_testcases to retry — GENERATE_TEST_CASES is accepted "
+        "straight from the error state."),
+    # No API retry path: GENERATE_ENRICH_REQUIREMENTS is only valid from RISKS_IN_REQUIREMENTS
+    # and there is no REGENERATE_ENRICH_REQUIREMENTS case in the switch at all.
+    'ENRICH_REQUIREMENTS_ERROR': (
+        "Requirements enrichment can't be restarted from here — the sprint has to be taken back "
+        "through the requirement risks step, which needs someone with platform access. Share the "
+        "sprint link with the user and let them know this one needs support."),
+}
+
+
+def _retry_hint_for(status_value: Optional[str]) -> str:
+    """Recovery advice for an *_ERROR status (empty when we have nothing specific to offer)."""
+    return _ERROR_RETRY.get(status_value or '', '')
 
 
 def _engine_error_response(status_value: str, retry_hint: str = "") -> dict:
@@ -3750,16 +4463,22 @@ def _build_testplan_edit_view(plan: dict) -> dict:
 
 # --- Generate test cases ---------------------------------------------------
 async def _poll_sprint_until(api_key: str, team_id: int, project_id: int, sprint_id: int,
-                             wait_for: str, budget_seconds: int) -> dict:
-    """Poll getStatus until `wait_for`, an `*_ERROR`, or the budget runs out."""
+                             wait_for: Any, budget_seconds: int) -> dict:
+    """
+    Poll getStatus until `wait_for`, an `*_ERROR`, or the budget runs out.
+
+    `wait_for` is usually a single status string, but some phases (e.g. GENERATE_SPRINT_CONTEXT)
+    can land on more than one valid stop — pass a tuple/list of acceptable statuses for those.
+    """
+    targets = (wait_for,) if isinstance(wait_for, str) else tuple(wait_for)
     deadline = time.monotonic() + budget_seconds
     while True:
         status_resp = await _get_sprint_testpert_status_raw(api_key, team_id, project_id, sprint_id)
         current = _extract_sprint_status(status_resp)
         if current is None:
             return {'outcome': 'read_error', 'raw': status_resp}
-        if current == wait_for:
-            return {'outcome': 'reached', 'current': current}
+        if current in targets:
+            return {'outcome': 'reached', 'current': current, 'raw': status_resp}
         if current.endswith('_ERROR'):
             return {'outcome': 'error', 'current': current}
         if time.monotonic() >= deadline:

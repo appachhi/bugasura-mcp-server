@@ -209,6 +209,24 @@ def _respond(data: Any, response_format: str = "json") -> Any:
     return data
 
 
+def _display_team_name(team: dict) -> Optional[str]:
+    """
+    Bugasura's team display-name rule: a team still on its default name is shown
+    as "... Projects". Mirrors the backend's own normalisation in Teams.php so
+    every tool renders the same name the web app does.
+
+    Accepts rows from either /v1/teams/get ('name'/'alias') or /v1/teams/getApps
+    ('team_name'/'team_alias_name').
+    """
+    name = team.get('name') if team.get('name') is not None else team.get('team_name')
+    if name is None:
+        return None
+    alias = team.get('alias') or team.get('team_alias_name') or ''
+    if name == alias or name == 'My Apps':
+        return name.replace(' Apps', ' Projects')
+    return name
+
+
 def _paginated(items: list, total: Optional[int] = None, offset: int = 0,
                max_results: Optional[int] = None, **extras) -> dict:
     """

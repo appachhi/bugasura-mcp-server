@@ -8,8 +8,8 @@ from output_types import ToolResponse
 from app import mcp
 from auth import _fetch_user_context, _get_api_key, _invalidate_user_context_cache, validate_api_key
 from client import (
-    _paginate_upstream, _paginated, _prepare_post_params, _render_markdown,
-    _respond, _validate_id, logger, make_api_request,
+    _display_team_name, _paginate_upstream, _paginated, _prepare_post_params,
+    _render_markdown, _respond, _validate_id, logger, make_api_request,
 )
 from helpers import (
     _fetch_team_members, _find_user_ids_by_names_or_emails,
@@ -45,7 +45,8 @@ async def list_teams(response_format: Literal["json", "markdown"] = Field(defaul
                     'name': str,
                     'is_admin': bool,
                     'owner_id': int,
-                    'project_count': int
+                    'project_count': int,
+                    'is_expired': int   # 1 = team's subscription lapsed; other calls will fail
                 },
                 ...
             ]
@@ -66,8 +67,14 @@ async def list_teams(response_format: Literal["json", "markdown"] = Field(defaul
                    '3. Copy your API key and provide it here'
         }, response_format)
 
-    # Call Bugasura API to fetch user's teams and projects
-    full_response = await make_api_request('GET', '/v1/teams/getApps', api_key)
+    # Call Bugasura API to fetch user's teams
+    full_response = await make_api_request('GET', '/v1/teams/get', api_key, params={
+        'source': 'MCP',
+        'isGetProjectCount': 1,
+        'isActive': 1,
+        'isOnlyVerifiedTeams': 1,
+        'isGetSampleTeams': 1,
+    })
 
     # Handle case where API might return a list instead of dict
     if isinstance(full_response, list):
@@ -81,17 +88,18 @@ async def list_teams(response_format: Literal["json", "markdown"] = Field(defaul
     # Check if API call was successful
     if full_response.get('status') == 'OK':
         # Extract team details from response
-        # The API returns 'userTeamsProjectsDetails' which includes full team info
-        teams_data = full_response.get('userTeamsProjectsDetails', [])
+        # The API returns 'teamDetails' — one row per team
+        teams_data = full_response.get('teamDetails', [])
 
         # Transform to minimal format to reduce response size and improve readability
         # Only include essential fields needed for subsequent operations
         minimal_teams = [{
             'team_id': t.get('team_id'),           # Required for all team-scoped operations
-            'name': t.get('team_name'),            # Display name
+            'name': _display_team_name(t),         # Display name
             'is_admin': t.get('is_admin'),         # User's role in team
-            'owner_id': t.get('team_owner_id'),    # Team owner for permission checks
-            'project_count': t.get('apps_count', 0) # Number of projects in team
+            'owner_id': t.get('owner_id'),         # Team owner for permission checks
+            'project_count': t.get('apps_count', 0), # Number of projects in team
+            'is_expired': t.get('is_expired')      # 1 = subscription lapsed, team is unusable
         } for t in teams_data]
 
         # Return simplified response wrapped in the standard pagination envelope.

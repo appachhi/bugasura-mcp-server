@@ -47,6 +47,7 @@ async def get_user_context(response_format: Literal["json", "markdown"] = Field(
                     'team_id': int,
                     'team_name': str,
                     'role': str,
+                    'is_expired': int,   # 1 = subscription lapsed, team is unusable
                     'projects': [
                         {
                             'project_id': int,
@@ -190,7 +191,8 @@ async def find_team_by_name(
                     'team_id': int,
                     'team_name': str,
                     'role': str,
-                    'project_count': int
+                    'project_count': int,
+                    'is_expired': int   # 1 = subscription lapsed, team is unusable
                 },
                 ...
             ],
@@ -229,7 +231,8 @@ async def find_team_by_name(
                 'team_id': team.get('team_id'),
                 'team_name': team.get('team_name'),
                 'role': team.get('role'),
-                'project_count': len(team.get('projects', []))
+                'project_count': len(team.get('projects', [])),
+                'is_expired': team.get('is_expired')
             })
 
     return _respond(_paginated(matches, total=len(matches), offset=0,

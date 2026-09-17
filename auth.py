@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 from fastmcp.server.dependencies import get_http_headers
 
-from client import logger, make_api_request
+from client import _display_team_name, logger, make_api_request
 from config import BUGASURA_API_KEY
 
 
@@ -139,8 +139,9 @@ async def validate_api_key(api_key: str) -> dict:
         }
 
     # Make a lightweight API call to validate the key
-    # We use the teams endpoint as it's fast and confirms authentication
-    response = await make_api_request('GET', '/v1/teams/getApps', api_key)
+    # /v1/teams/get scans only the teams table; source=MCP is required, or the
+    # endpoint rejects the call for a missing team_id.
+    response = await make_api_request('GET', '/v1/teams/get', api_key, params={'source': 'MCP'})
 
     # Handle case where API might return a list instead of dict
     if isinstance(response, list):
@@ -192,8 +193,15 @@ async def _fetch_user_context(api_key: str) -> dict:
         logger.debug("_fetch_user_context: cache hit")
         return cached[1]
 
-    # Call Bugasura API to fetch user's teams and projects
-    full_response = await make_api_request('GET', '/v1/teams/getApps', api_key)
+    # Teams come from /v1/teams/get, which is driven off the teams table. The
+    # older /teams/getApps is driven off the apps table, so it silently drops any
+    # team that has no active project. Filters match bugasura_list_teams.
+    full_response = await make_api_request('GET', '/v1/teams/get', api_key, params={
+        'source': 'MCP',
+        'isActive': 1,
+        'isOnlyVerifiedTeams': 1,
+        'isGetSampleTeams': 1,
+    })
 
     # Handle case where API might return a list instead of dict
     if isinstance(full_response, list):
@@ -208,29 +216,38 @@ async def _fetch_user_context(api_key: str) -> dict:
     if full_response.get('status') != 'OK':
         return full_response
 
-    # Extract and structure the response
-    teams_data = full_response.get('userTeamsProjectsDetails', [])
+    # Projects still come from getApps, which nests them under each team.
+    apps_response = await make_api_request('GET', '/v1/teams/getApps', api_key)
 
-    structured_teams = []
-    for team in teams_data:
-        team_info = {
-            'team_id': team.get('team_id'),
-            'team_name': team.get('team_name'),
-            'role': 'Admin' if team.get('is_admin') else 'Member',
-            'projects': []
+    if isinstance(apps_response, list):
+        return {
+            'status': 'failed',
+            'error': 'Unexpected API response format (received list instead of dict)',
+            'error_type': 'ResponseFormatError',
+            'response_preview': str(apps_response[:2]) if len(apps_response) > 0 else 'Empty list'
         }
 
-        # Add project details
-        # Backend returns 'appsDetails' not 'projectsDetails'
-        for project in team.get('appsDetails', []):
-            team_info['projects'].append({
-                'project_id': project.get('app_id'),
-                'project_name': project.get('app_name'),
-                'platform': project.get('platform', ''),
-                'platform_type': project.get('platform_type', '')
-            })
+    if apps_response.get('status') != 'OK':
+        return apps_response
 
-        structured_teams.append(team_info)
+    # Key by str() — the two endpoints need not agree on int vs str team_id.
+    projects_by_team = {
+        str(team.get('team_id')): [{
+            'project_id': project.get('app_id'),
+            'project_name': project.get('app_name'),
+            'platform': project.get('platform', ''),
+            'platform_type': project.get('platform_type', '')
+        } for project in team.get('appsDetails', [])]
+        for team in apps_response.get('userTeamsProjectsDetails', [])
+    }
+
+    structured_teams = [{
+        'team_id': team.get('team_id'),
+        'team_name': _display_team_name(team),
+        'role': 'Admin' if team.get('is_admin') else 'Member',
+        'is_expired': team.get('is_expired'),
+        'projects': projects_by_team.get(str(team.get('team_id')), [])
+    } for team in full_response.get('teamDetails', [])]
 
     result = {
         'status': 'OK',

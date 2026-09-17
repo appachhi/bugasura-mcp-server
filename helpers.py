@@ -156,7 +156,8 @@ async def select_team_project_context(api_key: str, team_id: Optional[int], proj
             'options': [{
                 'team_id': team['team_id'],
                 'team_name': team['team_name'],
-                'role': team['role']
+                'role': team['role'],
+                'is_expired': team.get('is_expired')
             } for team in teams],
             'instruction': f'Please call {operation_name} again with team_id parameter. Example: {operation_name}(api_key="{api_key[:4]}...", team_id=<selected_team_id>{operation_params})'
         }
