@@ -912,10 +912,14 @@ TestPert is a paid, project-level AI feature (`is_testpert_enabled` on the proje
 - `bugasura_testpert_upload_kb` - Upload requirement docs/images to the sprint knowledge base (`.txt`, `.pdf`, `.docx`, `.md`, `.json`, `.png`, `.jpg`, etc.)
 - `bugasura_testpert_list_kb` - List documents currently in the knowledge base
 - `bugasura_testpert_delete_kb` - Remove a document from the knowledge base
-- `bugasura_testpert_generate_sprint_context` - Start requirement analysis (KB → deepen questions)
+- `bugasura_testpert_generate_sprint_context` - Start requirement analysis (KB → SPRINT_CONTEXT)
+- `bugasura_testpert_get_kb_validation` - See which uploaded documents the engine couldn't confidently classify, and why
+- `bugasura_testpert_resolve_kb_validation` - Submit a role for each flagged document and resume sprint-context generation
+- `bugasura_testpert_get_sprint_context` - Read the engine's guessed platform, user roles, and affected modules for review
+- `bugasura_testpert_confirm_sprint_context` - Confirm the sprint context and advance to the deepen-requirement questions
 - `bugasura_testpert_answer_context_questions` - Submit answers to the AI's deepen-requirement questions
 - `bugasura_testpert_get_requirement_contexts` - Fetch deepen questions, missing requirements, and risks for user review
-- `bugasura_testpert_update_requirement_contexts` - Write approve/reject/edit decisions back for missing requirements and risks
+- `bugasura_testpert_update_requirement_contexts` - Write approve/reject/edit decisions back for missing requirements and risks (auto-advances to RISKS_IN_REQUIREMENTS by default)
 - `bugasura_testpert_add_context_question` - Add a deepen-requirement question to the sprint (the 'Add Question' button)
 - `bugasura_testpert_delete_context_question` - Remove a deepen-requirement question from the sprint
 - `bugasura_testpert_get_testplan` - Fetch the generated test plan (focus areas + feature/sub-feature tree)
@@ -938,8 +942,11 @@ TestPert is a paid, project-level AI feature (`is_testpert_enabled` on the proje
 
 **Flow overview:**
 ```
-Normal:  create → upload_kb → generate_sprint_context → answer_context_questions
+Normal:  create → upload_kb → generate_sprint_context → [get_kb_validation → resolve_kb_validation]*
+         → get_sprint_context → confirm_sprint_context → answer_context_questions
          → (missing reqs) → (risks) → get_testplan → enrich → generate_coverage → generate_testcases
+
+         * only if generate_sprint_context lands on SPRINT_CONTEXT_USER_VALIDATION instead of SPRINT_CONTEXT
 
 Skip:    create (skip_enrich=true) → link_requirements → start_skip_testplan
          → get_testplan → generate_coverage → generate_testcases
@@ -947,7 +954,8 @@ Skip:    create (skip_enrich=true) → link_requirements → start_skip_testplan
 
 **Notes:**
 - The project must have TestPert enabled (`is_testpert_enabled`). Use `bugasura_create_sprint` for standard sprints.
-- Polling tools (`generate_sprint_context`, `start_skip_testplan`, `enrich_requirements`, `generate_coverage`, `generate_testcases`) are time-bounded per call and re-callable — if the AI phase is still running, call the same tool again to keep checking.
+- Polling tools (`generate_sprint_context`, `resolve_kb_validation`, `confirm_sprint_context`, `start_skip_testplan`, `enrich_requirements`, `generate_coverage`, `generate_testcases`) are time-bounded per call and re-callable — if the AI phase is still running, call the same tool again to keep checking.
+- `generate_coverage` drives both the enrichment and test-plan phases itself (`RISKS_IN_REQUIREMENTS → ENRICH_REQUIREMENTS → TEST_PLANING → TEST_COVERAGE`), one phase per call — `enrich_requirements` is only needed if you want that phase visible as its own step.
 - A team-admin API key is required for status transitions and test-plan updates.
 
 </details>
