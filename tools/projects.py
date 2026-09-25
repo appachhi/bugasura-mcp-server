@@ -37,7 +37,6 @@ async def list_projects(
     search_text: str = Field(default="", description="Search projects by name (case-insensitive partial match)"),
     source: str = Field(default="", description="Filter by creation source: 'PLATFORM', 'EXTENSION', 'API', 'IMPORT'"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List all projects for a team with filtering and pagination.
@@ -48,7 +47,6 @@ async def list_projects(
     - Get all teams and projects in one call: Use get_user_context()
 
     Args:
-        api_key: User's Bugasura API key
         team_id: Team identifier (required - specify which team's projects to list)
         start_at: Pagination offset (default: 0)
         max_results: Number of results to return (default: 10, min: 10, max: 100)
@@ -147,7 +145,7 @@ async def list_projects(
         list_projects(api_key, team_id, source="API")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
@@ -219,11 +217,10 @@ async def get_project_details(
     team_id: int = Field(description="Team identifier", ge=1),
     project_id: int = Field(description="Project identifier", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Get detailed information about a specific project."""
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -244,7 +241,6 @@ async def create_project(
     is_public_project: bool = Field(default=False, description="Public visibility (default: False for private)"),
     is_public_issues: bool = Field(default=False, description="Allow public issue visibility (default: False)"),
     clean_public_project_name: str = Field(default="", description="Unique identifier for public projects (optional)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create a new project in a team.
@@ -253,7 +249,6 @@ async def create_project(
     will guide you through team selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         project_name: Name for the new project (required)
         team_id: Team identifier (optional - will prompt if not provided)
         platform: Platform selection (default: Multiple)
@@ -277,7 +272,7 @@ async def create_project(
         - Team admins may have additional permissions
     """
     # Validate API key
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -360,7 +355,6 @@ async def update_project(
     issue_prefix: Optional[str] = Field(default=None, description="New issue prefix (e.g., 'BUG', 'ISS') (optional)"),
     is_public_project: Optional[bool] = Field(default=None, description="Public visibility (optional)"),
     clean_public_project_name: Optional[str] = Field(default=None, description="Unique identifier for public projects (optional)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Update project details.
@@ -369,7 +363,6 @@ async def update_project(
     will guide you through team selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         project_id: Project identifier (provide either project_id or search_project_name)
         search_project_name: Project name to search for (provide either project_id or search_project_name)
         team_id: Team identifier (optional - will prompt if not provided)
@@ -391,7 +384,7 @@ async def update_project(
         - Supports both project_id and project_name for flexibility
     """
     # Validate API key
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -506,7 +499,6 @@ async def delete_project(
     project_id: Optional[int] = Field(default=None, description="Project identifier (provide either project_id or project_name, ge=1)"),
     project_name: Optional[str] = Field(default=None, description="Project name to search for (provide either project_id or project_name)"),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete project permanently.
@@ -522,7 +514,6 @@ async def delete_project(
     will guide you through team selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         project_id: Project identifier (provide either project_id or project_name)
         project_name: Project name to search for (provide either project_id or project_name)
         team_id: Team identifier (optional - will prompt if not provided)
@@ -540,7 +531,7 @@ async def delete_project(
         - Supports both project_id and project_name for flexibility
     """
     # Validate API key
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation

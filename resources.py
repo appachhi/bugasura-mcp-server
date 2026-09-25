@@ -9,8 +9,8 @@ from config import API_BASE
 def get_server_config() -> str:
     """Server configuration"""
     return json.dumps({
-        "api_base_url": API_BASE, "version": "2.0.0",
-        "auth": "api_key parameter or BUGASURA_API_KEY environment variable",
+        "api_base_url": API_BASE, "version": "3.0.0",
+        "auth": "OAuth 2.0 sign-in (HTTP transport) or BUGASURA_API_KEY environment variable (STDIO)",
         "workflow": "bugasura_list_teams() → bugasura_list_projects() → work with data"
     }, indent=2)
 
@@ -32,6 +32,7 @@ def get_api_endpoints() -> str:
     """API endpoints reference"""
     return json.dumps({
         "teams": ["GET /v1/teams/list"],
+        "oauth": ["GET {WEB_BASE_URL}oauth/authorize", "POST /v1/oauth/token", "POST /v1/oauth/introspect", "POST /v1/oauth/revoke"],
         "projects": ["GET /v1/projects/list", "GET /v1/projects/get"],
         "issues": ["GET /v1/issues/list", "GET /v1/issues/get", "POST /v1/issues/add", "POST /v1/issues/update", "POST /v1/issues/delete"],
         "issues_comments": ["GET /v1/issues/comments/list", "GET /v1/issues/comments/get", "POST /v1/issues/comments/add", "POST /v1/issues/comments/update", "POST /v1/issues/comments/delete"],
@@ -62,9 +63,9 @@ def get_api_endpoints() -> str:
 def get_getting_started_guide() -> str:
     """Quick start guide"""
     return json.dumps({
-        "1": "Get API key: Bugasura → User Settings → API Key",
-        "2": "Get team_id: list_teams(api_key)",
-        "3": "List projects: list_projects(api_key, team_id)",
+        "1": "Connect Bugasura in your MCP client (OAuth sign-in) — or set BUGASURA_API_KEY for STDIO",
+        "2": "Get team_id: bugasura_list_teams()",
+        "3": "List projects: bugasura_list_projects(team_id)",
         "4": "Create/manage issues, sprints, test cases"
     }, indent=2)
 
@@ -77,10 +78,10 @@ def get_error_codes() -> str:
             "OK": "Success — payload contains the requested data.",
             "selection_required": "Tool needs additional context (team/project/sprint). Inspect the 'options' field and re-call with the chosen identifier.",
             "failed": "Operation failed. Inspect 'error' and 'error_type' for details.",
-            "api_key_required": "API key missing or invalid. Prompt the user to provide one and retry."
+            "api_key_required": "Not signed in or the session expired. HTTP: tell the user to reconnect Bugasura in the MCP client. STDIO: set BUGASURA_API_KEY. Never ask for a key in chat."
         },
         "error_types": {
-            "AuthenticationError": "401 from upstream. Re-prompt for API key.",
+            "AuthenticationError": "401 from upstream. Session expired or revoked — the user must reconnect (HTTP) or fix BUGASURA_API_KEY (STDIO).",
             "HTTPError": "Non-2xx response. Inspect 'status_code' and 'response_body'.",
             "ConnectionError": "Could not reach API_BASE_URL. Check network/config.",
             "Timeout": "Request exceeded API timeout. Retry with backoff.",
@@ -89,7 +90,7 @@ def get_error_codes() -> str:
         },
         "http_status_codes": {
             "400": "Bad request — payload shape or required fields missing.",
-            "401": "Unauthorized — invalid/expired API key.",
+            "401": "Unauthorized — expired/revoked OAuth token or invalid API key.",
             "403": "Forbidden — user lacks permission on the team/project.",
             "404": "Not found — id does not exist or is not visible to this user.",
             "409": "Conflict — duplicate name or stale update.",

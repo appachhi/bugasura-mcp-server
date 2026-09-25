@@ -17,7 +17,7 @@ import prompts  # noqa: F401
 import resources  # noqa: F401
 import tools  # noqa: F401
 from app import app, mcp
-from config import API_BASE, logger
+from config import API_BASE, MCP_PUBLIC_BASE_URL, MCP_SERVER_NAME, logger, oauth_configured
 
 
 def main():
@@ -31,19 +31,38 @@ def main():
                         help='Host to bind to for HTTP transports (default: 0.0.0.0)')
     parser.add_argument('--port', type=int, default=8000,
                         help='Port to bind to for HTTP transports (default: 8000)')
+    parser.add_argument('--forwarded-allow-ips', default='127.0.0.1',
+                        help='Reverse proxies whose X-Forwarded-* headers uvicorn should trust (default: 127.0.0.1)')
+    parser.add_argument('--allow-insecure-http', action='store_true',
+                        help='Allow an http:// MCP_PUBLIC_BASE_URL (local testing only; OAuth needs https in production)')
     args = parser.parse_args()
 
     logger.info("=" * 60)
     logger.info("Bugasura MCP Server Starting")
+    logger.info(f"Server Name: {MCP_SERVER_NAME}")
     logger.info(f"API Base URL: {API_BASE}")
     logger.info(f"Transport Mode: {args.transport}")
     logger.info("=" * 60)
-    print(f"Bugasura MCP Server | API: {API_BASE} | Transport: {args.transport}", file=sys.stderr)
+    print(f"Bugasura MCP Server | Name: {MCP_SERVER_NAME} | API: {API_BASE} | Transport: {args.transport}", file=sys.stderr)
 
     if args.transport == 'streamable-http':
-        logger.info(f"Starting streamable-http server on {args.host}:{args.port}/mcp")
+        # HTTP clients sign in with OAuth; without the front door every /mcp call would be anonymous.
+        if not oauth_configured():
+            msg = ("streamable-http requires the OAuth sign-in to be configured. Set MCP_PUBLIC_BASE_URL, "
+                   "BUGASURA_OAUTH_CLIENT_ID and BUGASURA_OAUTH_CLIENT_SECRET (see README: Deploying the OAuth sign-in).")
+            logger.critical(msg)
+            print(f"ERROR: {msg}", file=sys.stderr)
+            sys.exit(2)
+        if not MCP_PUBLIC_BASE_URL.startswith("https://") and not args.allow_insecure_http:
+            msg = (f"MCP_PUBLIC_BASE_URL={MCP_PUBLIC_BASE_URL} is not https. OAuth callbacks and consent cookies "
+                   "need TLS; pass --allow-insecure-http for local testing only.")
+            logger.critical(msg)
+            print(f"ERROR: {msg}", file=sys.stderr)
+            sys.exit(2)
+        logger.info(f"Starting streamable-http server on {args.host}:{args.port}/mcp (public URL {MCP_PUBLIC_BASE_URL})")
         try:
-            uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+            uvicorn.run(app, host=args.host, port=args.port, log_level="info",
+                        proxy_headers=True, forwarded_allow_ips=args.forwarded_allow_ips)
         except Exception as e:
             logger.critical(f"Failed to start HTTP server: {e}", exc_info=True)
             sys.exit(1)

@@ -37,7 +37,6 @@ async def list_test_run_environments(
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     include_app_builds: bool = Field(default=True, description="Also return the app build files for each environment (default: True)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List test data environments (and optionally app builds) for a project.
@@ -45,7 +44,7 @@ async def list_test_run_environments(
     Use this to discover environment and app build names you can pass to the
     create/update test run tools.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -78,10 +77,9 @@ async def list_test_runs(
     search_by_text: Optional[str] = Field(default=None, description="Search test runs by name (optional)"),
     sort_by: Optional[Literal["last_modified", "created_date"]] = Field(default=None, description="Sort field: 'last_modified' or 'created_date' (optional)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """List test run executions and schedulers for a sprint (report)."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -122,10 +120,9 @@ async def get_test_run_details(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Get metadata for a single test run execution."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -198,7 +195,6 @@ async def create_test_run(
     recurrence_end_date: Optional[str] = Field(default=None, description="End date in YYYY-MM-DD (required when recurrence_type='On')"),
     recurrence_count: Optional[int] = Field(default=None, description="Number of occurrences (required when recurrence_type='After', ge=1)"),
     execution_config: Optional[str] = Field(default=None, description="Advanced: raw executionConfig JSON string. Overrides app_build if provided (optional)."),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create a test run for a sprint (report), mirroring the web UI wizard.
@@ -218,7 +214,7 @@ async def create_test_run(
                         selected_days=["monday","friday"],
                         schedule_date="2026-07-01", schedule_time="09:00")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -399,10 +395,9 @@ async def update_test_run(
     environment: Optional[str] = Field(default=None, description="New test data environment: name or numeric id (optional)"),
     app_build: Optional[str] = Field(default=None, description="New app build: file name or numeric id (optional)"),
     execution_config: Optional[str] = Field(default=None, description="Advanced: raw executionConfig JSON string. Overrides app_build if provided (optional)."),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Update an existing test run execution (partial updates supported)."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -505,7 +500,6 @@ async def update_test_run_scheduler(
     recurrence_end_date: Optional[str] = Field(default=None, description="End date in YYYY-MM-DD (required when recurrence_type='On')"),
     recurrence_count: Optional[int] = Field(default=None, description="Number of occurrences (required when recurrence_type='After', ge=1)"),
     execution_config: Optional[str] = Field(default=None, description="Advanced: raw executionConfig JSON string. Overrides app_build if provided (optional)."),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Edit a test run / scheduler, mirroring the web UI edit-run modal.
@@ -516,7 +510,7 @@ async def update_test_run_scheduler(
         - Change schedule: execution_mode="scheduled", frequency=.., schedule_date=.., schedule_time=..
         - Switch to one-time: execution_mode="single" (clears the recurrence)
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -655,10 +649,9 @@ async def rerun_test_run(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     is_add_rerun: int = Field(default=0, description="Rerun flag (default: 0)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Trigger a rerun of a scheduled test run."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -698,10 +691,9 @@ async def add_test_cases_to_run(
     testcase_ids: str = Field(description="Test case IDs to add: comma-separated (e.g. '12,15,18') or a JSON array"),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Add (copy) test cases into an existing test run execution."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -752,10 +744,9 @@ async def delete_test_run(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     is_permanent_delete: int = Field(default=0, description="0 = move to trash (soft delete, default), 1 = permanently delete"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Delete one or more test run executions."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -800,10 +791,9 @@ async def delete_test_run_scheduler(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     is_permanent_delete: int = Field(default=0, description="0 = move to trash (soft delete, default), 1 = permanently delete"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Delete one or more test run schedulers."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -878,7 +868,7 @@ def _build_frequency_settings(
 ):
     """
     Build the frequency_settings JSON string from friendly recurrence inputs,
-    mirroring the web UI (TestrunsexecutionController.php lines 99-109).
+    mirroring the web UI.
 
     Returns (frequency_settings_json, error_dict). On failure json is None.
     """

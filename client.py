@@ -4,8 +4,50 @@ from typing import Any, List, Literal, Optional, Union
 
 import httpx
 import requests  # noqa: F401 — legacy alias for except blocks
+from fastmcp.server.dependencies import get_http_request
 
 from config import API_BASE, logger
+
+
+# Bugasura-issued OAuth access tokens carry this prefix; anything else is a legacy API key.
+ACCESS_TOKEN_PREFIX = "bgs_at_"
+
+
+def _in_http_request() -> bool:
+    """True while serving a streamable-HTTP request, False under STDIO."""
+    try:
+        get_http_request()
+        return True
+    except RuntimeError:
+        return False
+
+
+def _auth_required_payload(reason: str = "missing") -> dict:
+    """
+    The `api_key_required` envelope. The status value is kept so callers that branch on it
+    keep working, but the guidance no longer asks the assistant to collect a key: over HTTP
+    the user reconnects the OAuth session, under STDIO they set BUGASURA_API_KEY.
+    """
+    if _in_http_request():
+        expired = reason == "expired"
+        return {
+            'status': 'api_key_required',
+            'error': ('Your Bugasura session has expired or was revoked.' if expired
+                      else 'Not signed in to Bugasura.'),
+            'error_type': 'AuthenticationError' if expired else 'AuthenticationRequired',
+            'action': ('Tell the user to sign in to Bugasura again from their MCP client '
+                       '(Claude Code: /mcp -> Bugasura -> Authenticate; Claude Desktop / claude.ai: '
+                       'Settings -> Connectors -> Bugasura -> Reconnect). Do not ask for an API key; '
+                       'tools no longer accept one.'),
+        }
+    return {
+        'status': 'api_key_required',
+        'error': 'BUGASURA_API_KEY is not set.',
+        'error_type': 'ApiKeyMissing',
+        'action': ('Tell the user to set BUGASURA_API_KEY in the MCP server "env" block '
+                   '(Bugasura -> User Settings -> API Key) and restart the client. '
+                   'Do not ask for the key in chat; tools no longer accept one.'),
+    }
 
 
 # Lazy-initialized shared AsyncClient for connection pooling (one per event loop).
@@ -212,7 +254,7 @@ def _respond(data: Any, response_format: str = "json") -> Any:
 def _display_team_name(team: dict) -> Optional[str]:
     """
     Bugasura's team display-name rule: a team still on its default name is shown
-    as "... Projects". Mirrors the backend's own normalisation in Teams.php so
+    as "... Projects". Mirrors the Bugasura web app's own normalisation so
     every tool renders the same name the web app does.
 
     Accepts rows from either /v1/teams/get ('name'/'alias') or /v1/teams/getApps
@@ -309,7 +351,7 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
 
     This is the central function for all API communication. It handles:
     - URL construction
-    - Authentication via Basic auth header
+    - Authentication: Bearer for OAuth access tokens, Basic for legacy API keys
     - Parameter type conversion (POST requests require string IDs)
     - Comprehensive error handling with detailed diagnostics
     - Response parsing
@@ -317,7 +359,8 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
     Args:
         method: HTTP method (GET, POST, PUT, DELETE)
         endpoint: API endpoint path (e.g., '/v1/issues/list')
-        api_key: User's Bugasura API key for authentication
+        api_key: Credential for authentication — the OAuth access token resolved for
+                 this request (HTTP) or the legacy BUGASURA_API_KEY (STDIO)
         **kwargs: Additional arguments passed to requests.request()
                   - params: Query parameters for GET (integers OK)
                   - data: Form data for POST (IDs auto-converted to strings)
@@ -391,31 +434,25 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
     # Construct full API URL by combining base URL with endpoint
     url = f"{API_BASE}{endpoint}"
 
-    # Check if API key is provided before making the request
+    # No credential resolved: OAuth session missing (HTTP) or env var unset (STDIO)
     if not api_key or not api_key.strip():
-        return {
-            'status': 'api_key_required',
-            'error': 'No API key found. Please provide your Bugasura API key.',
-            'error_type': 'ApiKeyMissing',
-            'action': 'Please ask the user for their Bugasura API key. Once they provide it, retry the same tool call with the api_key parameter.',
-            'help': 'To get your API key:\n'
-                   '1. Go to https://bugasura.io\n'
-                   '2. Navigate to User Settings → API Key\n'
-                   '3. Copy your API key and provide it here'
-        }
+        return _auth_required_payload()
 
     # Log API request (without sensitive data)
-    # SECURITY: Never log the full API key, only a hint for debugging
-    api_key_hint = f"{api_key[:4]}..." if len(api_key) > 4 else "***"
+    # SECURITY: Never log the full credential, only a hint for debugging
+    api_key_hint = f"{api_key[:10]}..." if len(api_key) > 10 else "***"
     logger.info(f"API Request: {method} {endpoint}")
     logger.debug(f"API Key hint: {api_key_hint}")
 
     # Extract headers from kwargs if present, or create empty dict
     headers = kwargs.pop('headers', {})
 
-    # Add Basic authentication header with the provided API key
-    # Bugasura API expects: Authorization: Basic {api_key}
-    headers['Authorization'] = f'Basic {api_key}'
+    # OAuth access tokens (bgs_at_...) go as Bearer; a legacy API key keeps the backend's
+    # raw "Basic <key>" convention (no base64).
+    if api_key.startswith(ACCESS_TOKEN_PREFIX):
+        headers['Authorization'] = f'Bearer {api_key}'
+    else:
+        headers['Authorization'] = f'Basic {api_key}'
 
     # Convert ID parameters to strings for POST requests
     # GET requests can use integers (auto-converted to strings in URL)
@@ -468,16 +505,7 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
         logger.error(f"HTTP Error: {method} {endpoint} - Status {status_code}: {str(e)}")
 
         if status_code == 401:
-            return {
-                'status': 'api_key_required',
-                'error': 'Invalid or expired API key. Please provide a valid Bugasura API key.',
-                'error_type': 'AuthenticationError',
-                'action': 'Please ask the user for their Bugasura API key. Once they provide it, retry the same tool call with the api_key parameter.',
-                'help': 'To get your API key:\n'
-                       '1. Go to https://bugasura.io\n'
-                       '2. Navigate to User Settings → API Key\n'
-                       '3. Copy your API key and provide it here'
-            }
+            return _auth_required_payload("expired")
 
         error_response = {
             "error": str(e),

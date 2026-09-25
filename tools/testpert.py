@@ -25,6 +25,7 @@ from helpers import (
     select_team_project_context, WEB_BASE_URL,
 )
 from tools.projects import get_project_details
+from tools.knowledge_base import _fetch_kb_documents
 
 import asyncio
 import base64
@@ -204,7 +205,6 @@ async def create_testpert_sprint(
     testing_depth: Literal["Quick", "Deep"] = Field(default="Deep", description="Testing Depth: 'Quick' (lighter pass) or 'Deep' (full enrichment) (default: Deep)"),
     skip_enrich_requirements: bool = Field(default=False, description="Skip the AI requirements-enrichment check (default: False)"),
     confirm_options: bool = Field(default=False, description="Set True once the user has confirmed the sprint options. When False, the tool returns the editable options for confirmation instead of creating the sprint."),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create a TestPert-enabled sprint for a project.
@@ -221,7 +221,6 @@ async def create_testpert_sprint(
     `confirm_options=True` to actually create the sprint.
 
     Args:
-        api_key: User's Bugasura API key (required)
         sprint_name: Name of the sprint (5-250 characters required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -248,7 +247,7 @@ async def create_testpert_sprint(
         }
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -316,13 +315,13 @@ async def create_testpert_sprint(
         else:
             result['next_step'] = (
                 "In plain language (no internal codes), tell the user the sprint is ready and ask which "
-                "requirement documents or images they'd like to add. Then call bugasura_testpert_upload_kb "
-                f"(sprint_id={result.get('report_id')}, team_id={context['team_id']}, "
-                f"project_id={context['project_id']}). "
-                "To upload files: in the web app, ask the user to share a Google Drive or Dropbox link "
-                "('Anyone with the link') and use source_url+source_url_filename. "
-                "In the terminal, ask for the exact absolute file path and use file_paths=[...]. "
-                "For plain pasted text only, use text_content. "
+                "requirement documents or images they'd like to add. Documents already in the project's "
+                "Knowledge Base: find them with bugasura_list_knowledge_base_documents and link them with "
+                f"bugasura_testpert_upload_kb(existing_kb_ids=[...], sprint_id={result.get('report_id')}, "
+                f"team_id={context['team_id']}, project_id={context['project_id']}). "
+                "New material: add it to the project's Knowledge Base first with "
+                "bugasura_upload_knowledge_base_document (bugasura_prepare_kb_upload gives the "
+                "instructions to show the user), then link the returned kb_ids the same way. "
                 "Never encode files with Script or Bash tools. "
                 f"(Keep testrun_id={result.get('testrun_id')} for the final sprint link.)"
             )
@@ -364,10 +363,10 @@ async def prepare_kb_upload(
         ),
         'next_step': (
             "Show message_to_user to the user verbatim. Wait for them to paste a link. "
-            "Then call the upload tool that matches what the user asked for, with source_url=<link>: "
-            "bugasura_testpert_upload_kb (with sprint_id) for a TestPert sprint's knowledge base, or "
-            "bugasura_upload_knowledge_base_document (with folder_name when they named a folder) for "
-            "the project's Knowledge Base. "
+            "Then call bugasura_upload_knowledge_base_document with source_url=<link> (and folder_name "
+            "when they named a folder) to add it to the project's Knowledge Base. For a TestPert "
+            "sprint, follow up with bugasura_testpert_upload_kb(existing_kb_ids=<the returned "
+            "kb_ids>, sprint_id=...) to link it — don't upload straight into the sprint. "
             "source_url_filename is optional — omit it and the filename will be "
             "detected from the URL or response headers. Only pass source_url_filename if the "
             "user explicitly provides a filename or if detection fails. "
@@ -379,15 +378,14 @@ async def prepare_kb_upload(
 @mcp.tool(
     name = "bugasura_testpert_upload_kb",
     description = (
-        "Upload a knowledge-base file to a TestPert sprint. "
-        "IMPORTANT: Always call bugasura_prepare_kb_upload first — it returns the message "
-        "to show the user so they can provide a shareable link. Only call this tool once "
-        "the user has responded with a Google Drive / Dropbox link or a local file path. "
-        "THREE WAYS TO PROVIDE CONTENT — pick ONE per call: "
-        "(1) source_url + source_url_filename — paste the Google Drive/Dropbox/public link "
-        "the user shared. The MCP server downloads the file directly. "
-        "(2) file_paths — for terminal use: the exact absolute path the user provided. "
-        "(3) text_content + text_content_filename — only for plain text pasted directly. "
+        "Attach knowledge-base material to a TestPert sprint. PREFER existing_kb_ids: link "
+        "document(s) already in the project's Knowledge Base (get ids from "
+        "bugasura_list_knowledge_base_documents) — this is the normal, working path. "
+        "If the material isn't in the project's Knowledge Base yet, add it there FIRST with "
+        "bugasura_upload_knowledge_base_document (use bugasura_prepare_kb_upload to get the "
+        "upload instructions to show the user), THEN come back and link its id here — direct "
+        "fresh uploads into a sprint (source_url / file_paths / text_content below) are legacy "
+        "paths that are not reliable in the current flow, so don't lead with them. "
         "Documents: .txt/.pdf/.doc/.docx/.md/.json — Images: .png/.jpg/.jpeg/.webp/.gif"
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
@@ -398,6 +396,7 @@ async def upload_testpert_kb(
     file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (terminal/CLI use). Ask the user for the exact path — never construct or guess it."),
     text_content: Optional[str] = Field(default=None, description="Plain text the user pasted directly into the chat. Only for text kb_types. Not for PDFs, DOCX, or images — use source_url for those."),
     text_content_filename: Optional[str] = Field(default=None, description="Filename for the text_content upload (e.g. 'notes.md'). Text-native extensions (.md, .json, .txt) are preserved as-is."),
+    existing_kb_ids: List[int] = Field(default=[], description="IDs of documents already in the project's Knowledge Base (from bugasura_list_knowledge_base_documents) to link to this sprint instead of re-uploading them."),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). If omitted, you'll be prompted to pick a sprint (ge=1)."),
     kb_type: Literal[
         'document', 'api_docs', 'meeting_notes', 'user_flow', 'test_data',
@@ -405,7 +404,6 @@ async def upload_testpert_kb(
     ] = Field(default='document', description="Knowledge-base source type for these files. 'document'/'api_docs'/'meeting_notes'/'user_flow'/'test_data' take text docs; the '*_image' types take images."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Upload one or more knowledge-base files to a TestPert sprint.
@@ -416,21 +414,27 @@ async def upload_testpert_kb(
     sprint out of SPRINT_DETAILS and is a safe no-op on repeat calls, so files can be
     added incrementally before the analysis phase is started.
 
+    existing_kb_ids are sent as the comma-separated `kbIds` field, which the backend
+    links to the sprint (sprintTestPertKB row) without re-uploading or re-processing
+    the file — the same mechanism the web app uses to reuse a project-level Knowledge
+    Base document across sprints instead of duplicating it.
+
     Args:
         file_paths: Absolute local paths to upload (MCP server must be able to read them)
         text_content: Raw document text to upload as document.txt (use when file was attached
                       to the conversation and you have its text but no accessible local path)
+        existing_kb_ids: IDs of documents already in the project's Knowledge Base to link
+                         instead of re-uploading
         sprint_id: Sprint id (= report_id); prompts if omitted
         kb_type: Which KB source bucket the files belong to (default: document)
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: API response, including `trainingSourcesCount` and
         `totalTrainingCompletionEstimationStr` on success, plus a `next_step` hint.
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -459,20 +463,38 @@ async def upload_testpert_kb(
         }
 
     # Validate: need at least one source of content.
-    if not file_paths and not source_url and not text_content:
+    if not file_paths and not source_url and not text_content and not existing_kb_ids:
         return {
             'status': 'failed',
             'error': 'No files provided',
             'error_type': 'ValidationError',
             'message': (
-                'To upload a file, ask the user to share a Google Drive or Dropbox link. '
-                'IMPORTANT: for Google Drive the link must be set to "Anyone with the link" '
-                '(right-click the file → Share → change access to "Anyone with the link" → Copy link). '
-                'Then call this tool with source_url=<link>. The filename is detected automatically; '
-                'source_url_filename is only needed if auto-detection fails. '
-                'For terminal use, ask for the exact absolute file path and use file_paths=[...].'
+                'Link a document already in the project\'s Knowledge Base: call '
+                'bugasura_list_knowledge_base_documents to find it, then pass its id(s) as '
+                'existing_kb_ids=[...]. If the material isn\'t in the project\'s Knowledge Base yet, '
+                'add it there first with bugasura_upload_knowledge_base_document (get upload '
+                'instructions from bugasura_prepare_kb_upload), then link it here the same way. '
+                '(Direct fresh uploads into the sprint via source_url/file_paths/text_content are a '
+                'legacy path and not reliable in the current flow.)'
             )
         }
+
+    # The backend links any integer id without checking it, so a wrong id would report success.
+    if existing_kb_ids:
+        docs_resp = await _fetch_kb_documents(api_key, context['team_id'], context['project_id'])
+        if docs_resp.get('status') != 'OK':
+            return docs_resp
+        known_ids = {str(d.get('kb_id')) for d in docs_resp['documents']}
+        unknown_ids = [i for i in existing_kb_ids if str(i) not in known_ids]
+        if unknown_ids:
+            return {
+                'status': 'failed',
+                'error': 'Knowledge base document not found',
+                'error_type': 'DocumentNotFound',
+                'message': (f"No document with id {', '.join(str(i) for i in unknown_ids)} in project "
+                            f"{context['project_id']}'s Knowledge Base, so nothing was linked. List "
+                            f"the documents with bugasura_list_knowledge_base_documents.")
+            }
 
     field_prefix, allowed_exts = _KB_TYPE_FIELDS[kb_type]
 
@@ -625,8 +647,9 @@ async def upload_testpert_kb(
                     'error_type': 'ValidationError',
                     'message': (
                         f"Could not find a readable file at '{path}'. "
-                        "Ask the user for the exact absolute path to the file on their machine, "
-                        "or ask them to share a Google Drive/Dropbox link and use source_url."
+                        "Ask the user for the exact absolute path to the file on their machine, or "
+                        "add the file to the project's Knowledge Base with "
+                        "bugasura_upload_knowledge_base_document and link it via existing_kb_ids."
                     )
                 }
             # Extension check: only needed for real disk paths — temp paths are pre-validated above.
@@ -673,9 +696,13 @@ async def upload_testpert_kb(
         'selectedKBs': json.dumps(_build_selected_kbs_skeleton()),
         # KNOWLEDGE_BASE: advances a new sprint out of SPRINT_DETAILS; no-op if already there.
         'testpertStatus': 'KNOWLEDGE_BASE',
+        # App-level docs already in the project's Knowledge Base, linked to the sprint instead
+        # of re-uploaded — mirrors the backend's addSprintTestpertKBApi's `kbIds` param.
+        'kbIds': ','.join(str(i) for i in existing_kb_ids) if existing_kb_ids else '',
     }
 
-    logger.info(f"Uploading {len(files)} TestPert KB file(s) [{kb_type}] to sprint_id={sprint_id}, "
+    logger.info(f"Uploading {len(files)} TestPert KB file(s) [{kb_type}] and linking "
+                f"{len(existing_kb_ids)} existing doc(s) to sprint_id={sprint_id}, "
                 f"project_id={context['project_id']}")
     result = await make_api_request('POST', '/v1/testpertKB/sprint/add', api_key,
                                     data=data, files=files)
@@ -711,7 +738,6 @@ async def start_skip_testplan(
     max_wait_seconds: int = Field(default=45, description="Upper bound on polling while the test plan is generated (0-45, default 45). Capped at 45s to stay under MCP client timeouts; re-call to keep waiting."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Skip-enrich front half: SPRINT_DETAILS -> ENRICH_REQUIREMENTS -> GENERATE_TEST_PLANING -> TEST_PLANING.
@@ -721,7 +747,7 @@ async def start_skip_testplan(
     + skipEnrichRequirements=1 (which attaches the project requirements as the KB source and kicks the plan).
     Guarded to skip-enrich sprints only so the normal flow is never affected.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -875,7 +901,6 @@ async def advance_testpert(
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting on long phases."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Advance and/or poll a TestPert sprint's status.
@@ -891,7 +916,7 @@ async def advance_testpert(
         dict: {status, current_status, advanced_to?, reached?, in_progress?, message, next_step?}
     """
     # Validate API key.
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1021,7 +1046,6 @@ async def get_testpert_requirement_contexts(
     category: Literal['all', 'deepen_questions', 'missing', 'risk'] = Field(default='all', description="Which context set to return (default: all)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Read requirement-context rows for a sprint and group them by category.
@@ -1034,7 +1058,7 @@ async def get_testpert_requirement_contexts(
         If the engine hasn't produced any rows yet, returns status 'OK' with empty
         groups and a hint to ensure the phase has completed.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1142,10 +1166,9 @@ async def add_testpert_context_question(
     answer: Optional[str] = Field(default=None, description="Optional initial answer/response for the question (default: empty — unanswered)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Add a new deepen-requirement context question via /v1/testpertrequirementcontexts/add."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1200,10 +1223,9 @@ async def delete_testpert_context_question(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Delete a deepen-requirement context question via /v1/testpertrequirementcontexts/delete."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1251,7 +1273,6 @@ async def update_testpert_requirement_contexts(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Apply per-row updates to requirement contexts via /v1/testpertrequirementcontexts/update.
@@ -1262,7 +1283,7 @@ async def update_testpert_requirement_contexts(
     while the sprint is at MISSING_REQUIREMENTS, re-reads the rows and POSTs RISKS_IN_REQUIREMENTS
     (a synchronous flip — no engine dispatch, no polling) only once none are left undecided.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1340,7 +1361,7 @@ async def update_testpert_requirement_contexts(
     result['advanced'] = False
 
     # Auto-advance MISSING_REQUIREMENTS -> RISKS_IN_REQUIREMENTS: this is a synchronous status
-    # flip (no engine dispatch, no polling — see Testpert.php's $statusAgent map), so it's safe
+    # flip (no engine dispatch, no polling), so it's safe
     # to do right here instead of relying on the caller to remember a separate advance call.
     #
     # Only once EVERY missing requirement has a decision, though: the flip is one-way (the API
@@ -1418,10 +1439,9 @@ async def get_testpert_testplan(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Read the sprint's test plan via /v1/testpert/sprint/testplan/get."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1521,7 +1541,6 @@ async def update_testpert_testplan(
     test_plan_details: Optional[dict] = Field(default=None, description="Advanced: full testPlanDetails object sent as-is; other params are merged on top of it."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Save test-plan edits via /v1/testpert/sprint/testplan/update (plan only, no status change).
@@ -1531,7 +1550,7 @@ async def update_testpert_testplan(
     (devices/team are not updatable through this endpoint). Status transitions go through
     bugasura_testpert_advance. Backend requires the user to be a team admin.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1624,10 +1643,9 @@ async def get_testpert_coverage(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Get the coverage mind map via /v1/testpert/getSprintCoverageMindMap (flips to TEST_COVERAGE)."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1676,7 +1694,6 @@ async def generate_testpert_testcases(
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Kick off test-case generation and poll completion via sub-feature status.
@@ -1687,7 +1704,7 @@ async def generate_testpert_testcases(
     This matches the platform's own progress display and avoids the need for the
     user to manually confirm or for the MCP to force-set the status.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1844,7 +1861,6 @@ async def regenerate_testpert_testcases(
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Regenerate or retry test cases for a specific sub-feature in a TEST_CASES-phase sprint.
@@ -1858,7 +1874,7 @@ async def regenerate_testpert_testcases(
     Re-callable: pass back elapsed_seconds from the previous response to keep polling
     across call boundaries without re-triggering the generation.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2206,7 +2222,6 @@ async def enrich_testpert_requirements(
     max_wait_seconds: int = Field(default=45, description="Upper bound on polling while enrichment runs (0-45, default 45). Capped at 45s; re-call to keep waiting."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Drive the enrichment phase RISKS_IN_REQUIREMENTS -> GENERATE_ENRICH_REQUIREMENTS -> ENRICH_REQUIREMENTS.
@@ -2218,7 +2233,7 @@ async def enrich_testpert_requirements(
     Skip-enrich sprints don't use this (they reach ENRICH_REQUIREMENTS via start_skip_testplan).
     generate_coverage still bundles enrichment, so this tool is an optional, visible front-half of that.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2343,14 +2358,13 @@ async def generate_testpert_coverage(
     max_wait_seconds: int = Field(default=45, description="Upper bound on polling for whichever phase is currently running — enrich or test plan (0-45, default 45). Capped at 45s; re-call to keep waiting."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Drive to TEST_PLANING (unless already there) then set TEST_COVERAGE via
     /v1/testpert/sprint/updateStatus.
 
-    TEST_COVERAGE is a valid transition ONLY from TEST_PLANING in the status switch
-    (Testpert.php). For the non-skip flow this means enrichment and the test plan must both
+    TEST_COVERAGE is a valid transition ONLY from TEST_PLANING in the API's status
+    switch. For the non-skip flow this means enrichment and the test plan must both
     run first — each is one POST + one bounded poll per call, so a single call advances at
     most one phase; re-call to keep going. Setting TEST_COVERAGE itself is synchronous (no
     GENERATE_TEST_COVERAGE marker, no admin requirement).
@@ -2360,7 +2374,7 @@ async def generate_testpert_coverage(
     enrichment), while a failed enrichment has no API retry path at all and is reported as
     such instead of being re-posted.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2567,10 +2581,9 @@ async def get_testpert_features(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Read the feature tree via /v1/testpert/testpertfeatures/getTestpertFeatures and group it."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2648,10 +2661,9 @@ async def add_testpert_feature(
     requirement_id: Optional[int] = Field(default=None, description="Optional requirement id to link the sub-feature to."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Add a feature/sub-feature via /v1/testpert/testpertfeatures/addTestpertFeatures."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2703,10 +2715,9 @@ async def delete_testpert_feature(
     requirement_id: Optional[Any] = Field(default=None, description="Optional requirement id (or list of ids) linked to the feature, to unlink on delete."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Delete a feature/sub-feature via /v1/testpert/testpertfeatures/deleteTestpertFeatures."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2756,7 +2767,6 @@ async def generate_testpert_sprint_context(
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Kick off sprint-context / requirement analysis and poll to the SPRINT_CONTEXT stage.
@@ -2765,7 +2775,7 @@ async def generate_testpert_sprint_context(
     SPRINT_CONTEXT_USER_VALIDATION; if already generating it just polls; otherwise it sets
     GENERATE_SPRINT_CONTEXT (valid from KNOWLEDGE_BASE) then polls until either status.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2852,10 +2862,9 @@ async def get_testpert_kb_validation(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """GET /v1/testpert/sprint/getContext (dataType=USER_VALIDATION) and extract the flagged files."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2977,13 +2986,12 @@ async def resolve_testpert_kb_validation(
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Attach roles to the currently-flagged KB files and POST REGENERATE_SPRINT_CONTEXT with
     sprintContextUserValidationData, then poll to SPRINT_CONTEXT / SPRINT_CONTEXT_USER_VALIDATION.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3103,10 +3111,9 @@ async def get_testpert_sprint_context(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """GET /v1/testpert/sprint/getContext (dataType=SPRINT_CONTEXT) and extract the parked verdict."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3170,7 +3177,6 @@ async def confirm_testpert_sprint_context(
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     If affected_modules/user_roles are given, merge them into the current sprintContextDetails and
@@ -3178,7 +3184,7 @@ async def confirm_testpert_sprint_context(
     transition (the only write the API accepts for this data). Otherwise just advance. Then poll to
     DEEPEN_REQUIREMENTS_QUESTIONS.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3297,7 +3303,6 @@ async def answer_testpert_context_questions(
     max_wait_seconds: int = Field(default=30, description="Upper bound on polling when advance=True (0-45, default 30). Capped at 45s; call again to keep waiting."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Persist contextual-question answers per-row via /v1/testpertrequirementcontexts/update.
@@ -3307,7 +3312,7 @@ async def answer_testpert_context_questions(
     sprint status; when advance=True a separate /testpert/sprint/updateStatus call moves the
     sprint to GENERATE_MISSING_REQUIREMENTS and polls until MISSING_REQUIREMENTS.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3368,7 +3373,7 @@ async def answer_testpert_context_questions(
     # the answer to the row's `details` column (isEdited=1) WITHOUT touching the status machine.
     # We deliberately do NOT use /testpertKB/sprintProblemContext/addUpdate here: that endpoint
     # force-updates the sprint status to one of CONTEXT_APPROVE/GENERATE_TEST_PLANING/
-    # TEST_PLANING_IN_PROGRESS (KnowledgeBase.php:4054 + 4261-4276, gate commented out), none of
+    # TEST_PLANING_IN_PROGRESS unconditionally, none of
     # which are legal from DEEPEN_REQUIREMENTS_QUESTIONS — so it errors regardless of payload.
     answered = 0
     matched = set()
@@ -3421,7 +3426,7 @@ async def answer_testpert_context_questions(
 
     if advance:
         # Step 2 — ADVANCE via the status machine. GENERATE_MISSING_REQUIREMENTS is legal
-        # from DEEPEN_REQUIREMENTS_QUESTIONS here (Testpert.php:1490-1491).
+        # from DEEPEN_REQUIREMENTS_QUESTIONS here.
         logger.info(f"Advancing sprint_id={sprint_id} -> GENERATE_MISSING_REQUIREMENTS")
         adv = await make_api_request('POST', '/v1/testpert/sprint/updateStatus', api_key, data={
             'appId': str(pid),
@@ -3480,10 +3485,9 @@ async def list_testpert_kb(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """List knowledge-base items via /v1/testpertKB/sprint/get."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3524,10 +3528,9 @@ async def delete_testpert_kb(
     kb_source_type: Optional[str] = Field(default=None, description="Optional source type (e.g. REQUIREMENTS), as listed by list_kb."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """Delete a knowledge-base item via /v1/testpertKB/sprint/delete."""
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3575,7 +3578,6 @@ async def link_testpert_requirements(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Link existing project requirements to a sprint via GET /v1/requirements/sprint/link.
@@ -3585,7 +3587,7 @@ async def link_testpert_requirements(
     bugasura_list_requirements, NOT the display `id` — the endpoint uses INSERT IGNORE with no
     existence check, so a display id silently writes a dangling row the sprint read never matches.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -4218,8 +4220,8 @@ def _working_message() -> str:
     return "Still working on this — I'll keep checking and let you know the moment it's ready."
 
 
-# Recovery transition per *_ERROR status, as the API's status switch actually allows it
-# (Testpert.php). A phase is only retryable when its REGENERATE_* (or GENERATE_*) case lists
+# Recovery transition per *_ERROR status, as the API's status switch actually allows it.
+# A phase is only retryable when its REGENERATE_* (or GENERATE_*) case lists
 # the error status as a valid predecessor — statuses absent here have no API retry path, so
 # we say so instead of firing a request the switch will reject.
 _ERROR_RETRY = {

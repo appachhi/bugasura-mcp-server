@@ -166,7 +166,6 @@ async def create_knowledge_base_folder(
     parent_folder_id: Optional[int] = Field(default=None, description="Parent folder identifier. Use only when the user picked a specific folder from a list — parent_folder_name is the normal way to target a parent.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create a knowledge base folder, optionally nested under an existing one.
@@ -181,7 +180,6 @@ async def create_knowledge_base_folder(
         parent_folder_name: Existing knowledge base folder to nest under (optional)
         parent_folder_id: Explicit parent identifier (takes precedence over parent_folder_name)
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -203,7 +201,7 @@ async def create_knowledge_base_folder(
         # Nested under an existing knowledge base folder
         create_knowledge_base_folder(folder_name="Testcase", parent_folder_name="Requirements")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -296,7 +294,6 @@ async def rename_knowledge_base_folder(
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Rename a knowledge base folder.
@@ -315,7 +312,6 @@ async def rename_knowledge_base_folder(
         new_name: New folder name (required)
         folder_name / folder_id: Folder to rename (one of them is required)
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -338,7 +334,7 @@ async def rename_knowledge_base_folder(
         # Rename the folder the user picked from a list
         rename_knowledge_base_folder(folder_id=412, new_name="Archive", team_id=12, project_id=34)
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -472,47 +468,57 @@ async def rename_knowledge_base_folder(
 @mcp.tool(
     name="bugasura_list_knowledge_base_folders",
     description=(
-        "List the folders in a Bugasura project's Knowledge Base, with the document count in each. "
-        "Use this to show the user which folders exist before uploading a document, deleting a "
-        "folder, or nesting a new one. Returns every folder in the project as a flat list; "
-        "`parent_folder_id` tells you how they nest ('' means root level)."
+        "List the top-level folders in a Bugasura project's Knowledge Base (paginated), each with "
+        "its full sub-folder tree (`sub_folders`) and every document they contain (`documents`: "
+        "kb_id, doc_name, type). Use this to show the user which folders and documents exist before "
+        "uploading a document, deleting a folder, or nesting a new one. `parent_folder_id` tells "
+        "you how folders nest ('' means root level)."
     ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
 async def list_knowledge_base_folders(
-    parent_folder_id: Optional[int] = Field(default=None, description="Filter to the direct children of this folder. Pass 0 for root-level folders only. Omit to get every knowledge base folder in the project.", ge=0),
+    parent_folder_id: Optional[int] = Field(default=None, description="Filter to the direct children of this folder. Pass 0 for root-level folders only. Omit to get root-level folders (default).", ge=0),
+    start_at: int = Field(default=0, description="Pagination offset over the top-level folders in scope (default: 0). Each returned folder's sub-folders and documents are always shown in full — this only limits how many top-level folders come back.", ge=0),
+    max_results: int = Field(default=10, description="Number of top-level folders to return (default: 10, max 50).", ge=1, le=50),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
-    List a project's knowledge base folders.
+    List a project's knowledge base folders, paginated at the top level, fully expanded below that.
 
-    Reads /v1/projectFolders/get with `folderType=KNOWLEDGE_BASE` and flattens the
-    folder tree, so sub-folders are listed alongside root folders with their
-    `parent_folder_id`.
+    Reads /v1/projectFolders/get with `folderType=KNOWLEDGE_BASE` for the folder tree and
+    /v1/knowledgebase/getDocs for the documents in scope, then paginates only the top-level
+    folders in scope (root folders, or the direct children of `parent_folder_id`). Each folder
+    returned carries its own `documents` and nested `sub_folders`, at any depth; only the
+    top-level folder *count* is limited by start_at/max_results, never the documents or
+    sub-folders inside a folder that's shown.
 
     Args:
-        parent_folder_id: 0 for root folders, a folder id for its children, omit for all
+        parent_folder_id: 0 or omitted for root folders, a folder id for its direct children
+        start_at / max_results: Pagination window over the top-level folders in scope
         team_id / project_id: Resolved interactively if omitted
         response_format: 'json' or 'markdown'
-        api_key: User's Bugasura API key
 
     Returns:
-        dict: Standard pagination envelope whose items are
-        {'folder_id', 'folder_name', 'parent_folder_id', 'kb_count'}, plus
-        'folders', 'project_id', 'team_id', 'knowledge_base_url' and 'message'.
-        OR a selection prompt / failure envelope.
+        dict: Standard pagination envelope (total/count/offset/has_more over the top-level
+        folders) whose items are {'folder_id', 'folder_name', 'parent_folder_id', 'kb_count',
+        'documents': [{'kb_id', 'doc_name', 'type'}], 'sub_folders': [...same shape]}, plus
+        'folders', 'project_id', 'team_id', 'knowledge_base_url' and 'message' — and
+        'parent_folder' (with its own documents) when parent_folder_id is given.
+        OR a selection prompt / failure envelope (FolderNotFound for an unknown parent).
 
     Examples:
-        # Every knowledge base folder in the project
+        # First 10 root-level folders, each fully expanded
         list_knowledge_base_folders(team_id=12, project_id=34)
 
-        # Root-level folders only
-        list_knowledge_base_folders(parent_folder_id=0)
+        # Next page of root folders
+        list_knowledge_base_folders(start_at=10)
+
+        # A specific folder's direct children (each fully expanded)
+        list_knowledge_base_folders(parent_folder_id=56)
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -529,34 +535,112 @@ async def list_knowledge_base_folders(
     team_id = await _resolve_project_team_id(api_key, team_id, project_id,
                                              'list_knowledge_base_folders')
 
-    folders_response = await _fetch_kb_folders(api_key, team_id, project_id)
+    # Documents are scoped to the parent's subtree when one is given; both reads are independent.
+    docs_folder_id = parent_folder_id or None
+    folders_response, documents_response = await asyncio.gather(
+        _fetch_kb_folders(api_key, team_id, project_id),
+        _fetch_kb_documents(api_key, team_id, project_id, docs_folder_id),
+    )
     if folders_response.get('status') != 'OK':
         return _respond(folders_response, response_format)
+    all_folders = folders_response['folders']
 
-    folders = folders_response['folders']
+    parent_folder = None
+    if parent_folder_id:
+        parent_folder = next((f for f in all_folders
+                              if str(f.get('folder_id')) == str(parent_folder_id)), None)
+        if parent_folder is None:
+            logger.error(f"list_knowledge_base_folders: folder_id={parent_folder_id} not found in "
+                         f"project_id={project_id}")
+            return _respond({
+                'status': 'failed',
+                'error': 'Knowledge base folder not found',
+                'error_type': 'FolderNotFound',
+                'message': f"No knowledge base folder with id {parent_folder_id} in project "
+                           f"{project_id}. Omit parent_folder_id to list the root folders.",
+            }, response_format)
 
-    if parent_folder_id is not None:
-        # Root folders carry an empty parent; everything else carries its parent's id.
-        wanted_parent = '' if parent_folder_id == 0 else str(parent_folder_id)
-        folders = [f for f in folders if str(f['parent_folder_id'] or '') == wanted_parent]
-        scope = ("root-level knowledge base folders" if parent_folder_id == 0
-                 else f"sub-folders of folder {parent_folder_id}")
-    else:
-        scope = "knowledge base folders"
+    if documents_response.get('status') != 'OK':
+        return _respond(documents_response, response_format)
 
-    message = f"Retrieved {len(folders)} {scope}."
-    if not folders:
+    # Compact document shape: the full record is available from bugasura_list_knowledge_base_documents.
+    docs_by_folder: dict = {}
+    for doc in documents_response['documents']:
+        docs_by_folder.setdefault(str(doc.get('folder_id') or ''), []).append(
+            {'kb_id': doc.get('kb_id'), 'doc_name': doc.get('doc_name'), 'type': doc.get('type')})
+
+    children_by_parent: dict = {}
+    for f in all_folders:
+        children_by_parent.setdefault(str(f.get('parent_folder_id') or ''), []).append(f)
+
+    # Root folders carry an empty parent; everything else carries its parent's id.
+    wanted_parent = str(parent_folder_id) if parent_folder_id else ''
+    top_level = children_by_parent.get(wanted_parent, [])
+    scope = (f"sub-folders of '{parent_folder['folder_name']}'" if parent_folder
+             else "root-level knowledge base folders")
+
+    total = len(top_level)
+    page = top_level[start_at:start_at + max_results]
+
+    def attach_tree(folder: dict) -> None:
+        """Give this folder its own documents and nested sub-folders, recursively."""
+        folder['documents'] = docs_by_folder.get(str(folder.get('folder_id')), [])
+        folder['sub_folders'] = children_by_parent.get(str(folder.get('folder_id')), [])
+        for child in folder['sub_folders']:
+            attach_tree(child)
+
+    for f in page:
+        attach_tree(f)
+
+    message = f"Retrieved {len(page)} of {total} {scope} (with their sub-folders and documents)."
+    if total == 0 and parent_folder:
+        own_docs = docs_by_folder.get(str(parent_folder_id), [])
+        message = (f"'{parent_folder['folder_name']}' has no sub-folders. It holds "
+                   f"{len(own_docs)} document(s) of its own.")
+    elif total == 0:
         message = (f"This project has no {scope} yet. Create one with "
                    f"bugasura_create_knowledge_base_folder, or upload a document and the folder "
                    f"is created for you.")
 
-    extras = {'folders': folders, 'project_id': project_id, 'team_id': team_id, 'message': message}
+    extras = {'folders': page, 'project_id': project_id, 'team_id': team_id, 'message': message}
+    if parent_folder:
+        # The parent's own documents, so a leaf folder still shows what it holds.
+        extras['parent_folder'] = {
+            'folder_id': parent_folder['folder_id'],
+            'folder_name': parent_folder['folder_name'],
+            'documents': docs_by_folder.get(str(parent_folder_id), []),
+        }
     if WEB_BASE_URL:
         extras['knowledge_base_url'] = f"{WEB_BASE_URL}knowledgeBase/{project_id}"
 
-    logger.info(f"list_knowledge_base_folders: Returning {len(folders)} folder(s) for "
-                f"project_id={project_id}")
-    return _respond(_paginated(folders, total=len(folders), offset=0, **extras), response_format)
+    logger.info(f"list_knowledge_base_folders: Returning {len(page)} of {total} top-level folder(s) "
+                f"for project_id={project_id}")
+    envelope = _paginated(page, total=total, offset=start_at, **extras)
+
+    if response_format == 'markdown':
+        # Own rendering: the shared renderer lists items flat, this one shows the tree. Ids are
+        # kept because markdown-mode callers need them for follow-up calls.
+        def render_level(folder: dict, depth: int) -> list:
+            docs = folder.get('documents', [])
+            lines = [f"{'  ' * depth}- {folder.get('folder_name', '')} "
+                     f"(folder_id `{folder.get('folder_id')}`, {len(docs)} docs)"]
+            for doc in docs:
+                lines.append(f"{'  ' * (depth + 1)}- {doc.get('doc_name', '')} "
+                             f"(kb_id `{doc.get('kb_id')}`)")
+            for child in folder.get('sub_folders', []):
+                lines.extend(render_level(child, depth + 1))
+            return lines
+
+        tree_lines = []
+        if parent_folder:
+            for doc in extras['parent_folder']['documents']:
+                tree_lines.append(f"- {doc.get('doc_name', '')} (kb_id `{doc.get('kb_id')}`)")
+        for f in page:
+            tree_lines.extend(render_level(f, 0))
+        rendered = "\n\n".join(part for part in (
+            message, "\n".join(tree_lines), _md_page_footer(envelope)) if part)
+        return _respond(rendered, response_format)
+    return _respond(envelope, response_format)
 
 
 @mcp.tool(
@@ -578,7 +662,6 @@ async def list_knowledge_base_documents(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List the documents in a project's knowledge base.
@@ -593,7 +676,6 @@ async def list_knowledge_base_documents(
         start_at / max_results: Pagination window
         team_id / project_id: Resolved interactively if omitted
         response_format: 'json' or 'markdown'
-        api_key: User's Bugasura API key
 
     Returns:
         dict: Standard pagination envelope whose items are
@@ -612,7 +694,7 @@ async def list_knowledge_base_documents(
         # Starred documents only
         list_knowledge_base_documents(starred_only=True)
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -670,7 +752,30 @@ async def list_knowledge_base_documents(
 
     logger.info(f"list_knowledge_base_documents: Returning {len(page)} of {len(documents)} "
                 f"document(s) for project_id={project_id}")
-    return _respond(_paginated(page, total=len(documents), offset=start_at, **extras), response_format)
+    envelope = _paginated(page, total=len(documents), offset=start_at, **extras)
+    if response_format == 'markdown':
+        # Own rendering: one row per folder rather than the shared flat item list. kb_id is kept
+        # because markdown-mode callers need it to delete, star or link a document.
+        rendered = message
+        if page:
+            # Keyed on folder_id: two folders can share a name under different parents.
+            docs_by_folder: dict = {}
+            for doc in page:
+                docs_by_folder.setdefault(str(doc.get('folder_id') or ''), []).append(doc)
+
+            lines = ["| Folder | Documents |", "|---|---|"]
+            for folder_docs in docs_by_folder.values():
+                doc_list = "<br>".join(
+                    f"{_md_cell(doc.get('doc_name', ''))} ({doc.get('type') or '-'}, "
+                    f"kb_id `{doc.get('kb_id')}`)"
+                    for doc in folder_docs
+                )
+                lines.append(f"| {_md_cell(folder_docs[0].get('folder_name') or '(no folder)')} "
+                             f"| {doc_list} |")
+            rendered = "\n\n".join(part for part in (
+                message, "\n".join(lines), _md_page_footer(envelope)) if part)
+        return _respond(rendered, response_format)
+    return _respond(envelope, response_format)
 
 
 @mcp.tool(
@@ -699,7 +804,6 @@ async def download_knowledge_base_document(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Get a download link for an uploaded knowledge base document, and optionally save it.
@@ -721,7 +825,6 @@ async def download_knowledge_base_document(
         overwrite: Allow replacing an existing file at save_to_path
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -748,7 +851,7 @@ async def download_knowledge_base_document(
         download_knowledge_base_document(document_identifier="PRD.pdf",
                                          save_to_path="/home/me/specs/")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -950,7 +1053,6 @@ async def star_knowledge_base_document(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Star or unstar a knowledge base document.
@@ -963,7 +1065,6 @@ async def star_knowledge_base_document(
         starred: True to star, False to unstar
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -984,7 +1085,7 @@ async def star_knowledge_base_document(
         # Unstar it again
         star_knowledge_base_document(document_identifier="PRD.pdf", starred=False)
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1065,7 +1166,6 @@ async def delete_knowledge_base_document(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete a document from a project's knowledge base.
@@ -1079,7 +1179,6 @@ async def delete_knowledge_base_document(
         document_identifier: File name or numeric id of the document
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -1098,7 +1197,7 @@ async def delete_knowledge_base_document(
         # Delete by id, scoped to one folder
         delete_knowledge_base_document(document_identifier="3772", folder_name="Product Specs")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1171,7 +1270,6 @@ async def delete_knowledge_base_folder(
     delete_documents: bool = Field(default=False, description="Set True to delete a folder that still holds documents — the documents stop being listed with it. Leave False to have the tool refuse and report what is inside (default: False)."),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete a knowledge base folder.
@@ -1195,7 +1293,6 @@ async def delete_knowledge_base_folder(
         folder_name / folder_id: Folder to delete (one of them is required)
         delete_documents: Allow deleting a folder that still holds documents
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -1214,7 +1311,7 @@ async def delete_knowledge_base_folder(
         # Delete a folder together with the documents inside it
         delete_knowledge_base_folder(folder_name="Old Specs", delete_documents=True)
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1320,7 +1417,6 @@ async def create_knowledge_base_document(
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create an empty page document in a project's knowledge base.
@@ -1337,7 +1433,6 @@ async def create_knowledge_base_document(
         folder_name: Folder to create the document in (created when it does not exist)
         folder_id: Explicit folder identifier (takes precedence over folder_name)
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -1362,7 +1457,7 @@ async def create_knowledge_base_document(
         # With a named first page
         create_knowledge_base_document(doc_name="API Guide", first_page_name="Overview")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1465,7 +1560,6 @@ async def rename_knowledge_base_document(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Rename a knowledge base page document.
@@ -1479,7 +1573,6 @@ async def rename_knowledge_base_document(
         new_name: New document name (required)
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -1497,7 +1590,7 @@ async def rename_knowledge_base_document(
         # Give a freshly created document a real name
         rename_knowledge_base_document(document_identifier="Untitled Doc", new_name="Onboarding Spec")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1581,7 +1674,6 @@ async def list_knowledge_base_pages(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List the pages of a knowledge base page document.
@@ -1596,7 +1688,6 @@ async def list_knowledge_base_pages(
         start_at / max_results: Pagination window
         team_id / project_id: Resolved interactively if omitted
         response_format: 'json' or 'markdown'
-        api_key: User's Bugasura API key
 
     Returns:
         dict: Standard pagination envelope whose items are
@@ -1612,7 +1703,7 @@ async def list_knowledge_base_pages(
         # By document id, scoped to one folder
         list_knowledge_base_pages(document_identifier="3772", folder_name="Product Specs")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -1692,7 +1783,6 @@ async def create_knowledge_base_page(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Add a page to a knowledge base page document.
@@ -1714,7 +1804,6 @@ async def create_knowledge_base_page(
         after_page: Page to place the new page after (add_sibling_page)
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -1740,7 +1829,7 @@ async def create_knowledge_base_page(
         create_knowledge_base_page(document_identifier="Onboarding Spec", page_name="Step 1",
                                    parent_page="Rollout", content="# Step 1\\n\\nInvite the user.")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1875,7 +1964,6 @@ async def rename_knowledge_base_page(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Rename a page of a knowledge base page document.
@@ -1889,7 +1977,6 @@ async def rename_knowledge_base_page(
         new_name: New page name (required)
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -1910,7 +1997,7 @@ async def rename_knowledge_base_page(
         rename_knowledge_base_page(document_identifier="Onboarding Spec",
                                    page_identifier="Untitled Page", new_name="Overview")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2003,7 +2090,6 @@ async def get_knowledge_base_page_content(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Read a knowledge base document page's markdown body.
@@ -2022,7 +2108,6 @@ async def get_knowledge_base_page_content(
         page_identifier: Page name or page id of the page to read
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -2046,7 +2131,7 @@ async def get_knowledge_base_page_content(
         get_knowledge_base_page_content(document_identifier="Onboarding Spec",
                                         page_identifier="Overview")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2151,7 +2236,6 @@ async def update_knowledge_base_page_content(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Write, extend or clear the markdown body of a knowledge base document page.
@@ -2174,7 +2258,6 @@ async def update_knowledge_base_page_content(
         mode: 'replace' (default), 'append' or 'prepend'
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -2207,7 +2290,7 @@ async def update_knowledge_base_page_content(
         update_knowledge_base_page_content(document_identifier="Onboarding Spec",
                                            page_identifier="Overview", content="")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2351,7 +2434,6 @@ async def duplicate_knowledge_base_page(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Duplicate a page of a knowledge base page document.
@@ -2366,7 +2448,6 @@ async def duplicate_knowledge_base_page(
         include_sub_pages: Copy the sub pages too (default True)
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -2393,7 +2474,7 @@ async def duplicate_knowledge_base_page(
         duplicate_knowledge_base_page(document_identifier="Onboarding Spec",
                                       page_identifier="Rollout", include_sub_pages=False)
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2492,7 +2573,6 @@ async def move_knowledge_base_page(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Re-parent or reorder a page of a knowledge base page document.
@@ -2512,7 +2592,6 @@ async def move_knowledge_base_page(
         to_root: Move the page to the top level, at the end of the document
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -2543,7 +2622,7 @@ async def move_knowledge_base_page(
         move_knowledge_base_page(document_identifier="Onboarding Spec",
                                  page_identifier="Step 1", to_root=True)
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2702,7 +2781,6 @@ async def delete_knowledge_base_page(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete a page, and its sub pages, from a knowledge base page document.
@@ -2720,7 +2798,6 @@ async def delete_knowledge_base_page(
         delete_sub_pages: Allow deleting a page that has sub pages
         folder_name / folder_id: Narrow the search when names repeat across folders
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -2745,7 +2822,7 @@ async def delete_knowledge_base_page(
         delete_knowledge_base_page(document_identifier="Onboarding Spec",
                                    page_identifier="Rollout", delete_sub_pages=True)
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2865,7 +2942,6 @@ async def upload_knowledge_base_document(
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Upload one or more documents to a project's knowledge base.
@@ -2882,7 +2958,6 @@ async def upload_knowledge_base_document(
         folder_name: Folder to file the document in (created when it does not exist)
         folder_id: Explicit folder identifier (takes precedence over folder_name)
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -2908,7 +2983,7 @@ async def upload_knowledge_base_document(
         # From a share link
         upload_knowledge_base_document(source_url="https://drive.google.com/file/d/abc123/view")
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_upload_knowledge_base_document',
                                        'upload_knowledge_base_document')
     if context.get('status') != 'OK':
@@ -3014,7 +3089,6 @@ async def import_website_to_knowledge_base(
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Import a website into a project's knowledge base.
@@ -3035,7 +3109,6 @@ async def import_website_to_knowledge_base(
         folder_name: Folder to import into (created when it does not exist)
         folder_id: Explicit folder identifier (takes precedence over folder_name)
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -3066,7 +3139,7 @@ async def import_website_to_knowledge_base(
         # Cap a large site
         import_website_to_knowledge_base(website_url="https://docs.acme.dev", max_pages=50)
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_import_website_to_knowledge_base',
                                        'import_website_to_knowledge_base',
                                        f', website_url="{website_url}"')
@@ -3162,7 +3235,6 @@ async def list_coda_docs(
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=_KB_CONNECTOR_PAGE_SIZE, description=f"Number of docs to return (default: {_KB_CONNECTOR_PAGE_SIZE})", ge=1, le=100),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List the Coda docs available to a Coda API key.
@@ -3174,7 +3246,6 @@ async def list_coda_docs(
         coda_api_key: The user's Coda API key
         start_at / max_results: Pagination window
         response_format: 'json' or 'markdown'
-        api_key: User's Bugasura API key
 
     Returns:
         dict: Standard pagination envelope whose items are
@@ -3184,7 +3255,7 @@ async def list_coda_docs(
     Examples:
         list_coda_docs(coda_api_key="abcd-1234")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -3224,7 +3295,6 @@ async def list_coda_pages(
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=_KB_CONNECTOR_PAGE_SIZE, description=f"Number of pages to return (default: {_KB_CONNECTOR_PAGE_SIZE})", ge=1, le=100),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List the pages of a Coda doc.
@@ -3237,7 +3307,6 @@ async def list_coda_pages(
         coda_doc: Doc URL, id or name
         start_at / max_results: Pagination window
         response_format: 'json' or 'markdown'
-        api_key: User's Bugasura API key
 
     Returns:
         dict: Standard pagination envelope whose items are {'page_id', 'page_name',
@@ -3249,7 +3318,7 @@ async def list_coda_pages(
         list_coda_pages(coda_api_key="abcd-1234",
                         coda_doc="https://coda.io/d/Product-Spec_dAbC123")
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -3301,7 +3370,6 @@ async def import_coda_to_knowledge_base(
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Import a Coda doc into a project's knowledge base.
@@ -3319,7 +3387,6 @@ async def import_coda_to_knowledge_base(
         folder_name: Folder to import into (created when it does not exist)
         folder_id: Explicit folder identifier (takes precedence over folder_name)
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -3348,7 +3415,7 @@ async def import_coda_to_knowledge_base(
                                       page_identifiers=["Overview", "API Reference"],
                                       folder_name="Product Docs")
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_import_coda_to_knowledge_base',
                                        'import_coda_to_knowledge_base',
                                        f', coda_doc="{coda_doc}"')
@@ -3441,7 +3508,6 @@ async def list_jira_projects(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List the Jira projects reachable with the given credentials.
@@ -3454,7 +3520,6 @@ async def list_jira_projects(
         start_at / max_results: Pagination window
         team_id / project_id: Resolved interactively if omitted
         response_format: 'json' or 'markdown'
-        api_key: User's Bugasura API key
 
     Returns:
         dict: Standard pagination envelope whose items are {'project_key', 'project_name',
@@ -3465,7 +3530,7 @@ async def list_jira_projects(
         list_jira_projects(jira_url="https://acme.atlassian.net",
                            user_name="qa@acme.dev", api_token="...")
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_list_jira_projects', 'list_jira_projects',
                                        f', jira_url="{jira_url}", user_name="{user_name}"')
     if context.get('status') != 'OK':
@@ -3519,7 +3584,6 @@ async def list_jira_issues(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List the issues of a Jira project.
@@ -3535,7 +3599,6 @@ async def list_jira_issues(
         page_token / max_results: Pagination window
         team_id / project_id: Resolved interactively if omitted
         response_format: 'json' or 'markdown'
-        api_key: User's Bugasura API key
 
     Returns:
         dict: Standard pagination envelope whose items are {'issue_key', 'summary', 'type',
@@ -3548,7 +3611,7 @@ async def list_jira_issues(
         list_jira_issues(jira_url="https://acme.atlassian.net", user_name="qa@acme.dev",
                          api_token="...", project_key="ACME", search_text="checkout")
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_list_jira_issues', 'list_jira_issues',
                                        f', jira_url="{jira_url}", project_key="{project_key}"')
     if context.get('status') != 'OK':
@@ -3636,7 +3699,6 @@ async def import_jira_to_knowledge_base(
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Import Jira issues into a project's knowledge base.
@@ -3659,7 +3721,6 @@ async def import_jira_to_knowledge_base(
         folder_name: Folder to import into, or to scope the document lookup to
         folder_id: Explicit folder identifier (takes precedence over folder_name)
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -3689,7 +3750,7 @@ async def import_jira_to_knowledge_base(
                                       project_keys=["ACME"], issue_keys=["ACME-12", "ACME-31"],
                                       document_identifier="Release Notes")
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_import_jira_to_knowledge_base',
                                        'import_jira_to_knowledge_base',
                                        f', jira_url="{jira_url}", project_keys={project_keys}')
@@ -3804,7 +3865,6 @@ async def list_confluence_spaces(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List the Confluence spaces reachable with the given credentials.
@@ -3817,7 +3877,6 @@ async def list_confluence_spaces(
         start_at / max_results: Pagination window
         team_id / project_id: Resolved interactively if omitted
         response_format: 'json' or 'markdown'
-        api_key: User's Bugasura API key
 
     Returns:
         dict: Standard pagination envelope whose items are {'space_key', 'space_name'},
@@ -3828,7 +3887,7 @@ async def list_confluence_spaces(
         list_confluence_spaces(confluence_url="https://acme.atlassian.net",
                                user_email="qa@acme.dev", api_token="...")
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_list_confluence_spaces',
                                        'list_confluence_spaces')
     if context.get('status') != 'OK':
@@ -3881,7 +3940,6 @@ async def list_confluence_pages(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List the pages of a Confluence space.
@@ -3895,7 +3953,6 @@ async def list_confluence_pages(
         start_at / max_results: Pagination window
         team_id / project_id: Resolved interactively if omitted
         response_format: 'json' or 'markdown'
-        api_key: User's Bugasura API key
 
     Returns:
         dict: Standard pagination envelope whose items are {'page_id', 'page_title',
@@ -3906,7 +3963,7 @@ async def list_confluence_pages(
         list_confluence_pages(space_key="PROD", confluence_url="https://acme.atlassian.net",
                               user_email="qa@acme.dev", api_token="...")
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_list_confluence_pages',
                                        'list_confluence_pages', f', space_key="{space_key}"')
     if context.get('status') != 'OK':
@@ -3967,7 +4024,6 @@ async def import_confluence_to_knowledge_base(
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Import Confluence pages into a project's knowledge base.
@@ -3989,7 +4045,6 @@ async def import_confluence_to_knowledge_base(
         folder_name: Folder to import into, or to scope the document lookup to
         folder_id: Explicit folder identifier (takes precedence over folder_name)
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -4020,7 +4075,7 @@ async def import_confluence_to_knowledge_base(
                                             page_ids=["Checkout flow", "Refunds"],
                                             document_identifier="Product Docs")
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_import_confluence_to_knowledge_base',
                                        'import_confluence_to_knowledge_base',
                                        f', confluence_url="{confluence_url}", '
@@ -4144,7 +4199,6 @@ async def import_figma_to_knowledge_base(
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Import Figma frames into a project's knowledge base.
@@ -4167,7 +4221,6 @@ async def import_figma_to_knowledge_base(
         folder_name: Folder to import into (created when it does not exist)
         folder_id: Explicit folder identifier (takes precedence over folder_name)
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -4198,7 +4251,7 @@ async def import_figma_to_knowledge_base(
                                        figma_urls=["https://www.figma.com/design/aBc123/Checkout?node-id=1-2"],
                                        replace_existing=True)
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_import_figma_to_knowledge_base',
                                        'import_figma_to_knowledge_base',
                                        f', figma_urls={figma_urls}')
@@ -4323,7 +4376,6 @@ async def import_file_to_knowledge_base_document(
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Import a Markdown, CSV or Excel file into an existing knowledge base page document.
@@ -4345,7 +4397,6 @@ async def import_file_to_knowledge_base_document(
         page_identifier: Page a CSV/Excel table is appended to (first page when omitted)
         folder_name / folder_id: Scope the document lookup to one folder
         team_id / project_id: Resolved interactively if omitted
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -4373,7 +4424,7 @@ async def import_file_to_knowledge_base_document(
                                                file_path="/home/me/metrics.xlsx",
                                                page_identifier="Metrics")
     """
-    context = await _connector_context(api_key, team_id, project_id,
+    context = await _connector_context(team_id, project_id,
                                        'bugasura_import_file_to_knowledge_base_document',
                                        'import_file_to_knowledge_base_document',
                                        f', document_identifier="{document_identifier}"')
@@ -4626,6 +4677,20 @@ async def _resolve_project_team_id(api_key: str, team_id: int, project_id: int,
                        f"project team_id={project_team_id}. Using project's team_id.")
         return project_team_id
     return team_id
+
+
+def _md_cell(text: Any) -> str:
+    """Make a value safe inside a markdown table cell."""
+    return str(text).replace('|', '\\|').replace('\n', ' ')
+
+
+def _md_page_footer(envelope: dict) -> str:
+    """Pagination line for the custom markdown renderers; empty when the page is the last one."""
+    if not envelope.get('has_more'):
+        return ''
+    offset = envelope.get('offset', 0)
+    return (f"_Showing {offset + 1}–{offset + envelope.get('count', 0)} of {envelope.get('total')}. "
+            f"Call again with start_at={envelope.get('next_offset')} for more._")
 
 
 def _with_hint(failure: dict, hint: str) -> dict:
@@ -5395,17 +5460,17 @@ def _select_items(identifiers: List[str], items: list, id_key: str, name_key: st
     return {'status': 'OK', 'items': selected}
 
 
-async def _connector_context(api_key: str, team_id: Optional[int], project_id: Optional[int],
+async def _connector_context(team_id: Optional[int], project_id: Optional[int],
                              tool_name: str, caller: str,
                              operation_params: str = "") -> dict:
     """
-    Run the shared API-key + team/project resolution every connector tool starts with.
+    Run the shared credential + team/project resolution every connector tool starts with.
 
     Returns:
         dict: {'status': 'OK', 'api_key': str, 'team_id': int, 'project_id': int}, or the
         selection prompt / failure envelope to hand straight back to the caller.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation

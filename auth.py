@@ -1,11 +1,11 @@
-"""API key resolution, validation, and user-context caching."""
+"""Credential resolution, validation, and user-context caching."""
 import hashlib
 import time as _time
 from typing import Any, Optional
 
-from fastmcp.server.dependencies import get_http_headers
+from fastmcp.server.dependencies import get_access_token
 
-from client import _display_team_name, logger, make_api_request
+from client import _auth_required_payload, _display_team_name, _in_http_request, logger, make_api_request
 from config import BUGASURA_API_KEY
 
 
@@ -13,132 +13,56 @@ _USER_CONTEXT_TTL_SECONDS = 300  # 5 minutes
 _user_context_cache: dict = {}
 
 
-def _extract_key_from_http_headers() -> str:
-    """
-    Pull the API key from the active HTTP request's headers, if any.
-
-    Returns empty string in STDIO mode (no active request) or when neither
-    supported header is present. `get_http_headers()` returns lowercase keys
-    and never raises.
-
-    Headers checked, in order:
-      1. `X-Bugasura-API-Key: <key>` — explicit, won't collide with proxies.
-      2. `Authorization: Basic <key>` — token after `Basic ` is treated as
-         the raw API key, matching the Bugasura backend's own convention
-         (RequestHandler.php splits on whitespace, looks up the second token
-         verbatim with no base64 decoding). This means the same header that
-         works against `api.bugasura.io` works against the MCP server.
-    """
-    try:
-        headers = get_http_headers()
-    except Exception as e:
-        logger.debug(f"_get_api_key: get_http_headers raised unexpectedly: {e}")
-        return ""
-
-    custom = headers.get("x-bugasura-api-key", "").strip()
-    if custom:
-        return custom
-
-    auth = headers.get("authorization", "").strip()
-    if auth.lower().startswith("basic "):
-        token = auth[6:].strip()
-        if token:
-            return token
-
-    return ""
-
-
 def _get_api_key(api_key: str = "") -> str:
     """
-    Resolve the API key in priority order:
+    Resolve the credential used for the upstream Bugasura call.
 
-      1. Tool-call argument (`api_key` parameter passed by the MCP client at
-         call-time — typically a key the AI assistant collected from the user
-         mid-conversation, or a per-tool override).
-      2. HTTP request header `X-Bugasura-API-Key` (streamable-HTTP transport
-         only — STDIO has no active HTTP request, so this silently no-ops).
-      3. HTTP `Authorization: Basic <key>` header (streamable-HTTP only).
-         `<key>` is the raw API key — same format the Bugasura backend
-         expects, no base64 decoding.
-      4. `BUGASURA_API_KEY` environment variable. This covers all configured
-         sources: the `env` block in the MCP client config (Claude Desktop /
-         Cursor / Claude Code STDIO), `EnvironmentFile=` on systemd units,
-         the `.env` file loaded by python-dotenv, or a plain shell export.
-      5. Empty string — caller (`validate_api_key`) converts this to a
-         `status: 'api_key_required'` response that instructs the assistant
-         to ask the user.
+      1. Streamable-HTTP: the OAuth access token FastMCP already validated for this
+         request (`get_access_token().token`, a `bgs_at_…` string). The MCP client
+         obtained it by signing in to Bugasura in the browser; it never reaches the
+         assistant. There is no fallback to the env var over HTTP.
+      2. STDIO: `BUGASURA_API_KEY` from the MCP client's `env` block, the `.env` file,
+         or the shell. STDIO has no browser hand-off, so the legacy key stays for it.
+      3. Empty string — the caller (`validate_api_key`) turns this into a
+         `status: 'api_key_required'` response.
+
+    The `api_key` argument is ignored. It survives so the 100+ call sites keep their
+    `api_key = _get_api_key(api_key)` shape; tools no longer expose an api_key input.
     """
-    if api_key and api_key.strip():
-        logger.debug("_get_api_key: using key from tool-call argument")
-        return api_key.strip()
-
-    header_key = _extract_key_from_http_headers()
-    if header_key:
-        logger.debug("_get_api_key: using key from HTTP request header")
-        return header_key
+    if _in_http_request():
+        token = get_access_token()
+        if token and token.token:
+            logger.debug("_get_api_key: using OAuth access token from the request")
+            return token.token
+        logger.debug("_get_api_key: HTTP request without a validated access token")
+        return ""
 
     env_key = BUGASURA_API_KEY.strip()
     if env_key:
-        logger.debug("_get_api_key: using key from BUGASURA_API_KEY env var")
+        logger.debug("_get_api_key: using key from BUGASURA_API_KEY env var (STDIO)")
     else:
-        logger.debug("_get_api_key: no key found in argument, header, or env — caller will prompt user")
+        logger.debug("_get_api_key: no credential (STDIO without BUGASURA_API_KEY)")
     return env_key
 
 
 async def validate_api_key(api_key: str) -> dict:
     """
-    Validate API key by making a test request to the Bugasura API.
-
-    This function checks if the provided API key is valid by attempting
-    to fetch the user's teams. This is a lightweight operation that confirms
-    authentication without retrieving large amounts of data.
+    Validate the resolved credential with a lightweight call to the Bugasura API.
 
     Args:
-        api_key: User's Bugasura API key to validate
+        api_key: Ignored; the credential is re-resolved with `_get_api_key()`.
 
     Returns:
         dict: Validation result
             Success: {'valid': True, 'status': 'OK'}
-            Failure: {'valid': False, 'status': 'failed', 'error': 'error message', ...}
-
-    Note:
-        This function is called by all tools except list_teams to ensure
-        API key is valid before executing operations.
+            Failure: {'valid': False, 'status': 'api_key_required' | 'failed', ...}
     """
-    # Resolve API key: use provided value or fall back to environment variable
     api_key = _get_api_key(api_key)
 
-    # Validate API key format
     if not api_key or not isinstance(api_key, str) or len(api_key.strip()) == 0:
-        return {
-            'valid': False,
-            'status': 'api_key_required',
-            'error': 'No API key found. Please provide your Bugasura API key.',
-            'error_type': 'ApiKeyMissing',
-            'action': 'Please ask the user for their Bugasura API key. Once they provide it, retry the same tool call with the api_key parameter.',
-            'help': 'To get your API key:\n'
-                   '1. Go to https://bugasura.io\n'
-                   '2. Navigate to User Settings → API Key\n'
-                   '3. Copy your API key and provide it here'
-        }
+        return {'valid': False, **_auth_required_payload()}
 
-    # Check for placeholder/template API keys
-    placeholder_patterns = ['$BUGASURA_API_KEY', '${BUGASURA_API_KEY}', '<api_key>',
-                           'YOUR_API_KEY', 'BUGASURA_API_KEY', 'your-api-key-here']
-    if any(pattern in api_key for pattern in placeholder_patterns):
-        return {
-            'valid': False,
-            'status': 'failed',
-            'error': 'Please provide your Bugasura API key.',
-            'error_type': 'ValidationError',
-            'detected_placeholder': api_key,
-            'help': 'To get your API key:\n'
-                   '1. Go to https://bugasura.io\n'
-                   '2. Navigate to User Settings → API Key\n'
-                   '3. Copy your API key and use it instead of the placeholder'
-        }
-
-    # Make a lightweight API call to validate the key
+    # Make a lightweight API call to validate the credential
     # /v1/teams/get scans only the teams table; source=MCP is required, or the
     # endpoint rejects the call for a missing team_id.
     response = await make_api_request('GET', '/v1/teams/get', api_key, params={'source': 'MCP'})
@@ -153,18 +77,18 @@ async def validate_api_key(api_key: str) -> dict:
             'response_preview': str(response[:2]) if len(response) > 0 else 'Empty list'
         }
 
-    # Check if the API call was successful
     if response.get('status') == 'OK':
         return {'valid': True, 'status': 'OK', 'resolved_key': api_key}
-    else:
-        # Return the error details from the API
-        return {
-            'valid': False,
-            'status': 'failed',
-            'error': response.get('error', 'Invalid API key or authentication failed'),
-            'error_type': response.get('error_type', 'AuthenticationError'),
-            'message': 'Please check your API key and try again. Get your API key from Bugasura → User Settings → API Key'
-        }
+    if response.get('status') == 'api_key_required':
+        return {'valid': False, **response}
+    return {
+        'valid': False,
+        'status': 'failed',
+        'error': response.get('error', 'Authentication failed'),
+        'error_type': response.get('error_type', 'AuthenticationError'),
+        'message': ('Sign in to Bugasura again from your MCP client (HTTP), or check '
+                    'BUGASURA_API_KEY (STDIO).')
+    }
 
 
 def _invalidate_user_context_cache(api_key: Optional[str] = None) -> None:
@@ -184,7 +108,8 @@ async def _fetch_user_context(api_key: str) -> dict:
     """
     Internal helper function to fetch user context.
     This is NOT an MCP tool, so it can be called from other Python functions.
-    Results are cached per-api_key for _USER_CONTEXT_TTL_SECONDS.
+    Results are cached per credential for _USER_CONTEXT_TTL_SECONDS. OAuth access
+    tokens rotate hourly, so a stale entry costs at most one extra pair of calls.
     """
     key_hash = hashlib.sha256(api_key.encode('utf-8')).hexdigest()
     now = _time.monotonic()

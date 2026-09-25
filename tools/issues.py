@@ -46,7 +46,6 @@ async def create_issue(
     issue_assignees: str = Field(default="", description="Comma-separated assignee names, emails, or IDs (optional)"),
     is_public: str = Field(default="", description="Public visibility: 'true' or 'false' (optional)"),
     custom_fields: str = Field(default="", description="JSON string of custom field values (optional)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create a new issue/bug in Bugasura.
@@ -56,7 +55,6 @@ async def create_issue(
     guide the user through the selection process.
 
     Args:
-        api_key: User's Bugasura API key (required)
         summary: Issue title/summary (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -85,7 +83,7 @@ async def create_issue(
         OR a selection prompt if team_id/project_id/sprint_id not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -145,7 +143,7 @@ async def create_issue(
                 'sprint_id': sprint['sprint_id'],
                 'sprint_name': sprint['sprint_name']
             } for sprint in active_sprints] if active_sprints else None,
-            'instruction': f'Please call bugasura_create_issue again with sprint_id parameter. Example: bugasura_create_issue(api_key="{api_key[:4]}...", team_id={team_id}, project_id={project_id}, sprint_id=<selected_sprint_id>, summary="{summary}")'
+            'instruction': f'Please call bugasura_create_issue again with sprint_id parameter. Example: bugasura_create_issue(team_id={team_id}, project_id={project_id}, sprint_id=<selected_sprint_id>, summary="{summary}")'
         }
 
     # All context parameters provided - proceed with issue creation
@@ -221,7 +219,6 @@ async def get_issue(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Get issue details by numeric ID (testresults_id).
@@ -230,7 +227,6 @@ async def get_issue(
     will guide you through selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         issue_id: Issue numeric ID (testresults_id) (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -242,7 +238,7 @@ async def get_issue(
         Use bugasura_list_issues() to find the issue_id if you don't know it.
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -292,7 +288,6 @@ async def update_issue(
     similar_issues: Optional[str] = Field(default=None, description="Related issue IDs, comma-separated (optional)"),
     custom_fields: Optional[str] = Field(default=None, description="JSON string of custom field updates (optional)"),
     project_testcase_ids: Optional[str] = Field(default=None, description="Linked test case IDs, comma-separated (optional)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Update an existing issue. Only updates the fields that are provided.
@@ -305,7 +300,6 @@ async def update_issue(
     are present.
 
     Args:
-        api_key: User's Bugasura API key (required)
         issue_id: Issue numeric ID (testresults_id) (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -345,7 +339,7 @@ async def update_issue(
                     sprint_id=456)
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -487,7 +481,6 @@ async def delete_issue(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional - narrows search scope, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete an issue/bug from Bugasura by ID, issue key, or summary/title.
@@ -499,7 +492,6 @@ async def delete_issue(
     (comments, attachments, history) will be permanently removed.
 
     Args:
-        api_key: User's Bugasura API key (required)
         issue_identifier: Issue ID (numeric), issue key (e.g., "ISS09"), or issue summary/title (string) to delete (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -528,7 +520,7 @@ async def delete_issue(
         delete_issue(api_key, issue_identifier="ISS09")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
@@ -639,10 +631,9 @@ async def list_issues(
     start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)"),
     max_results: int = Field(default=10, description="Number of results to return (default: 10, ge=1, le=100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment."),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -723,7 +714,6 @@ async def list_issue_comments(
     start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)"),
     max_results: int = Field(default=10, description="Number of results to return (10-100, default: 10, ge=1, le=100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment."),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
     """
@@ -734,7 +724,6 @@ async def list_issue_comments(
     2. Select project (if not provided)
     3. Select issue (if not provided)
     Args:
-        api_key: User's Bugasura API key (required)
         issue_id: Issue numeric ID (testresults_id) (optional - will prompt if not provided)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -780,7 +769,7 @@ async def list_issue_comments(
         Set get_user_comments_only=True to exclude them.
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -832,7 +821,7 @@ async def list_issue_comments(
                 'severity': issue.get('severity', ''),
                 'assignees': issue.get('assignees', '')
             } for issue in issues[:20]],  # Show top 20 issues
-            'instruction': f'Please call bugasura_list_issue_comments again with issue_id parameter. Example: bugasura_list_issue_comments(api_key="{api_key[:4]}...", team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
+            'instruction': f'Please call bugasura_list_issue_comments again with issue_id parameter. Example: bugasura_list_issue_comments(team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
         }, response_format)
 
     # All context parameters provided - proceed with fetching comments
@@ -881,7 +870,6 @@ async def get_issue_comment(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Get details of a specific comment.
@@ -891,7 +879,6 @@ async def get_issue_comment(
     2. Select project (if not provided)
     3. Select issue (if not provided)
     Args:
-        api_key: User's Bugasura API key (required)
         comment_id: Comment identifier (required)
         issue_id: Issue numeric ID (testresults_id) (optional - will prompt if not provided)
         team_id: Team identifier (optional - will prompt if not provided)
@@ -920,7 +907,7 @@ async def get_issue_comment(
         get_issue_comment(api_key, comment_id=789, team_id=456)
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -973,7 +960,7 @@ async def get_issue_comment(
                 'severity': issue.get('severity', ''),
                 'assignees': issue.get('assignees', '')
             } for issue in issues[:20]],  # Show top 20 issues
-            'instruction': f'Please call bugasura_get_issue_comment again with issue_id parameter. Example: bugasura_get_issue_comment(api_key="{api_key[:4]}...", comment_id={comment_id}, team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
+            'instruction': f'Please call bugasura_get_issue_comment again with issue_id parameter. Example: bugasura_get_issue_comment(comment_id={comment_id}, team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
         }, response_format)
 
     # All context parameters provided - proceed with fetching comment
@@ -1011,7 +998,6 @@ async def add_issue_comment(
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     is_public_comment: int = Field(default=1, description="Comment visibility: 1 for public (default), 0 for private"),
     source: str = Field(default="API", description="Comment source (default: API)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Add a comment to an issue with support for mentions and formatting.
@@ -1026,7 +1012,6 @@ async def add_issue_comment(
     - User mentions (use @username format, will be validated against team members)
     - Line breaks and paragraphs
     Args:
-        api_key: User's Bugasura API key (required)
         comment: Comment text content (required, 1-65535 characters)
                  - Supports HTML formatting
                  - Use @username to mention team members
@@ -1106,7 +1091,7 @@ async def add_issue_comment(
         - Private comments are only visible to team members
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1189,7 +1174,7 @@ async def add_issue_comment(
                 'assignees': issue.get('assignees', ''),
                 'comment_count': issue.get('comments_count', 0)
             } for issue in issues[:20]],  # Show top 20 issues
-            'instruction': f'Please call bugasura_add_issue_comment again with issue_id parameter. Example: bugasura_add_issue_comment(api_key="{api_key[:4]}...", comment="{comment[:30]}...", team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
+            'instruction': f'Please call bugasura_add_issue_comment again with issue_id parameter. Example: bugasura_add_issue_comment(comment="{comment[:30]}...", team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
         }
 
     # All context parameters provided - proceed with adding comment
@@ -1251,7 +1236,6 @@ async def update_issue_comment(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     comment_attachment_names: str = Field(default="", description="Comma-separated attachment filenames (optional, preserves existing if empty)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Update an existing issue comment with full interactive flow.
@@ -1272,7 +1256,6 @@ async def update_issue_comment(
     - User mentions (use @username format)
     - Line breaks and paragraphs
     Args:
-        api_key: User's Bugasura API key (required)
         comment: Updated comment text (required when updating, 1-65535 characters)
                  - Supports HTML formatting
                  - Use @username to mention team members
@@ -1310,7 +1293,7 @@ async def update_issue_comment(
         )
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1364,7 +1347,7 @@ async def update_issue_comment(
                 'status': issue.get('bug_status', ''),
                 'comment_count': issue.get('comments_count', 0)
             } for issue in issues[:20]],
-            'instruction': f'Please call bugasura_update_issue_comment again with issue_id parameter. Example: bugasura_update_issue_comment(api_key="{api_key[:4]}...", comment="{comment[:30] if comment else ""}...", team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
+            'instruction': f'Please call bugasura_update_issue_comment again with issue_id parameter. Example: bugasura_update_issue_comment(comment="{comment[:30] if comment else ""}...", team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
         }
 
     # Step 4: NEW - If comment_id not provided, fetch and return comment options
@@ -1433,7 +1416,7 @@ async def update_issue_comment(
                 'attachments_count': len(comment.get('comment_attachments_files', []))
             } for comment in editable_comments[:20]],
             'total_editable_comments': len(editable_comments),
-            'instruction': f'Please call bugasura_update_issue_comment again with comment_id parameter. Example: bugasura_update_issue_comment(api_key="{api_key[:4]}...", comment="Your updated text here", comment_id=<selected_comment_id>, issue_id={issue_id}, team_id={team_id}, project_id={project_id})'
+            'instruction': f'Please call bugasura_update_issue_comment again with comment_id parameter. Example: bugasura_update_issue_comment(comment="Your updated text here", comment_id=<selected_comment_id>, issue_id={issue_id}, team_id={team_id}, project_id={project_id})'
         }
 
     # Step 5: All context parameters provided - validate comment text and proceed
@@ -1511,7 +1494,6 @@ async def delete_issue_comment(
     issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)"),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete an issue comment permanently with full interactive flow.
@@ -1536,7 +1518,6 @@ async def delete_issue_comment(
     - Slack notifications triggered if configured
     - Comment remains in database but marked as deleted (is_deleted=1)
     Args:
-        api_key: User's Bugasura API key (required)
         comment_id: Comment identifier (optional - will prompt if not provided)
         issue_id: Issue numeric ID (testresults_id) (optional - will prompt if not provided)
         team_id: Team identifier (optional - will prompt if not provided)
@@ -1565,7 +1546,7 @@ async def delete_issue_comment(
         )
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1619,7 +1600,7 @@ async def delete_issue_comment(
                 'status': issue.get('bug_status', ''),
                 'comment_count': issue.get('comments_count', 0)
             } for issue in issues[:20]],
-            'instruction': f'Please call bugasura_delete_issue_comment again with issue_id parameter. Example: bugasura_delete_issue_comment(api_key="{api_key[:4]}...", team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
+            'instruction': f'Please call bugasura_delete_issue_comment again with issue_id parameter. Example: bugasura_delete_issue_comment(team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
         }
 
     # Step 4: NEW - If comment_id not provided, fetch and return comment options
@@ -1696,7 +1677,7 @@ async def delete_issue_comment(
                 'attachments_count': len(comment.get('comment_attachments_files', []))
             } for comment in deletable_comments[:20]],
             'total_deletable_comments': len(deletable_comments),
-            'instruction': f'To proceed with PERMANENT deletion, call: bugasura_delete_issue_comment(api_key="{api_key[:4]}...", comment_id=<selected_comment_id>, issue_id={issue_id}, team_id={team_id}, project_id={project_id})'
+            'instruction': f'To proceed with PERMANENT deletion, call: bugasura_delete_issue_comment(comment_id=<selected_comment_id>, issue_id={issue_id}, team_id={team_id}, project_id={project_id})'
         }
 
     # Step 5: All context parameters provided - proceed with deleting comment
@@ -1750,7 +1731,6 @@ async def add_issue_assignees(
     assignees: str = Field(description="Comma-separated assignees: user IDs (e.g., '123'), emails (e.g., 'john@example.com'), or names (e.g., 'John Doe')"),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment."),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
     """
@@ -1767,7 +1747,6 @@ async def add_issue_assignees(
     - Mix of any of the above (e.g., "John, jane@example.com, 789")
 
     Args:
-        api_key: User's Bugasura API key (required)
         issue_id: Issue numeric ID (testresults_id) or identifier (e.g., 'NEW3') (required)
         assignees: Comma-separated names, emails, or user IDs (required)
         team_id: Team identifier (optional - will prompt if not provided)
@@ -1793,7 +1772,7 @@ async def add_issue_assignees(
         add_issue_assignees(api_key, issue_id=123, assignees="John, jane@example.com, 789")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
@@ -1871,7 +1850,6 @@ async def get_issue_assignees(
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Get the list of assignees for a specific issue.
@@ -1880,7 +1858,6 @@ async def get_issue_assignees(
     Interactive flow: If team_id/project_id are not provided, this function
     will guide you through selection.
     Args:
-        api_key: User's Bugasura API key (required)
         issue_id: Issue numeric ID (testresults_id) (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -1922,7 +1899,7 @@ async def get_issue_assignees(
     """
     # Validate API key before proceeding
     logger.info(f"get_issue_assignees: Starting for issue_id={issue_id}")
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -2010,7 +1987,6 @@ async def remove_issue_assignees(
     assignees: str = Field(description="Comma-separated assignees to remove: user IDs (e.g., '123'), emails (e.g., 'john@example.com'), or names (e.g., 'John Doe')"),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment."),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
     """
@@ -2027,7 +2003,6 @@ async def remove_issue_assignees(
     - Mix of any of the above (e.g., "John, jane@example.com, 789")
 
     Args:
-        api_key: User's Bugasura API key (required)
         issue_id: Issue numeric ID or identifier (e.g., 'NEW3') (required)
         assignees: Comma-separated names, emails, or user IDs to remove (required)
         team_id: Team identifier (optional - will prompt if not provided)
@@ -2050,7 +2025,7 @@ async def remove_issue_assignees(
         remove_issue_assignees(api_key, issue_id=123, assignees="John, jane@example.com")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):

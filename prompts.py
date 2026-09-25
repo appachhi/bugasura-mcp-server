@@ -3,65 +3,31 @@ from app import mcp
 
 
 @mcp.prompt()
-def setup_api_key() -> str:
+def connect_bugasura() -> str:
     """
-    Prompt to help AI assistants guide users through initial API key setup.
-
-    This prompt instructs AI assistants to:
-    1. Ask the user for their Bugasura API key (not use placeholder values)
-    2. Guide them through getting their API key if they don't have it
-    3. Validate the API key before proceeding
-
-    IMPORTANT: AI assistants should first check if the API key is already
-    configured (env var for STDIO, request header for streamable-HTTP). If it
-    is, use it directly without prompting. Only ask the user for their API key
-    if no configured source provides one.
+    How authentication works and what to tell the user when a tool returns
+    status 'api_key_required'. Tools carry no credential arguments any more.
     """
     return """
-Welcome to Bugasura MCP! To get started, I need your Bugasura API key.
+Bugasura MCP signs users in with OAuth 2.0 when used over HTTP, and falls back to an
+API key only for local STDIO setups.
 
-**API key resolution order (server-side):**
+**Hosted / HTTP (recommended)** — the MCP client handles sign-in; tools take no key.
+- Claude Desktop / claude.ai: Settings → Connectors → Add custom connector →
+  URL `https://mcp.bugasura.io/mcp` → Connect → sign in to Bugasura → Allow.
+- Claude Code: `claude mcp add --transport http bugasura https://mcp.bugasura.io/mcp`,
+  then run `/mcp`, pick Bugasura → Authenticate.
+- Cursor / VS Code / Windsurf / Cline / Roo Code: add the URL; the client detects
+  OAuth and opens the browser on first use.
+Access tokens last 1 hour and refresh silently for 30 days.
 
-1. **Tool-call argument** — if a tool is invoked with an `api_key` parameter,
-   that value is used.
-2. **HTTP request header** (streamable-HTTP transport only) —
-   `X-Bugasura-API-Key: <key>`, or `Authorization: Basic <key>` as fallback.
-   Set this in your MCP client's `headers` block for hosted servers.
-3. **`BUGASURA_API_KEY` environment variable** — set via the MCP client's
-   `env` block (Claude Desktop / Cursor / Claude Code STDIO config), via
-   systemd `EnvironmentFile=`, via the project `.env` file, or via the shell.
-4. **Ask the user** — if no source above provides a key, the tool returns
-   `status: 'api_key_required'` and the assistant should prompt the user.
+**Local STDIO** — set `BUGASURA_API_KEY` in the server's `env` block
+(Bugasura → User Settings → API Key) and restart the client.
 
-**IMPORTANT FOR AI ASSISTANTS**:
-- Try the tool first WITHOUT an `api_key` argument. The server will use the
-  configured env var or request header if available, so most users never need
-  to type their key.
-- Only ask the user for their key if a tool returns `status: 'api_key_required'`.
-- Once the user provides one, pass it via the `api_key` parameter on retry.
-- NEVER pass placeholder values like `$BUGASURA_API_KEY` or `YOUR_API_KEY`.
-
-**Instructions for Users**:
-
-1. **Option A - Configure in MCP Client** (Recommended):
-   - **STDIO clients** (Claude Desktop, local Cursor/VS Code): set
-     `BUGASURA_API_KEY` in the MCP server's `env` block.
-   - **HTTP clients** (hosted Bugasura MCP, e.g. mcp.bugasura.io): set
-     `X-Bugasura-API-Key` in the MCP server's `headers` block.
-   Either way, tools pick the key up automatically with no prompting.
-
-2. **Option B - Get Your API Key**:
-   - Go to https://bugasura.io
-   - Navigate to: User Settings → API Key
-   - Copy your API key and provide it when prompted
-
-3. **Next Steps**:
-   Once the API key is available, I will:
-   - Validate it
-   - Show you your available teams and projects
-   - Help you create/manage issues, test cases, and sprints
-
-**Security Note**: Your API key is never logged in full (only first 8 characters for debugging).
+**When a tool returns `status: 'api_key_required'`**
+- Do NOT ask the user to paste an API key; tools no longer accept one.
+- HTTP: tell the user to reconnect / re-authorize Bugasura in their MCP client, then retry.
+- STDIO: tell the user to set `BUGASURA_API_KEY` and restart the client.
 """
 
 
@@ -138,7 +104,7 @@ WITHOUT specifying a team:
 ## Best Approach - Use find_project_by_name()
 
 If the user mentions a project name or keyword:
-✓ Use: find_project_by_name(api_key, project_name)
+✓ Use: find_project_by_name(project_name)
   - Searches across ALL teams automatically
   - Returns project_id and team_id for each match
   - Supports partial, case-insensitive matching
@@ -151,7 +117,7 @@ Example user requests:
 ## Alternative Approach - Use get_user_context()
 
 If the user wants to see ALL projects (no search term):
-✓ Use: get_user_context(api_key)
+✓ Use: get_user_context()
   - Returns all teams and their projects in one call
   - Shows complete project hierarchy
   - More efficient than calling list_teams() then list_projects() for each team
@@ -163,7 +129,7 @@ Example user requests:
 
 ## When to Use list_projects()
 
-ONLY use list_projects(api_key, team_id) when:
+ONLY use list_projects(team_id) when:
 - User specifically mentions a team name or ID
 - You've already identified the team_id from previous context
 - User wants filtered/paginated results for a specific team

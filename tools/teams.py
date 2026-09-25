@@ -8,7 +8,7 @@ from output_types import ToolResponse
 from app import mcp
 from auth import _fetch_user_context, _get_api_key, _invalidate_user_context_cache, validate_api_key
 from client import (
-    _display_team_name, _paginate_upstream, _paginated, _prepare_post_params,
+    _auth_required_payload, _display_team_name, _paginate_upstream, _paginated, _prepare_post_params,
     _render_markdown, _respond, _validate_id, logger, make_api_request,
 )
 from helpers import (
@@ -26,7 +26,7 @@ import requests  # for except blocks referencing requests.RequestException
     description = "List all teams the user belongs to. Returns minimal team info for selection.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
-async def list_teams(response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: \'json\' or \'markdown\'"), api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")) -> ToolResponse:
+async def list_teams(response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: \'json\' or \'markdown\'")) -> ToolResponse:
     """
     List all teams the user belongs to.
 
@@ -34,7 +34,6 @@ async def list_teams(response_format: Literal["json", "markdown"] = Field(defaul
     most other operations. Returns minimal team information to reduce payload size.
 
     Args:
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -53,19 +52,10 @@ async def list_teams(response_format: Literal["json", "markdown"] = Field(defaul
         }
     """
     # Resolve API key from parameter or environment
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
 
     if not api_key:
-        return _respond({
-            'status': 'api_key_required',
-            'error': 'No API key found. Please provide your Bugasura API key.',
-            'error_type': 'ApiKeyMissing',
-            'action': 'Please ask the user for their Bugasura API key. Once they provide it, retry the same tool call with the api_key parameter.',
-            'help': 'To get your API key:\n'
-                   '1. Go to https://bugasura.io\n'
-                   '2. Navigate to User Settings → API Key\n'
-                   '3. Copy your API key and provide it here'
-        }, response_format)
+        return _respond(_auth_required_payload(), response_format)
 
     # Call Bugasura API to fetch user's teams
     full_response = await make_api_request('GET', '/v1/teams/get', api_key, params={
@@ -119,7 +109,6 @@ async def get_team(
     team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)"),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (provide either team_id or team_name)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Get detailed team information.
@@ -128,7 +117,6 @@ async def get_team(
     custom field configurations, and team settings.
 
     Args:
-        api_key: User's Bugasura API key (required)
         team_id: Team identifier (optional, provide either team_id or team_name)
         team_name: Team name to search for (optional, provide either team_id or team_name)
 
@@ -170,7 +158,7 @@ async def get_team(
     """
     # Validate API key before proceeding
     logger.info(f"get_team: Starting for team_id={team_id}, team_name={team_name}")
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -220,7 +208,6 @@ async def get_team(
 )
 async def create_team(
     team_name: str = Field(description="Team name (required, 1-50 characters, min_length=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create a new team.
@@ -229,7 +216,6 @@ async def create_team(
     Team name must be unique within the user's teams.
 
     Args:
-        api_key: User's Bugasura API key (required)
         team_name: Name for the new team (required, 1-50 characters)
 
     Returns:
@@ -261,7 +247,7 @@ async def create_team(
     """
     # Validate API key before proceeding
     logger.info(f"create_team: Starting for team_name='{team_name}'")
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -334,7 +320,6 @@ async def update_team(
     new_team_name: str = Field(description="New team name (required, 1-50 characters, min_length=1)"),
     team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)"),
     team_name: Optional[str] = Field(default=None, description="Current team name to search for (provide either team_id or team_name)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Update team name.
@@ -343,7 +328,6 @@ async def update_team(
     authorization error if the user is not an admin.
 
     Args:
-        api_key: User's Bugasura API key (required)
         new_team_name: New name for the team (required, 1-100 characters)
         team_id: Team identifier (optional, provide either team_id or team_name)
         team_name: Current team name to search for (optional, provide either team_id or team_name)
@@ -376,7 +360,7 @@ async def update_team(
     """
     # Validate API key before proceeding
     logger.info(f"update_team: Starting for team_id={team_id}, team_name='{team_name}', new_team_name='{new_team_name}'")
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -454,7 +438,6 @@ async def update_team(
 async def delete_team(
     team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)"),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (provide either team_id or team_name)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete team permanently.
@@ -471,7 +454,6 @@ async def delete_team(
     This operation CANNOT be undone!
 
     Args:
-        api_key: User's Bugasura API key (required)
         team_id: Team identifier (optional, provide either team_id or team_name)
         team_name: Team name to search for (optional, provide either team_id or team_name)
 
@@ -505,7 +487,7 @@ async def delete_team(
     """
     # Validate API key before proceeding
     logger.warning(f"delete_team: DESTRUCTIVE OPERATION - Starting for team_id={team_id}, team_name={team_name}")
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -562,7 +544,6 @@ async def delete_team(
 async def list_team_members(
     team_id: int = Field(description="Team identifier", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List all members of a team with their user IDs, names, and emails.
@@ -571,7 +552,6 @@ async def list_team_members(
     This is essential for assigning issues or test cases to team members.
 
     Args:
-        api_key: User's Bugasura API key (required)
         team_id: Team identifier (required)
 
     Returns:
@@ -603,7 +583,7 @@ async def list_team_members(
                 user_id = member['user_id']
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
@@ -625,7 +605,6 @@ async def add_team_members(
     email_list: str = Field(description="Comma-separated email addresses to invite (e.g., 'john@example.com, jane@example.com')"),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)"),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (optional if team_id provided)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Add new members to a team by sending email invitations.
@@ -636,7 +615,6 @@ async def add_team_members(
     You can specify the team using either team_id or team_name.
 
     Args:
-        api_key: User's Bugasura API key (required)
         email_list: Comma-separated email addresses to invite (required)
                    Example: "john@example.com, jane@example.com, user@domain.com"
         team_id: Team identifier (optional if team_name provided)
@@ -685,7 +663,7 @@ async def add_team_members(
     """
     # Validate API key before proceeding
     logger.info(f"add_team_members: Starting for team_id={team_id}, team_name='{team_name}'")
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -793,7 +771,6 @@ async def update_team_member(
     is_admin: int = Field(description="Admin status: 1 for admin, 0 for regular member"),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)"),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (optional if team_id provided)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Update a team member's admin status.
@@ -803,7 +780,6 @@ async def update_team_member(
     You can specify the team using either team_id or team_name.
 
     Args:
-        api_key: User's Bugasura API key (required)
         user_id: User ID to update - the team member whose role to change (required)
         is_admin: Admin status - 1 for admin, 0 for regular member (required)
         team_id: Team identifier (optional if team_name provided)
@@ -837,7 +813,7 @@ async def update_team_member(
     """
     # Validate API key before proceeding
     logger.info(f"update_team_member: Starting for team_id={team_id}, team_name='{team_name}', user_id={user_id}, is_admin={is_admin}")
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -923,7 +899,6 @@ async def delete_team_user(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)"),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (optional if team_id provided)"),
     is_leave_team: int = Field(default=0, description="Set to 1 if user is leaving team themselves (default: 0 for admin removal)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Remove a user from a team.
@@ -947,7 +922,6 @@ async def delete_team_user(
     - Names or partial names (e.g., "John", "John Doe")
 
     Args:
-        api_key: User's Bugasura API key (required)
         user_identifier: User ID, email, or name to remove (required)
         team_id: Team identifier (optional if team_name provided)
         team_name: Team name (optional if team_id provided, supports partial match)
@@ -994,7 +968,7 @@ async def delete_team_user(
     """
     # Validate API key before proceeding
     logger.info(f"delete_team_user: Starting for team_id={team_id}, team_name='{team_name}', user_identifier='{user_identifier}', is_leave_team={is_leave_team}")
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict

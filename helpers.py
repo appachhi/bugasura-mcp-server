@@ -14,62 +14,9 @@ from auth import _get_api_key, _fetch_user_context, validate_api_key
 from client import logger, make_api_request
 
 
-# API host -> customer-facing web app base URL.
-# Set WEB_BASE_URL in .env to override for deployments not listed here.
-_KNOWN_WEB_BASES = {
-    "api.bugasura.io":       "https://my.bugasura.io/",
-    "api.stage.bugasura.io": "https://stage.bugasura.io/",
-    "api.appachhi.net":      "http://appachhi.net/",
-    "localhost":             "http://localhost/Appachhi/chhiscore/",
-    "127.0.0.1":             "http://127.0.0.1/Appachhi/chhiscore/",
-}
-
-
-def _derive_web_base(api_base: str) -> str:
-    """Return the customer-facing web app base URL derived from an API base URL."""
-    try:
-        p = urlparse(api_base)
-        host = p.netloc.split('@')[-1].split(':')[0]
-        if host in _KNOWN_WEB_BASES:
-            return _KNOWN_WEB_BASES[host]
-        if p.scheme and p.netloc:
-            return f"{p.scheme}://{p.netloc}/"
-    except Exception:
-        pass
-    return ""
-
-# API host -> CDN base that serves stored files (config.application.cdnUrl upstream).
-# Uploaded files are public objects under this base, so `CDN_BASE_URL + <file path>` is a
-# working download link. Set CDN_BASE_URL in .env for deployments not listed here — the CDN
-# is a separate CloudFront/S3 host, so unlike the web base it can never be guessed from the
-# API host. localhost -> stage CloudFront is intentional: the backend's own LOCAL config
-# resolves cdnUrl to that same distribution, so a local API still serves files from it.
-_KNOWN_CDN_BASES = {
-    "api.bugasura.io":       "https://dp891r6qeu0kb.cloudfront.net/",
-    "api.stage.bugasura.io": "https://dfpr5nkt5jhxf.cloudfront.net/",
-    "api.appachhi.net":      "https://dfpr5nkt5jhxf.cloudfront.net/",
-    "localhost":             "https://dfpr5nkt5jhxf.cloudfront.net/",
-    "127.0.0.1":             "https://dfpr5nkt5jhxf.cloudfront.net/",
-}
-
-
-def _derive_cdn_base(api_base: str) -> str:
-    """Return the CDN base URL for a known API host, or '' when it is not known."""
-    try:
-        host = urlparse(api_base).netloc.split('@')[-1].split(':')[0]
-        return _KNOWN_CDN_BASES.get(host, "")
-    except Exception:
-        return ""
-
-
-_api_base = os.getenv("API_BASE_URL", "http://localhost/api.appachhi.com")
-WEB_BASE_URL = os.getenv("WEB_BASE_URL", "").strip() or _derive_web_base(_api_base)
-if WEB_BASE_URL and not WEB_BASE_URL.endswith("/"):
-    WEB_BASE_URL += "/"
-
-CDN_BASE_URL = os.getenv("CDN_BASE_URL", "").strip() or _derive_cdn_base(_api_base)
-if CDN_BASE_URL and not CDN_BASE_URL.endswith("/"):
-    CDN_BASE_URL += "/"
+# WEB_BASE_URL / CDN_BASE_URL now live in config.py; re-exported here because
+# tools import them from helpers.
+from config import CDN_BASE_URL, WEB_BASE_URL  # noqa: F401,E402
 
 
 def filter_large_fields(data: dict) -> dict:
@@ -159,7 +106,7 @@ async def select_team_project_context(api_key: str, team_id: Optional[int], proj
                 'role': team['role'],
                 'is_expired': team.get('is_expired')
             } for team in teams],
-            'instruction': f'Please call {operation_name} again with team_id parameter. Example: {operation_name}(api_key="{api_key[:4]}...", team_id=<selected_team_id>{operation_params})'
+            'instruction': f'Please call {operation_name} again with team_id parameter. Example: {operation_name}(team_id=<selected_team_id>{operation_params})'
         }
 
     # Step 2: If project_id not provided, fetch and return project options
@@ -208,7 +155,7 @@ async def select_team_project_context(api_key: str, team_id: Optional[int], proj
                 'platform': proj.get('platform', ''),
                 'platform_type': proj.get('platform_type', '')
             } for proj in projects],
-            'instruction': f'Please call {operation_name} again with project_id parameter. Example: {operation_name}(api_key="{api_key[:4]}...", team_id={team_id}, project_id=<selected_project_id>{operation_params})'
+            'instruction': f'Please call {operation_name} again with project_id parameter. Example: {operation_name}(team_id={team_id}, project_id=<selected_project_id>{operation_params})'
         }
 
     # Both team_id and project_id provided - return validated context

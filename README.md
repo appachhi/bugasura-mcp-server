@@ -8,6 +8,18 @@ Bugasura MCP Server enables AI tools like Claude, VS Code Copilot, and Cursor to
 
 ---
 
+## ⚠️ Breaking changes in 3.0
+
+Authentication moved to OAuth 2.0 sign-in. If you're upgrading from 2.x:
+
+| What changed | 2.x | 3.0 |
+|--------------|-----|-----|
+| Hosted (HTTP) authentication | `X-Bugasura-API-Key` header or `Authorization: Basic <key>` in the client config | Sign in from the MCP client: it opens the Bugasura login + consent page once, then refreshes tokens silently. No key in any config file. |
+| `api_key` tool parameter | Present on every tool | Removed. Tools never accept a key; the assistant must not ask for one. |
+| STDIO (local subprocess) | `BUGASURA_API_KEY` env var | Unchanged — the env var is the only credential source for STDIO. |
+| Prompt | `setup_api_key` | `connect_bugasura` |
+| Server requirements (HTTP) | none | `MCP_PUBLIC_BASE_URL`, `BUGASURA_OAUTH_CLIENT_ID`, `BUGASURA_OAUTH_CLIENT_SECRET` (see *Deploying the OAuth sign-in*) |
+
 ## ⚠️ Breaking changes in 2.0
 
 If you're upgrading from 1.x, update your client configuration:
@@ -42,15 +54,15 @@ If you're upgrading from 1.x, update your client configuration:
 
 ## Quick Start
 
-### 1. Get Your API Key
+### 1. Have a Bugasura account
 
-1. Go to [Bugasura](https://bugasura.io)
-2. Navigate to: **Settings → API Key**
-3. Copy your API key
+That's all the hosted server needs. On first use your AI tool opens the Bugasura sign-in page in your browser; approve once and you're connected. Tokens refresh automatically for 30 days.
+
+An API key is only needed for the local STDIO setup described under *Local Development*.
 
 ### 2. Install the MCP Server
 
-Choose your AI tool and configure with your API key. The server reads the key from the request `X-Bugasura-API-Key` header (HTTP transport) or the `BUGASURA_API_KEY` environment variable (STDIO transport) — when configured, tools use it automatically without prompting. If no key is configured, tools return `status: 'api_key_required'` and the assistant asks you for one.
+Add the server URL to your AI tool. No headers, no keys: the client discovers the OAuth sign-in from the server and walks you through it.
 
 <details>
 <summary><b>Claude Desktop</b></summary>
@@ -59,6 +71,8 @@ Open Claude Desktop → Settings → Connectors → Add Custom Connector
 
 - Name: `Bugasura`
 - URL: `https://mcp.bugasura.io/mcp`
+
+Click **Connect**, sign in to Bugasura, and click **Allow** on the consent page.
 
 </details>
 
@@ -71,15 +85,14 @@ Add to your VS Code MCP config:
 {
   "servers": {
     "bugasura": {
-      "type": "https",
-      "url": "https://mcp.bugasura.io/mcp",
-      "headers": {
-        "X-Bugasura-API-Key": "your_api_key_here"
-      }
+      "type": "http",
+      "url": "https://mcp.bugasura.io/mcp"
     }
   }
 }
 ```
+
+VS Code detects the OAuth sign-in and opens the browser the first time a tool is used.
 
 [VS Code MCP Documentation](https://code.visualstudio.com/docs/copilot/chat/mcp-servers)
 
@@ -89,8 +102,10 @@ Add to your VS Code MCP config:
 <summary><b>Claude Code</b></summary>
 
 ```bash
-claude mcp add --transport http bugasura https://mcp.bugasura.io/mcp --header "X-Bugasura-API-Key: your_api_key_here"
+claude mcp add --transport http bugasura https://mcp.bugasura.io/mcp
 ```
+
+Then run `/mcp` inside Claude Code, choose **Bugasura → Authenticate**, and complete the sign-in in the browser.
 
 [Claude Code MCP Documentation](https://docs.anthropic.com/en/docs/claude-code/mcp)
 
@@ -105,15 +120,13 @@ Add to `~/.cursor/mcp.json`:
 {
   "mcpServers": {
     "bugasura": {
-      "url": "https://mcp.bugasura.io/mcp",
-      "type": "https",
-      "headers": {
-        "X-Bugasura-API-Key": "your_api_key_here"
-      }
+      "url": "https://mcp.bugasura.io/mcp"
     }
   }
 }
 ```
+
+Cursor shows a **Needs login** badge next to the server; click it to sign in.
 
 </details>
 
@@ -126,14 +139,13 @@ Add to your Windsurf MCP config:
 {
   "mcpServers": {
     "bugasura": {
-      "serverUrl": "https://mcp.bugasura.io/mcp",
-      "headers": {
-        "X-Bugasura-API-Key": "your_api_key_here"
-      }
+      "serverUrl": "https://mcp.bugasura.io/mcp"
     }
   }
 }
 ```
+
+Windsurf opens the sign-in page on first use.
 
 [Windsurf MCP Documentation](https://docs.windsurf.com/windsurf/cascade/mcp)
 
@@ -152,10 +164,7 @@ Add to your Windsurf MCP config:
   "mcpServers": {
     "bugasura": {
       "url": "https://mcp.bugasura.io/mcp",
-      "type": "streamableHttp",
-      "headers": {
-        "X-Bugasura-API-Key": "your_api_key_here"
-      }
+      "type": "streamableHttp"
     }
   }
 }
@@ -171,10 +180,7 @@ Add to your Windsurf MCP config:
   "mcpServers": {
     "bugasura": {
       "type": "streamable-http",
-      "url": "https://mcp.bugasura.io/mcp",
-      "headers": {
-        "X-Bugasura-API-Key": "your_api_key_here"
-      }
+      "url": "https://mcp.bugasura.io/mcp"
     }
   }
 }
@@ -861,7 +867,7 @@ Pick what a connector should import with the listing tools first:
 - `bugasura_list_confluence_spaces` / `bugasura_list_confluence_pages` - The spaces an account can see, and one space's pages
 
 **Folders**
-- `bugasura_list_knowledge_base_folders` - List the knowledge base folders with the document count in each
+- `bugasura_list_knowledge_base_folders` - List the top-level knowledge base folders (paginated), each with its sub-folder tree and documents
 - `bugasura_create_knowledge_base_folder` - Create a folder, optionally nested under an existing one
 - `bugasura_rename_knowledge_base_folder` - Rename a folder in place (keeps its parent and its contents)
 - `bugasura_delete_knowledge_base_folder` - Delete a folder (admin-only, DESTRUCTIVE)
@@ -1064,7 +1070,7 @@ The hosted version at `https://mcp.bugasura.io/mcp` uses streamable HTTP.
 
 Use these when you're hacking on the server itself and want your AI client to launch your local checkout as a stdio subprocess instead of hitting the hosted `/mcp` endpoint.
 
-> **Replace `/Applications/MAMP/htdocs/Bugasura-MCP/` with the absolute path of your own clone, and `your_api_key_here` with your Bugasura API key (Settings → API Key).** Never commit a real key.
+> **Replace `/path/to/bugasura-mcp-server/` with the absolute path of your own clone, and `your_api_key_here` with your Bugasura API key (User Settings → API Key).** STDIO is the one transport that still uses the key, because a subprocess cannot hand off to a browser. Never commit a real key.
 
 ### VS Code (workspace `.vscode/settings.json`)
 
@@ -1076,9 +1082,9 @@ Use these when you're hacking on the server itself and want your AI client to la
       "servers": {
         "bugasura-local-mcp": {
           "type": "stdio",
-          "command": "/Applications/MAMP/htdocs/Bugasura-MCP/.venv/bin/python3",
+          "command": "/path/to/bugasura-mcp-server/.venv/bin/python3",
           "args": [
-            "/Applications/MAMP/htdocs/Bugasura-MCP/server.py"
+            "/path/to/bugasura-mcp-server/server.py"
           ],
           "env": {
             "BUGASURA_API_KEY": "your_api_key_here"
@@ -1099,9 +1105,9 @@ Windows path: `%APPDATA%\Claude\claude_desktop_config.json`
 {
   "mcpServers": {
     "bugasura": {
-      "command": "/Applications/MAMP/htdocs/Bugasura-MCP/.venv/bin/python",
+      "command": "/path/to/bugasura-mcp-server/.venv/bin/python",
       "args": [
-        "/Applications/MAMP/htdocs/Bugasura-MCP/server.py"
+        "/path/to/bugasura-mcp-server/server.py"
       ],
       "env": {
         "BUGASURA_API_KEY": "your_api_key_here"
@@ -1126,14 +1132,16 @@ The MCP Inspector provides a web-based interface to test and debug your MCP serv
    npm install -g @modelcontextprotocol/inspector
    ```
 
-2. **Run the Inspector**:
+2. **Run the Inspector** (STDIO, uses `BUGASURA_API_KEY` from `.env`):
    ```bash
-   cd /Applications/MAMP/htdocs/api.appachhi.com/Bugasura-MCP
+   cd /path/to/bugasura-mcp-server
    source .venv/bin/activate
    npx @modelcontextprotocol/inspector python server.py
    ```
 
 3. **Open your browser** - The inspector will automatically open at `http://localhost:5173`
+
+To exercise the OAuth sign-in instead, start the server in HTTP mode with `MCP_PUBLIC_BASE_URL=http://localhost:8000` and the client id/secret set, plus `--allow-insecure-http`; then in the Inspector choose **Streamable HTTP**, URL `http://localhost:8000/mcp`, **Authentication → OAuth 2.0 → Quick OAuth Flow**. You will pass through the server's consent page, then Bugasura's login and consent, and come back with tools listed.
 
 ### What You Can Do
 
@@ -1153,7 +1161,7 @@ Parameters: {
   "issue_identifier": "ISS09"
 }
 ```
-> Note: `api_key` is optional if `BUGASURA_API_KEY` is set in the environment.
+> Note: STDIO mode reads `BUGASURA_API_KEY` from the environment; tools have no `api_key` parameter.
 
 **Test Interactive Sprint Selection:**
 ```json
@@ -1190,19 +1198,12 @@ For detailed instructions, see [MCP_INSPECTOR_GUIDE.md](./MCP_INSPECTOR_GUIDE.md
 
 ## Important Notes
 
-### API Key
+### Authentication
 
-All operations require a Bugasura API key. Get yours from [Bugasura Settings](https://bugasura.io).
+**Hosted server (HTTP)** — OAuth 2.0 sign-in. The MCP client discovers the sign-in from the server, opens Bugasura's login + consent page in your browser once, and keeps a token that refreshes silently (access tokens last 1 hour, refresh tokens 30 days). Nothing is stored in your client config, and the assistant never sees a credential. To sign a client out, disconnect it in the client.
 
-**Recommended — configure once in your MCP client** (see setup examples above):
-- **STDIO clients** (Claude Desktop, local Cursor/VS Code STDIO): set `BUGASURA_API_KEY` in the `env` block.
-- **HTTP clients** (hosted `/mcp`, e.g. `mcp.stage.bugasura.io`): set `X-Bugasura-API-Key` in the `headers` block. `Authorization: Basic <key>` is also accepted.
+**Local STDIO** — the server runs as a subprocess of your client and cannot hand off to a browser, so it reads `BUGASURA_API_KEY` from the `env` block (Bugasura → User Settings → API Key). If it is missing, tools return `status: 'api_key_required'` with instructions; the assistant will not ask you to paste a key in chat.
 
-When configured, all tools use the key automatically — no need to provide it on every call. If neither source is configured, the first tool call returns `status: 'api_key_required'` and the assistant will ask you for one.
-
-You can also pass `api_key` explicitly as a tool parameter, which takes precedence over both env and header.
-
-**IMPORTANT:** Do not use placeholders like `$BUGASURA_API_KEY`. The server detects and rejects placeholder values.
 
 ### Interactive Mode
 

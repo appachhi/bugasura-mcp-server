@@ -45,7 +45,6 @@ async def list_test_cases(
     start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)"),
     max_results: int = Field(default=20, description="Number of results to return (default: 20, ge=1, le=100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment."),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
     """List test cases. With sprint_id: fetches via /testpert/sprintTestCase/get (full details,
@@ -53,7 +52,7 @@ async def list_test_cases(
     Add test_run_execution_run_id to scope to a specific run within the sprint.
     Without sprint_id: fetches all project test cases via /v1/testcases/list (summaries).
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -180,7 +179,6 @@ async def create_test_case(
     assignees: Optional[str] = Field(default=None, description="Comma-separated assignee names, emails, or IDs (optional)"),
     is_api_test_case: bool = Field(default=False, description="Flag for API test cases (default: False)"),
     folder_id: Optional[int] = Field(default=None, description="Folder ID for organization (optional, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create a new test case in Bugasura.
@@ -196,7 +194,6 @@ async def create_test_case(
     - Mix of any of the above (e.g., "John, jane@example.com, 789")
 
     Args:
-        api_key: User's Bugasura API key (required)
         scenario: Test case scenario/title (required)
                  Note: If "API" is mentioned in scenario, automatically sets is_api_test_case=True
         team_id: Team identifier (optional - will prompt if not provided)
@@ -220,7 +217,7 @@ async def create_test_case(
         OR a selection prompt if team_id/project_id not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -333,7 +330,6 @@ async def get_test_case(
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Get test case details.
@@ -342,7 +338,6 @@ async def get_test_case(
     will guide you through selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         testcase_id: Test case identifier (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -352,7 +347,7 @@ async def get_test_case(
         dict: Complete test case details with execution history if sprint_id provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -410,7 +405,6 @@ async def update_test_case(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (report_id) for sprint-level operations such as agent assignment (optional, ge=1)"),
     test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID (testRunsExecutionRunId). When provided with assign_to_agent=True, scopes the agent assignment to that specific test run execution."),
     assign_to_agent: bool = Field(default=False, description="When True (and sprint_id is provided), assigns this test case to an agent for automated execution within that sprint. Functional test cases go to the Browser Agent; API test cases go to the API Agent. The project must have the relevant agent enabled."),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Update a test case. Only updates the fields that are provided.
@@ -429,7 +423,6 @@ async def update_test_case(
     - Mix of any of the above (e.g., "John, jane@example.com, 789")
 
     Args:
-        api_key: User's Bugasura API key (required)
         testcase_id: Test case identifier to update (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -475,7 +468,7 @@ async def update_test_case(
         update_test_case(api_key, team_id, project_id, testcase_id, sprint_id=42, assign_to_agent=True)
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
@@ -750,7 +743,6 @@ async def delete_test_case(
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id). When provided, unlinks the test case from the sprint instead of deleting it from the project. Get from bugasura_list_sprints."),
     test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID. When provided together with sprint_id, removes the test case from that specific run only (not from the sprint). Get from bugasura_list_test_runs."),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete or unlink a test case at three scopes:
@@ -760,7 +752,7 @@ async def delete_test_case(
     - Run-level (sprint_id + test_run_execution_run_id): removes from that
       specific execution run's testRunTestCasesTable row only.
     """
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -875,14 +867,12 @@ async def list_test_case_comments(
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List comments for a specific test case along with test case details.
     Interactive flow: If team_id/project_id/test_case_id are not provided, this function
     will return available options for the user to select from.
     Args:
-        api_key: User's Bugasura API key (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
         test_case_id: Test case identifier (optional - will prompt if not provided)
@@ -892,7 +882,7 @@ async def list_test_case_comments(
         OR a selection prompt if team_id/project_id/test_case_id not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -992,14 +982,12 @@ async def add_test_case_comment(
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)"),
     parent_comment_id: Optional[int] = Field(default=None, description="Parent comment ID for threaded replies (optional)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Add a comment to a specific test case in Bugasura.
     Interactive flow: If team_id/project_id/test_case_id are not provided, this function
     will return available options for the user to select from.
     Args:
-        api_key: User's Bugasura API key (required)
         comment: Comment content (required) - supports HTML formatting
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -1011,7 +999,7 @@ async def add_test_case_comment(
         OR a selection prompt if team_id/project_id/test_case_id not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1140,14 +1128,12 @@ async def get_test_case_comment(
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)"),
     parent_comment_id: Optional[int] = Field(default=None, description="Parent comment ID for fetching threaded replies (optional)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Get detailed information for a specific test case comment.
     Interactive flow: If team_id/project_id/test_case_id are not provided, this function
     will return available options for the user to select from.
     Args:
-        api_key: User's Bugasura API key (required)
         comment_id: Comment identifier (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -1159,7 +1145,7 @@ async def get_test_case_comment(
         OR a selection prompt if required parameters not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -1304,14 +1290,12 @@ async def update_test_case_comment(
     comment_id: Optional[int] = Field(default=None, description="Comment identifier to update (optional - will prompt if not provided, ge=1)"),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)"),
     comment_attachments: Optional[str] = Field(default=None, description="Comma-separated list of attachment filenames to keep (optional)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Update a test case comment in Bugasura.
     Interactive flow: If team_id/project_id/test_case_id/comment_id are not provided,
     this function will return available options for the user to select from.
     Args:
-        api_key: User's Bugasura API key (required)
         comment: Updated comment content (required) - supports HTML formatting
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -1324,7 +1308,7 @@ async def update_test_case_comment(
         OR a selection prompt if required parameters not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1504,7 +1488,6 @@ async def delete_test_case_comment(
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
     comment_id: Optional[int] = Field(default=None, description="Comment identifier to delete (optional - will prompt if not provided, ge=1)"),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete a test case comment permanently from Bugasura.
@@ -1518,7 +1501,6 @@ async def delete_test_case_comment(
     - System sends notifications to assignees and admins
     - Slack notifications sent if configured for the project
     Args:
-        api_key: User's Bugasura API key (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
         test_case_id: Test case identifier (optional - will prompt if not provided)
@@ -1543,7 +1525,7 @@ async def delete_test_case_comment(
                                 report_id=555)
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation

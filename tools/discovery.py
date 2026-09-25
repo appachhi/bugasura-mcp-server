@@ -26,7 +26,7 @@ import requests  # for except blocks referencing requests.RequestException
     description = "Get complete user context including all teams and their projects. Returns comprehensive information for discovery and finding team_id/project_id values.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
-async def get_user_context(response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: \'json\' or \'markdown\'"), api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")) -> ToolResponse:
+async def get_user_context(response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: \'json\' or \'markdown\'")) -> ToolResponse:
     """
     Get complete user context including all teams and their projects.
 
@@ -37,7 +37,6 @@ async def get_user_context(response_format: Literal["json", "markdown"] = Field(
     - Understanding the user's organizational structure
 
     Args:
-        api_key: User's Bugasura API key
 
     Returns:
         dict: {
@@ -71,7 +70,7 @@ async def get_user_context(response_format: Literal["json", "markdown"] = Field(
         Now you have the IDs to use in list_issues()
     """
     # Resolve API key from parameter or environment
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     return _respond(await _fetch_user_context(api_key), response_format)
 
 
@@ -83,7 +82,6 @@ async def get_user_context(response_format: Literal["json", "markdown"] = Field(
 async def find_project_by_name(
     project_name: str = Field(description="Project name to search for (case-insensitive, partial match supported, min_length=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Find projects by name across ALL teams the user belongs to.
@@ -98,7 +96,6 @@ async def find_project_by_name(
     Useful when you know the project name but not the team_id or project_id.
 
     Args:
-        api_key: User's Bugasura API key
         project_name: Project name to search for (case-insensitive, partial match)
 
     Returns:
@@ -134,7 +131,7 @@ async def find_project_by_name(
         }, response_format)
 
     # Resolve API key from parameter or environment
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
 
     # Get user context using internal helper
     context = await _fetch_user_context(api_key)
@@ -169,7 +166,6 @@ async def find_project_by_name(
 async def find_team_by_name(
     team_name: str = Field(description="Team name to search for (case-insensitive, partial match supported, min_length=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Find teams by name that the user belongs to.
@@ -179,7 +175,6 @@ async def find_team_by_name(
     not the team_id.
 
     Args:
-        api_key: User's Bugasura API key
         team_name: Team name to search for (case-insensitive, partial match)
 
     Returns:
@@ -214,7 +209,7 @@ async def find_team_by_name(
         }, response_format)
 
     # Resolve API key from parameter or environment
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
 
     # Get user context using internal helper
     context = await _fetch_user_context(api_key)

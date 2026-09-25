@@ -30,7 +30,6 @@ async def list_sprints(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List all sprints for a project.
@@ -39,7 +38,6 @@ async def list_sprints(
     will guide you through selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
 
@@ -47,7 +45,7 @@ async def list_sprints(
         dict: List of sprints or selection prompt if context not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -77,7 +75,6 @@ async def get_sprint_details(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Get sprint details and statistics.
@@ -86,7 +83,6 @@ async def get_sprint_details(
     will guide you through selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         sprint_id: Sprint identifier (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -95,7 +91,7 @@ async def get_sprint_details(
         dict: Sprint details or selection prompt if context not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -128,7 +124,6 @@ async def create_sprint(
     end_date: Optional[str] = Field(default=None, description="Sprint end date in YYYY-MM-DD format (optional)"),
     duration: Optional[int] = Field(default=None, description="Sprint duration in days (optional)"),
     sprint_status: Literal["SCHEDULED", "IN PROGRESS", "CANCELLED", "COMPLETED"] = Field(default="IN PROGRESS", description="Sprint status: 'SCHEDULED', 'IN PROGRESS', 'CANCELLED', 'COMPLETED' (default: IN PROGRESS)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create a new sprint for a project.
@@ -137,7 +132,6 @@ async def create_sprint(
     will guide you through selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         sprint_name: Name of the sprint (5-250 characters required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -184,7 +178,7 @@ async def create_sprint(
                      duration=14, sprint_status="IN PROGRESS")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -257,7 +251,6 @@ async def update_sprint(
     end_date: Optional[str] = Field(default=None, description="New end date in YYYY-MM-DD format (optional)"),
     duration: Optional[int] = Field(default=None, description="New duration in days (optional)"),
     sprint_status: Optional[Literal["SCHEDULED", "IN PROGRESS", "CANCELLED", "COMPLETED"]] = Field(default=None, description="New status: 'SCHEDULED', 'IN PROGRESS', 'CANCELLED', 'COMPLETED' (optional)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Update an existing sprint.
@@ -266,7 +259,6 @@ async def update_sprint(
     will guide you through selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         sprint_id: Sprint identifier to update (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -303,7 +295,7 @@ async def update_sprint(
                      sprint_status="IN PROGRESS")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -408,7 +400,6 @@ async def delete_sprint(
     sprint_identifier: str = Field(description="Sprint identifier: numeric ID (e.g., '123') or exact sprint name (e.g., 'Sprint 15')"),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete a sprint from a project by ID or name.
@@ -420,7 +411,6 @@ async def delete_sprint(
     will be permanently removed.
 
     Args:
-        api_key: User's Bugasura API key (required)
         sprint_identifier: Sprint ID (numeric) or sprint name (string) to delete (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -442,7 +432,7 @@ async def delete_sprint(
         delete_sprint(api_key, sprint_identifier="Sprint 15")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation

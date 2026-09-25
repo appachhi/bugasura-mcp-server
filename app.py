@@ -1,16 +1,29 @@
-"""FastMCP instance + ASGI applications for both transports."""
+"""FastMCP instance + ASGI application for the streamable-HTTP transport."""
+from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
 
 from fastmcp import FastMCP
+from mcp.types import Icon
 
-from config import API_BASE, MCP_SERVER_NAME, logger
+from config import API_BASE, MCP_SERVER_ICON_URL, MCP_SERVER_NAME, logger
+from oauth import build_auth_provider
 
 
-mcp = FastMCP(MCP_SERVER_NAME)
+# OAuth front door when configured (HTTP deployments); None for STDIO / local dev.
+# mcp.run(transport="stdio") ignores auth, so one process serves both transports.
+auth = build_auth_provider()
+
+# name, icon and website brand FastMCP's consent interstitial (the page shown before Bugasura's own login).
+mcp = FastMCP(
+    MCP_SERVER_NAME,
+    auth=auth,
+    website_url="https://bugasura.io",
+    icons=[Icon(src=MCP_SERVER_ICON_URL, mimeType="image/png", sizes=["300x300"])],
+)
 
 
-def health_check(request):
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request):
     """
     Health check endpoint for monitoring server status.
 
@@ -18,19 +31,24 @@ def health_check(request):
     - status: "ok" if server is running
     - service: Service name
     - version: Current version
+    - server_name: Configured MCP server name (tells instances apart)
     - api_base: Configured Bugasura API URL
+    - auth: "oauth" when the sign-in flow is enabled, "none" otherwise
 
-    Used by load balancers, monitoring tools, and manual testing.
+    Used by load balancers, monitoring tools, and manual testing. Not authenticated.
     """
     return JSONResponse({
         "status": "ok",
         "service": "Bugasura MCP Server",
-        "version": "2.0.0",
-        "api_base": API_BASE
+        "version": "3.0.0",
+        "server_name": MCP_SERVER_NAME,
+        "api_base": API_BASE,
+        "auth": "oauth" if auth else "none",
     })
 
 
-def sse_migration(request):
+@mcp.custom_route("/sse", methods=["GET", "POST"])
+async def sse_migration(request: Request):
     """
     Tell legacy SSE clients that the transport has moved to streamable HTTP at /mcp.
 
@@ -55,10 +73,8 @@ def sse_migration(request):
     )
 
 
-# ASGI application for streamable HTTP transport (per mcp_best_practices.md).
-# /sse returns a 410 Gone with migration guidance for legacy 1.x clients.
-mcp._additional_http_routes = [
-    Route("/health", health_check),
-    Route("/sse", sse_migration),
-]
+# ASGI application. With auth set, FastMCP also mounts the OAuth routes at the root:
+# /.well-known/oauth-authorization-server, /.well-known/oauth-protected-resource/mcp,
+# /authorize, /token, /register, /revoke, /auth/callback and /consent. Only /mcp itself
+# requires a bearer token; /health and /sse stay public.
 app = mcp.http_app(path="/mcp", transport="streamable-http")

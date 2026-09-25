@@ -48,7 +48,6 @@ async def list_requirements(
     start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)"),
     max_results: int = Field(default=10, description="Number of results to return (default: 10, ge=1, le=100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment."),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
     """
@@ -65,7 +64,6 @@ async def list_requirements(
     - Modal-specific logic (project_requirement_list_modal)
 
     Args:
-        api_key: User's Bugasura API key (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
         sprint_id: Sprint identifier for filtering requirements
@@ -93,7 +91,7 @@ async def list_requirements(
         OR a selection prompt if team_id/project_id not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get("valid"):
         return _respond(validation, response_format)
@@ -168,7 +166,6 @@ async def list_requirement_folders(
     parent_folder_id: Optional[int] = Field(default=None, description="Filter by parent folder ID (optional - omit to get all folders)"),
     include_hierarchy: bool = Field(default=True, description="Include full folder hierarchy (default: True)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     List all requirement folders for a project.
@@ -183,7 +180,6 @@ async def list_requirement_folders(
     will guide you through selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
         parent_folder_id: Filter by parent folder (optional)
@@ -223,7 +219,7 @@ async def list_requirement_folders(
         list_requirement_folders(api_key)
     """
     # Validate API key
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -328,7 +324,6 @@ async def create_requirement(
     parent_id: Optional[int] = Field(default=None, description="Parent requirement ID for hierarchical structure"),
     tags: str = Field(default="", description="Comma-separated tags for categorization"),
     isQuickAdd: int = Field(default=0, description="Quick add flag (0 or 1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create a new requirement in Bugasura with automatic folder management.
@@ -375,7 +370,6 @@ async def create_requirement(
     Examples:
         # Simple - Auto-manages folders
         create_requirement(
-            api_key="your_api_key",
             title="User Authentication Feature",
             team_id=123,
             project_id=456
@@ -383,7 +377,6 @@ async def create_requirement(
 
         # With custom folder name
         create_requirement(
-            api_key="your_api_key",
             title="Payment Integration",
             folder_name="Payment Features",
             details="Integrate Stripe payment gateway",
@@ -393,7 +386,6 @@ async def create_requirement(
 
         # With explicit folder
         create_requirement(
-            api_key="your_api_key",
             title="Dashboard Update",
             folder_id=789,
             assignees="john@example.com, jane@example.com"
@@ -401,7 +393,6 @@ async def create_requirement(
 
         # From Figma designs
         create_requirement(
-            api_key="your_api_key",
             title="New UI Component",
             source="FIGMA",
             details="Design from Figma prototype",
@@ -421,7 +412,7 @@ async def create_requirement(
     logger.info(f"create_requirement: Starting for title='{title}'")
 
     # Validate API key
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         logger.error(f"create_requirement: API key validation failed")
@@ -689,7 +680,6 @@ async def get_requirement_details(
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Get specific requirement details.
@@ -698,7 +688,6 @@ async def get_requirement_details(
     will guide you through selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         requirement_id: Requirement identifier (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -711,7 +700,7 @@ async def get_requirement_details(
               - standardPriorityList: Priority settings for the project
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return _respond(validation, response_format)
@@ -773,7 +762,6 @@ async def update_requirement(
     overview: Optional[str] = Field(default=None, description="Updated brief overview"),
     status: Optional[str] = Field(default=None, description="Updated requirement status (e.g., NEW, IN_PROGRESS, COMPLETED)"),
     parent_id: Optional[int] = Field(default=None, description="Updated parent requirement ID"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Update a requirement. Only updates the fields that are provided.
@@ -789,7 +777,6 @@ async def update_requirement(
     - Mix of any of the above (e.g., "John, jane@example.com, 789")
 
     Args:
-        api_key: User's Bugasura API key (required)
         requirement_id: Requirement identifier to update (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -811,7 +798,7 @@ async def update_requirement(
 
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if isinstance(validation, list):
         return {'status': 'failed', 'error': 'Unexpected API response format', 'details': str(validation)}
@@ -1049,7 +1036,6 @@ async def create_requirement_folder(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
     parent_folder_id: int = Field(default=0, description="Parent folder ID for nested folders (0 for root level)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Create a new folder for organizing requirements.
@@ -1058,7 +1044,6 @@ async def create_requirement_folder(
     will guide you through selection.
 
     Args:
-        api_key: User's Bugasura API key (required)
         folder_name: Name for the new folder (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -1085,7 +1070,7 @@ async def create_requirement_folder(
         create_requirement_folder(api_key, folder_name="Product Features")
     """
     # Validate API key
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1163,7 +1148,7 @@ async def create_requirement_folder(
     logger.info(f"create_requirement_folder: Creating folder '{folder_name}' for project_id={project_id}, parent_folder_id={parent_folder_id_str or 'root'}, is_root_folder={is_root_folder}")
 
     # Build payload for folder creation
-    # NOTE: API validation expects empty string for root folders (line 344 in TestRepo.php)
+    # NOTE: API validation expects empty string for root folders
     payload = {
         'appId': str(project_id),
         'teamId': str(team_id),
@@ -1206,7 +1191,6 @@ async def delete_requirement(
     sprint_id: Optional[int] = Field(default=None, description="Sprint ID (optional - if provided, deletes from sprint; otherwise deletes from project, ge=1)"),
     folder_id: Optional[int] = Field(default=None, description="Folder ID (optional, ge=1)"),
     selected_requirement_ids: Optional[str] = Field(default=None, description="Comma-separated list of requirement IDs for bulk deletion (optional)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Delete requirement(s) from Bugasura by ID, requirement key, or title name.
@@ -1223,7 +1207,6 @@ async def delete_requirement(
     - Bulk deletion: Use selected_requirement_ids for multiple deletions
 
     Args:
-        api_key: User's Bugasura API key (required)
         requirement_identifier: Requirement ID (numeric), requirement key (e.g., "REQ5", "MCP11"), or title (string) to delete (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -1257,7 +1240,7 @@ async def delete_requirement(
         delete_requirement(api_key, requirement_identifier="REQ5")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1439,7 +1422,6 @@ async def link_unlink_requirement_testcases(
     is_delete: bool = Field(default=False, description="Set to True to unlink test cases, False to link (default)"),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)"),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier (optional, ge=1)"),
-    api_key: str = Field(default="", description="User's Bugasura API key. If not provided, uses BUGASURA_API_KEY from environment.")
 ) -> ToolResponse:
     """
     Link or unlink test cases to/from a requirement for traceability.
@@ -1458,7 +1440,6 @@ async def link_unlink_requirement_testcases(
     - Does not delete the test case itself
 
     Args:
-        api_key: User's Bugasura API key (required)
         requirement_id: Requirement identifier (required)
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
@@ -1507,7 +1488,7 @@ async def link_unlink_requirement_testcases(
         )
     """
     # Validate API key before proceeding
-    api_key = _get_api_key(api_key)
+    api_key = _get_api_key()
     validation = await validate_api_key(api_key)
     if isinstance(validation, list):
         return {'status': 'failed', 'error': 'Unexpected API response format', 'details': str(validation)}
