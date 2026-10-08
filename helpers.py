@@ -1,22 +1,23 @@
 """Internal resolvers, file-upload utilities, and context helpers used by tools."""
+import ipaddress
+import json
 import os
 import re
 import shutil
+import socket
 import tempfile
 import urllib.parse
 import urllib.request
-from typing import Any, Optional
-from urllib.parse import urlparse
+from typing import Optional
 
-import requests  # needed for except clauses referencing requests.RequestException
 
-from auth import _get_api_key, _fetch_user_context, validate_api_key
-from client import logger, make_api_request
+from auth import fetch_user_context
+from client import in_http_request, logger, make_api_request
 
 
 # WEB_BASE_URL / CDN_BASE_URL now live in config.py; re-exported here because
 # tools import them from helpers.
-from config import CDN_BASE_URL, WEB_BASE_URL  # noqa: F401,E402
+from config import CDN_BASE_URL, SECRET_RESPONSE_KEYS, WEB_BASE_URL  # noqa: F401,E402
 
 
 def filter_large_fields(data: dict) -> dict:
@@ -55,6 +56,22 @@ def filter_large_fields(data: dict) -> dict:
     return filtered
 
 
+def redact_secrets(data):
+    """Return a copy of data with every credential-named key masked, at any depth (JSON-object strings included)."""
+    if isinstance(data, str) and data.lstrip().startswith('{'):
+        try:
+            return json.dumps(redact_secrets(json.loads(data)))
+        except ValueError:
+            return data
+    if isinstance(data, dict):
+        return {k: ('[REDACTED]' if str(k).lower() in SECRET_RESPONSE_KEYS and v not in (None, '')
+                    else redact_secrets(v))
+                for k, v in data.items()}
+    if isinstance(data, list):
+        return [redact_secrets(item) for item in data]
+    return data
+
+
 async def select_team_project_context(api_key: str, team_id: Optional[int], project_id: Optional[int], operation_name: str, operation_params: str = "") -> dict:
     """
     Helper function to handle interactive team and project selection.
@@ -75,7 +92,7 @@ async def select_team_project_context(api_key: str, team_id: Optional[int], proj
     """
     # Step 1: If team_id not provided, fetch and return team options
     if team_id is None:
-        context = await _fetch_user_context(api_key)
+        context = await fetch_user_context(api_key)
 
         # Handle unexpected list response
         if isinstance(context, list):
@@ -111,7 +128,7 @@ async def select_team_project_context(api_key: str, team_id: Optional[int], proj
 
     # Step 2: If project_id not provided, fetch and return project options
     if project_id is None:
-        context = await _fetch_user_context(api_key)
+        context = await fetch_user_context(api_key)
 
         # Handle unexpected list response
         if isinstance(context, list):
@@ -165,7 +182,49 @@ async def select_team_project_context(api_key: str, team_id: Optional[int], proj
     }
 
 
-async def _resolve_team_identifier(api_key: str, team_id: Optional[int], team_name: Optional[str]) -> dict:
+async def search_team_by_name(api_key: str, team_name: str) -> dict:
+    """Search the user's teams by name without depending on an MCP tool."""
+    context = await fetch_user_context(api_key)
+    if not isinstance(context, dict):
+        return {
+            'status': 'failed',
+            'message': 'Unexpected API response format while searching for teams'
+        }
+    if context.get('status') != 'OK':
+        return context
+
+    search_name = team_name.strip().lower()
+    matches = [
+        team for team in context.get('teams', [])
+        if search_name in str(team.get('team_name', '')).lower()
+    ]
+    return {
+        'status': 'OK',
+        'matches': matches,
+        'count': len(matches)
+    }
+
+
+async def search_projects_by_name(api_key: str, project_name: str) -> dict:
+    """Search projects by name (case-insensitive, partial) across all the user's teams."""
+    context = await fetch_user_context(api_key)
+    if context.get('status') != 'OK':
+        return context
+
+    search_term = project_name.strip().lower()
+    matches = [{
+        'team_id': team.get('team_id'),
+        'team_name': team.get('team_name'),
+        'project_id': project.get('project_id'),
+        'project_name': project.get('project_name'),
+        'platform': project.get('platform', ''),
+        'platform_type': project.get('platform_type', '')
+    } for team in context.get('teams', []) for project in team.get('projects', [])
+        if search_term in str(project.get('project_name', '')).lower()]
+    return {'status': 'OK', 'matches': matches, 'count': len(matches)}
+
+
+async def resolve_team_identifier(api_key: str, team_id: Optional[int], team_name: Optional[str]) -> dict:
     """
     Internal helper to resolve team_id from either team_id or team_name.
     This is NOT an MCP tool - it's a helper function that can be called from Python code.
@@ -190,7 +249,7 @@ async def _resolve_team_identifier(api_key: str, team_id: Optional[int], team_na
     """
     # Both provided - use team_id
     if team_id is not None and team_name is not None:
-        logger.info(f"_resolve_team_identifier: Both team_id={team_id} and team_name='{team_name}' provided, using team_id")
+        logger.info(f"resolve_team_identifier: Both team_id={team_id} and team_name='{team_name}' provided, using team_id")
         return {
             'status': 'OK',
             'team_id': team_id,
@@ -199,7 +258,7 @@ async def _resolve_team_identifier(api_key: str, team_id: Optional[int], team_na
 
     # team_id provided - use it directly
     if team_id is not None:
-        logger.info(f"_resolve_team_identifier: Using provided team_id={team_id}")
+        logger.info(f"resolve_team_identifier: Using provided team_id={team_id}")
         return {
             'status': 'OK',
             'team_id': team_id,
@@ -208,13 +267,13 @@ async def _resolve_team_identifier(api_key: str, team_id: Optional[int], team_na
 
     # team_name provided - resolve to team_id
     if team_name is not None and team_name.strip():
-        logger.info(f"_resolve_team_identifier: Resolving team_name='{team_name}' to team_id")
+        logger.info(f"resolve_team_identifier: Resolving team_name='{team_name}' to team_id")
 
-        # Use find_team_by_name to search
-        search_result = await find_team_by_name(api_key=api_key, team_name=team_name)
+        # Use search_team_by_name to search
+        search_result = await search_team_by_name(api_key=api_key, team_name=team_name)
 
         if search_result.get('status') != 'OK':
-            logger.error(f"_resolve_team_identifier: Failed to search for team: {search_result.get('message')}")
+            logger.error(f"resolve_team_identifier: Failed to search for team: {search_result.get('message')}")
             return {
                 'status': 'failed',
                 'error': 'Team search failed',
@@ -226,7 +285,7 @@ async def _resolve_team_identifier(api_key: str, team_id: Optional[int], team_na
         match_count = search_result.get('count', 0)
 
         if match_count == 0:
-            logger.error(f"_resolve_team_identifier: No teams found matching '{team_name}'")
+            logger.error(f"resolve_team_identifier: No teams found matching '{team_name}'")
             return {
                 'status': 'failed',
                 'error': 'Team not found',
@@ -235,7 +294,7 @@ async def _resolve_team_identifier(api_key: str, team_id: Optional[int], team_na
             }
 
         if match_count > 1:
-            logger.warning(f"_resolve_team_identifier: Multiple teams ({match_count}) found matching '{team_name}'")
+            logger.warning(f"resolve_team_identifier: Multiple teams ({match_count}) found matching '{team_name}'")
             team_list = [f"{m['team_name']} (ID: {m['team_id']})" for m in matches]
             return {
                 'status': 'failed',
@@ -250,7 +309,7 @@ async def _resolve_team_identifier(api_key: str, team_id: Optional[int], team_na
         resolved_team = matches[0]
         resolved_team_id = resolved_team['team_id']
         resolved_team_name = resolved_team['team_name']
-        logger.info(f"_resolve_team_identifier: Resolved '{team_name}' to team_id={resolved_team_id} ('{resolved_team_name}')")
+        logger.info(f"resolve_team_identifier: Resolved '{team_name}' to team_id={resolved_team_id} ('{resolved_team_name}')")
 
         return {
             'status': 'OK',
@@ -259,7 +318,7 @@ async def _resolve_team_identifier(api_key: str, team_id: Optional[int], team_na
         }
 
     # Neither provided
-    logger.error("_resolve_team_identifier: Neither team_id nor team_name provided")
+    logger.error("resolve_team_identifier: Neither team_id nor team_name provided")
     return {
         'status': 'failed',
         'error': 'Missing team identifier',
@@ -268,7 +327,7 @@ async def _resolve_team_identifier(api_key: str, team_id: Optional[int], team_na
     }
 
 
-async def _fetch_team_members(api_key: str, team_id: int) -> dict:
+async def fetch_team_members(api_key: str, team_id: int) -> dict:
     """
     Internal helper to fetch team members.
     This is NOT an MCP tool - it's a helper function that can be called from Python code.
@@ -280,24 +339,24 @@ async def _fetch_team_members(api_key: str, team_id: int) -> dict:
     Returns:
         dict: API response with team members
     """
-    logger.info(f"_fetch_team_members: Fetching members for team_id={team_id}")
+    logger.info(f"fetch_team_members: Fetching members for team_id={team_id}")
 
     # Call API to get team members directly (no validation to avoid recursive calls)
-    logger.info(f"_fetch_team_members: Calling /v1/teamUsers/get for team_id={team_id}")
+    logger.info(f"fetch_team_members: Calling /v1/teamUsers/get for team_id={team_id}")
     response = await make_api_request('GET', '/v1/teamUsers/get', api_key, params={
         'team_id': str(team_id)
     })
 
     if isinstance(response, dict) and response.get('status') == 'OK':
         member_count = len(response.get('team_users_details', []))
-        logger.info(f"_fetch_team_members: Successfully fetched {member_count} team members")
+        logger.info(f"fetch_team_members: Successfully fetched {member_count} team members")
     else:
-        logger.error(f"_fetch_team_members: Failed to fetch team members. Response: {response}")
+        logger.error(f"fetch_team_members: Failed to fetch team members. Response: {response}")
 
     return response
 
 
-async def _find_user_ids_by_names_or_emails(api_key: str, team_id: int, identifiers: str) -> dict:
+async def find_user_ids_by_names_or_emails(api_key: str, team_id: int, identifiers: str) -> dict:
     """
     Internal helper to convert user names/emails to user IDs.
 
@@ -311,7 +370,7 @@ async def _find_user_ids_by_names_or_emails(api_key: str, team_id: int, identifi
     """
     # Get team members using internal helper (not the MCP tool)
     logger.info(f"_find_user_ids: Getting team members for team_id={team_id}")
-    members_response = await _fetch_team_members(api_key, team_id)
+    members_response = await fetch_team_members(api_key, team_id)
 
     if isinstance(members_response, list):
         logger.error(f"_find_user_ids: list_team_members returned a list instead of dict")
@@ -397,7 +456,8 @@ async def _find_user_ids_by_names_or_emails(api_key: str, team_id: int, identifi
     return {'status': 'OK', 'user_ids': ','.join(resolved_ids)}
 
 
-async def _resolve_issue_identifier_to_id(api_key: str, team_id: int, project_id: int, issue_id: str, function_name: str = "") -> dict:
+async def resolve_issue_identifier_to_id(api_key: str, team_id: int, project_id: int, issue_id: str, function_name: str = "",
+                                         sprint_id: Optional[int] = None) -> dict:
     """
     Internal helper to resolve issue identifier (key or summary) to numeric issue ID.
 
@@ -412,6 +472,7 @@ async def _resolve_issue_identifier_to_id(api_key: str, team_id: int, project_id
         project_id: Project ID
         issue_id: Issue numeric ID or identifier
         function_name: Name of calling function (for logging)
+        sprint_id: Only search issues in this sprint (optional)
 
     Returns:
         dict with 'status' and either 'issue_id' (int) or 'error'
@@ -444,12 +505,15 @@ async def _resolve_issue_identifier_to_id(api_key: str, team_id: int, project_id
 
     for page in range(MAX_PAGES):
         offset = page * PAGE_SIZE
-        issues_response = await make_api_request('GET', '/v1/issues/list', api_key, params={
+        params = {
             'team_id': str(team_id),
             'project_id': str(project_id),
             'start_at': offset,
             'max_results': PAGE_SIZE,
-        })
+        }
+        if sprint_id:
+            params['sprint_id'] = str(sprint_id)
+        issues_response = await make_api_request('GET', '/v1/issues/list', api_key, params=params)
 
         if issues_response.get('status') != 'OK':
             logger.error(f"{log_prefix}Failed to fetch issues: {issues_response.get('message')}")
@@ -554,11 +618,48 @@ def _require_fetchable_url(url: str) -> None:
             f"(Google Drive, Dropbox, or any public download URL). Local paths belong "
             f"in file_paths, not source_url."
         )
-    if not parsed.netloc:
+    if not parsed.netloc or not parsed.hostname:
         raise ValueError(f"'{url}' has no host — it is not a fetchable link.")
+    # Over HTTP the server sits inside our network; never let a caller reach it (SSRF).
+    if in_http_request():
+        _reject_internal_host(parsed.hostname, parsed.port or (443 if scheme == 'https' else 80))
 
 
-def _normalise_share_url(url: str) -> str:
+def _reject_internal_host(host: str, port: int) -> None:
+    """Raise ValueError when `host` resolves to a loopback, private, link-local or reserved address."""
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        raise ValueError(f"Could not resolve the host '{host}'. Check the link and try again.")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split('%', 1)[0])
+        if getattr(ip, 'ipv4_mapped', None):
+            ip = ip.ipv4_mapped
+        if not ip.is_global or ip.is_multicast:
+            raise ValueError(
+                f"'{host}' points to a private or internal address, which this server will not "
+                f"fetch. Ask the user for a public https link (Google Drive, Dropbox, or any "
+                f"public download URL)."
+            )
+
+
+class _CheckedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Apply the same URL checks to every redirect hop."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _require_fetchable_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+# Only http(s) handlers plus the checked redirect handler; no file://, ftp:// or data:.
+_URL_OPENER = urllib.request.OpenerDirector()
+for _handler in (urllib.request.ProxyHandler(), urllib.request.HTTPHandler(),
+                 urllib.request.HTTPSHandler(), _CheckedRedirectHandler(),
+                 urllib.request.HTTPErrorProcessor(), urllib.request.HTTPDefaultErrorHandler()):
+    _URL_OPENER.add_handler(_handler)
+
+
+def normalise_share_url(url: str) -> str:
     """Convert well-known sharing URLs to direct download URLs.
 
     Handles Google Drive share links and Dropbox share links.
@@ -588,7 +689,7 @@ def _normalise_share_url(url: str) -> str:
     return url
 
 
-def _infer_filename_from_url_path(url: str) -> Optional[str]:
+def infer_filename_from_url_path(url: str) -> Optional[str]:
     """Extract a filename from the URL path if it looks like a real file.
 
     Works for Dropbox-style URLs where the filename is in the path.
@@ -607,7 +708,7 @@ def _infer_filename_from_url_path(url: str) -> Optional[str]:
     return None
 
 
-def _download_url_tmp(url: str, suffix: str, timeout: int = 30,
+def download_url_tmp(url: str, suffix: str, timeout: int = 30,
                       max_bytes: Optional[int] = None) -> tuple:
     """Download a URL to a delete=False temp file; return (path, inferred_filename_or_None).
 
@@ -628,7 +729,7 @@ def _download_url_tmp(url: str, suffix: str, timeout: int = 30,
     tmp = tempfile.NamedTemporaryFile(mode='wb', suffix=suffix, delete=False)
     inferred_name: Optional[str] = None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _URL_OPENER.open(req, timeout=timeout) as resp:
             cd = resp.headers.get('Content-Disposition', '')
             if cd:
                 m = re.search(r'filename[^;=\n]*=[\s"\']*([^;"\']+)[\s"\']*', cd, re.IGNORECASE)
@@ -661,7 +762,7 @@ def _download_url_tmp(url: str, suffix: str, timeout: int = 30,
     return tmp.name, inferred_name
 
 
-def _fetch_url_bytes(url: str, max_bytes: int, timeout: int = 30) -> tuple:
+def fetch_url_bytes(url: str, max_bytes: int, timeout: int = 30) -> tuple:
     """Read a URL into memory; return (content, exceeded_limit).
 
     Stops reading once max_bytes has been passed and reports it through the
@@ -674,7 +775,7 @@ def _fetch_url_bytes(url: str, max_bytes: int, timeout: int = 30) -> tuple:
     """
     _require_fetchable_url(url)
     req = urllib.request.Request(url, headers={'User-Agent': 'BugasuraMCP/1.0'})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _URL_OPENER.open(req, timeout=timeout) as resp:
         # One byte past the cap is enough to tell "at the limit" from "over it".
         content = resp.read(max_bytes + 1)
     if len(content) > max_bytes:
@@ -682,23 +783,23 @@ def _fetch_url_bytes(url: str, max_bytes: int, timeout: int = 30) -> tuple:
     return content, False
 
 
-def _download_url_to_path(url: str, dest_path: str, timeout: int = 60,
+def download_url_to_path(url: str, dest_path: str, timeout: int = 60,
                           max_bytes: Optional[int] = None) -> int:
     """Download a URL onto the local filesystem at dest_path; return the byte size.
 
-    Streams through _download_url_tmp() so the transfer never buffers the whole
+    Streams through download_url_tmp() so the transfer never buffers the whole
     file in memory, then moves the temp file into place — shutil.move rather than
     os.replace, since the temp directory is often on a different filesystem. The
     destination is only written once the download has fully succeeded, and the temp
     file is removed if the move itself fails.
 
     The http(s)-only guard and the optional `max_bytes` cap are inherited from
-    _download_url_tmp, so nothing lands on disk from a rejected or oversized URL.
+    download_url_tmp, so nothing lands on disk from a rejected or oversized URL.
     Raises: ValueError on a rejected URL or an oversized response;
             urllib.error.URLError / urllib.error.HTTPError / OSError on failure.
     """
     suffix = os.path.splitext(dest_path)[1] or '.tmp'
-    tmp_path, _ = _download_url_tmp(url, suffix, timeout, max_bytes)
+    tmp_path, _ = download_url_tmp(url, suffix, timeout, max_bytes)
     try:
         shutil.move(tmp_path, dest_path)
     except Exception:
@@ -708,3 +809,21 @@ def _download_url_to_path(url: str, dest_path: str, timeout: int = 60,
             pass
         raise
     return os.path.getsize(dest_path)
+
+
+def local_path_rejected(param: str) -> Optional[dict]:
+    """A `failed` payload when `param` (a server-side file path) is used over HTTP, else None.
+
+    Over streamable HTTP the "local" filesystem is the shared server's, not the user's, so
+    file paths would let any signed-in caller read or write files on that box.
+    """
+    if not in_http_request():
+        return None
+    return {
+        'status': 'failed',
+        'error': f'{param} is not available on this hosted Bugasura MCP server.',
+        'error_type': 'ValidationError',
+        'message': (f"{param} refers to the server's own filesystem, which a hosted server does not "
+                    "expose. Ask the user for a shareable https link (Google Drive, Dropbox, or any "
+                    "public download URL) and pass it as source_url instead."),
+    }

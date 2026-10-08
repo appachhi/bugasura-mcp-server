@@ -1,32 +1,29 @@
 """Bugasura MCP tools: teams."""
-from typing import Any, List, Literal, Optional
+from typing import Literal, Optional
 
-from fastmcp import Context
 from pydantic import Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import _fetch_user_context, _get_api_key, _invalidate_user_context_cache, validate_api_key
+from auth import get_api_key, invalidate_user_context_cache, validate_api_key
 from client import (
-    _auth_required_payload, _display_team_name, _paginate_upstream, _paginated, _prepare_post_params,
-    _render_markdown, _respond, _validate_id, logger, make_api_request,
+    auth_required_payload, display_team_name, paginate_upstream, paginated, respond,
+    validate_id, logger, make_api_request,
 )
-from helpers import (
-    _fetch_team_members, _find_user_ids_by_names_or_emails,
-    _resolve_issue_identifier_to_id, _resolve_team_identifier,
-    filter_large_fields, select_team_project_context,
-)
-
-import json
-import requests  # for except blocks referencing requests.RequestException
+from helpers import fetch_team_members, find_user_ids_by_names_or_emails, resolve_team_identifier
 
 
 @mcp.tool(
     name = "bugasura_list_teams",
+    title = "List Teams",
     description = "List all teams the user belongs to. Returns minimal team info for selection.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
-async def list_teams(response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: \'json\' or \'markdown\'")) -> ToolResponse:
+async def list_teams(
+    start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=50, ge=1, le=200, description="Number of teams to return (default: 50, max 200)"),
+    response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: \'json\' or \'markdown\'"),
+) -> ToolResponse:
     """
     List all teams the user belongs to.
 
@@ -34,11 +31,14 @@ async def list_teams(response_format: Literal["json", "markdown"] = Field(defaul
     most other operations. Returns minimal team information to reduce payload size.
 
     Args:
+        start_at: Pagination offset
+        max_results: Number of teams to return
 
     Returns:
         dict: {
             'status': 'OK',
-            'teams': [
+            'total': int, 'has_more': bool, 'next_offset': int | None,
+            'items': [
                 {
                     'team_id': int,
                     'name': str,
@@ -52,10 +52,10 @@ async def list_teams(response_format: Literal["json", "markdown"] = Field(defaul
         }
     """
     # Resolve API key from parameter or environment
-    api_key = _get_api_key()
+    api_key = get_api_key()
 
     if not api_key:
-        return _respond(_auth_required_payload(), response_format)
+        return respond(auth_required_payload(), response_format)
 
     # Call Bugasura API to fetch user's teams
     full_response = await make_api_request('GET', '/v1/teams/get', api_key, params={
@@ -68,7 +68,7 @@ async def list_teams(response_format: Literal["json", "markdown"] = Field(defaul
 
     # Handle case where API might return a list instead of dict
     if isinstance(full_response, list):
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': 'Unexpected API response format (received list instead of dict)',
             'error_type': 'ResponseFormatError',
@@ -85,28 +85,30 @@ async def list_teams(response_format: Literal["json", "markdown"] = Field(defaul
         # Only include essential fields needed for subsequent operations
         minimal_teams = [{
             'team_id': t.get('team_id'),           # Required for all team-scoped operations
-            'name': _display_team_name(t),         # Display name
+            'name': display_team_name(t),         # Display name
             'is_admin': t.get('is_admin'),         # User's role in team
             'owner_id': t.get('owner_id'),         # Team owner for permission checks
             'project_count': t.get('apps_count', 0), # Number of projects in team
             'is_expired': t.get('is_expired')      # 1 = subscription lapsed, team is unusable
         } for t in teams_data]
 
-        # Return simplified response wrapped in the standard pagination envelope.
-        # list_teams does not paginate — total = count, has_more = False.
-        return _respond(_paginated(minimal_teams, total=len(minimal_teams), offset=0, teams=minimal_teams), response_format)
+        # /v1/teams/get returns every team, so page here.
+        page = minimal_teams[start_at:start_at + max_results]
+        return respond(paginated(page, total=len(minimal_teams), offset=start_at, max_results=max_results),
+                       response_format)
 
     # Return raw response if API call failed (includes error details)
-    return _respond(full_response, response_format)
+    return respond(full_response, response_format)
 
 
 @mcp.tool(
     name="bugasura_get_team",
+    title="Get Team",
     description="Get detailed information about a specific team including settings, custom fields, and subscription details. Supports team_id or team_name.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_team(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)", ge=1),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (provide either team_id or team_name)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -158,13 +160,13 @@ async def get_team(
     """
     # Validate API key before proceeding
     logger.info(f"get_team: Starting for team_id={team_id}, team_name={team_name}")
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
         logger.error("get_team: API validation returned unexpected list format")
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': 'Unexpected API response format',
             'details': str(validation)
@@ -172,13 +174,13 @@ async def get_team(
 
     if not validation.get('valid'):
         logger.error(f"get_team: API key validation failed: {validation.get('error')}")
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Resolve team identifier (team_id or team_name)
-    team_resolution = await _resolve_team_identifier(api_key, team_id, team_name)
+    team_resolution = await resolve_team_identifier(api_key, team_id, team_name)
     if team_resolution.get('status') != 'OK':
         logger.error(f"get_team: Team resolution failed: {team_resolution}")
-        return _respond(team_resolution, response_format)
+        return respond(team_resolution, response_format)
 
     team_id = team_resolution['team_id']
 
@@ -198,16 +200,17 @@ async def get_team(
     else:
         logger.warning(f"get_team: Unexpected response type: {type(response)}")
 
-    return _respond(response, response_format)
+    return respond(response, response_format)
 
 
 @mcp.tool(
     name="bugasura_create_team",
+    title="Create Team",
     description="Create a new team. The user who creates the team becomes the team owner/admin.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_team(
-    team_name: str = Field(description="Team name (required, 1-50 characters, min_length=1)"),
+    team_name: str = Field(description="Team name (required, 1-50 characters, min_length=1)", min_length=1),
 ) -> ToolResponse:
     """
     Create a new team.
@@ -247,7 +250,7 @@ async def create_team(
     """
     # Validate API key before proceeding
     logger.info(f"create_team: Starting for team_name='{team_name}'")
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -295,7 +298,7 @@ async def create_team(
 
     # Make POST request to create team endpoint
     response = await make_api_request('POST', '/v1/teams/add', api_key, data=payload)
-    _invalidate_user_context_cache(api_key)
+    invalidate_user_context_cache(api_key)
 
     # Handle response
     if isinstance(response, dict):
@@ -313,12 +316,13 @@ async def create_team(
 
 @mcp.tool(
     name="bugasura_update_team",
+    title="Update Team",
     description="Update team name. Only team admins can update team details. Supports team_id or team_name to identify the team.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_team(
-    new_team_name: str = Field(description="New team name (required, 1-50 characters, min_length=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)"),
+    new_team_name: str = Field(description="New team name (required, 1-50 characters, min_length=1)", min_length=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)", ge=1),
     team_name: Optional[str] = Field(default=None, description="Current team name to search for (provide either team_id or team_name)"),
 ) -> ToolResponse:
     """
@@ -360,7 +364,7 @@ async def update_team(
     """
     # Validate API key before proceeding
     logger.info(f"update_team: Starting for team_id={team_id}, team_name='{team_name}', new_team_name='{new_team_name}'")
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -377,7 +381,7 @@ async def update_team(
         return validation
 
     # Resolve team identifier (team_id or team_name)
-    team_resolution = await _resolve_team_identifier(api_key, team_id, team_name)
+    team_resolution = await resolve_team_identifier(api_key, team_id, team_name)
     if team_resolution.get('status') != 'OK':
         logger.error(f"update_team: Team resolution failed: {team_resolution}")
         return team_resolution
@@ -432,11 +436,12 @@ async def update_team(
 
 @mcp.tool(
     name="bugasura_delete_team",
+    title="Delete Team",
     description="Delete team permanently. Only team admins can delete teams. WARNING: This deletes all associated projects, sprints, issues, and test cases. Supports team_id or team_name.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_team(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)", ge=1),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (provide either team_id or team_name)"),
 ) -> ToolResponse:
     """
@@ -487,7 +492,7 @@ async def delete_team(
     """
     # Validate API key before proceeding
     logger.warning(f"delete_team: DESTRUCTIVE OPERATION - Starting for team_id={team_id}, team_name={team_name}")
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -504,7 +509,7 @@ async def delete_team(
         return validation
 
     # Resolve team identifier (team_id or team_name)
-    team_resolution = await _resolve_team_identifier(api_key, team_id, team_name)
+    team_resolution = await resolve_team_identifier(api_key, team_id, team_name)
     if team_resolution.get('status') != 'OK':
         logger.error(f"delete_team: Team resolution failed: {team_resolution}")
         return team_resolution
@@ -522,7 +527,7 @@ async def delete_team(
 
     # Make POST request to delete team endpoint
     response = await make_api_request('POST', '/v1/teams/delete', api_key, data=payload)
-    _invalidate_user_context_cache(api_key)
+    invalidate_user_context_cache(api_key)
 
     # Handle response
     if isinstance(response, dict):
@@ -538,11 +543,14 @@ async def delete_team(
 
 @mcp.tool(
     name = "bugasura_list_team_members",
+    title = "List Team Members",
     description = "List all team members with user IDs, names, emails, and roles. Essential for finding user IDs when assigning work by name or email.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_team_members(
     team_id: int = Field(description="Team identifier", ge=1),
+    start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -583,27 +591,29 @@ async def list_team_members(
                 user_id = member['user_id']
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
-        return _respond({'status': 'failed', 'error': 'Unexpected API response format', 'details': str(validation)}, response_format)
+        return respond({'status': 'failed', 'error': 'Unexpected API response format', 'details': str(validation)}, response_format)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Use internal helper to fetch team members and wrap in pagination envelope
-    upstream = await _fetch_team_members(api_key, team_id)
-    return _respond(_paginate_upstream(upstream, items_key='team_users_details', offset=0), response_format)
+    upstream = await fetch_team_members(api_key, team_id)
+    return respond(paginate_upstream(upstream, items_key='team_users_details', offset=start_at,
+                                             max_results=max_results, local=True), response_format)
 
 
 @mcp.tool(
     name="bugasura_add_team_members",
+    title="Add Team Members",
     description="Add team members by email addresses. Supports team_id or team_name. Sends invitation emails to new members.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def add_team_members(
     email_list: str = Field(description="Comma-separated email addresses to invite (e.g., 'john@example.com, jane@example.com')"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)", ge=1),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (optional if team_id provided)"),
 ) -> ToolResponse:
     """
@@ -663,7 +673,7 @@ async def add_team_members(
     """
     # Validate API key before proceeding
     logger.info(f"add_team_members: Starting for team_id={team_id}, team_name='{team_name}'")
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -680,7 +690,7 @@ async def add_team_members(
         return validation
 
     # Resolve team identifier (team_id or team_name)
-    team_resolution = await _resolve_team_identifier(api_key, team_id, team_name)
+    team_resolution = await resolve_team_identifier(api_key, team_id, team_name)
     if team_resolution.get('status') != 'OK':
         logger.error(f"add_team_members: Team resolution failed: {team_resolution.get('error')}")
         return team_resolution
@@ -763,13 +773,14 @@ async def add_team_members(
 
 @mcp.tool(
     name="bugasura_update_team_member",
+    title="Update Team Member",
     description="Update team member permissions (admin/member role). Supports team_id or team_name. Only team admins can change user roles.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_team_member(
     user_id: int = Field(description="User ID to update (the team member whose role to change)"),
     is_admin: int = Field(description="Admin status: 1 for admin, 0 for regular member"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)", ge=1),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (optional if team_id provided)"),
 ) -> ToolResponse:
     """
@@ -813,7 +824,7 @@ async def update_team_member(
     """
     # Validate API key before proceeding
     logger.info(f"update_team_member: Starting for team_id={team_id}, team_name='{team_name}', user_id={user_id}, is_admin={is_admin}")
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -830,7 +841,7 @@ async def update_team_member(
         return validation
 
     # Resolve team identifier (team_id or team_name)
-    team_resolution = await _resolve_team_identifier(api_key, team_id, team_name)
+    team_resolution = await resolve_team_identifier(api_key, team_id, team_name)
     if team_resolution.get('status') != 'OK':
         logger.error(f"update_team_member: Team resolution failed: {team_resolution.get('error')}")
         return team_resolution
@@ -841,7 +852,7 @@ async def update_team_member(
 
     # Validate user_id
     try:
-        user_id = _validate_id(user_id, "user_id")
+        user_id = validate_id(user_id, "user_id")
     except ValueError as e:
         logger.error(f"update_team_member: Invalid user_id: {str(e)}")
         return {
@@ -891,12 +902,13 @@ async def update_team_member(
 
 @mcp.tool(
     name="bugasura_delete_team_user",
+    title="Remove Team Member",
     description="Remove a team member by user ID, email, or name. Supports team_id or team_name. Auto-resolves identifiers to user IDs. Owner cannot be removed.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_team_user(
     user_identifier: str = Field(description="User to remove: user ID (e.g., '123'), email (e.g., 'john@example.com'), or name (e.g., 'John Doe')"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)", ge=1),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (optional if team_id provided)"),
     is_leave_team: int = Field(default=0, description="Set to 1 if user is leaving team themselves (default: 0 for admin removal)"),
 ) -> ToolResponse:
@@ -968,7 +980,7 @@ async def delete_team_user(
     """
     # Validate API key before proceeding
     logger.info(f"delete_team_user: Starting for team_id={team_id}, team_name='{team_name}', user_identifier='{user_identifier}', is_leave_team={is_leave_team}")
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
@@ -985,7 +997,7 @@ async def delete_team_user(
         return validation
 
     # Resolve team identifier (team_id or team_name)
-    team_resolution = await _resolve_team_identifier(api_key, team_id, team_name)
+    team_resolution = await resolve_team_identifier(api_key, team_id, team_name)
     if team_resolution.get('status') != 'OK':
         logger.error(f"delete_team_user: Team resolution failed: {team_resolution.get('error')}")
         return team_resolution
@@ -1027,7 +1039,7 @@ async def delete_team_user(
         logger.info(f"delete_team_user: Resolving user identifier '{user_identifier}' for team_id={team_id}")
 
         try:
-            resolution_result = await _find_user_ids_by_names_or_emails(api_key, team_id, user_identifier)
+            resolution_result = await find_user_ids_by_names_or_emails(api_key, team_id, user_identifier)
             logger.info(f"delete_team_user: Resolution result status: {resolution_result.get('status')}")
 
             if resolution_result['status'] != 'OK':
@@ -1060,12 +1072,12 @@ async def delete_team_user(
             if '@' in user_identifier:
                 team_user_email = user_identifier
 
-        except (KeyError, AttributeError, TypeError, ValueError, requests.RequestException) as e:
+        except (KeyError, AttributeError, TypeError, ValueError) as e:
             logger.critical(f"delete_team_user: Exception during resolution: {type(e).__name__}: {str(e)}", exc_info=True)
             return {
                 'status': 'failed',
-                'error': f'Internal error during user identifier resolution: {str(e)}',
-                'error_type': type(e).__name__
+                'error': 'Internal error during user identifier resolution.',
+                'error_type': 'InternalError'
             }
 
     # Build payload with required fields

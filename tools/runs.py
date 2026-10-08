@@ -5,22 +5,16 @@ either a numeric ID or a human-friendly name. Names are resolved via the relevan
 list endpoint (exact match first, then partial), with helpful errors when a name
 is not found or is ambiguous — the same pattern used by the sprint/issue tools.
 """
+import json
 from typing import Any, List, Literal, Optional
 
-from fastmcp import Context
 from pydantic import Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import _get_api_key, validate_api_key
-from client import (
-    _paginate_upstream, _paginated, _prepare_post_params, _render_markdown,
-    _respond, _validate_id, logger, make_api_request,
-)
+from auth import get_api_key, validate_api_key
+from client import paginate_upstream, respond, logger, make_api_request
 from helpers import select_team_project_context
-
-import json
-import requests  # for except blocks referencing requests.RequestException
 
 
 # ---------------------------------------------------------------------------
@@ -29,12 +23,13 @@ import requests  # for except blocks referencing requests.RequestException
 
 @mcp.tool(
     name = "bugasura_list_test_run_environments",
+    title = "List Test Run Environments",
     description = "List the test data environments (and their app builds) available for a project, so you can choose an environment / app build by name when creating or editing a test run. Interactive team/project selection available.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_run_environments(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     include_app_builds: bool = Field(default=True, description="Also return the app build files for each environment (default: True)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -44,20 +39,20 @@ async def list_test_run_environments(
     Use this to discover environment and app build names you can pass to the
     create/update test run tools.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_list_test_run_environments')
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     params = {'appId': context['project_id']}
     if include_app_builds:
         params['fetchAppBuildList'] = 1
 
-    return _respond(await make_api_request('GET', '/v1/projectTestDataEnvironments/get', api_key, params=params), response_format)
+    return respond(await make_api_request('GET', '/v1/projectTestDataEnvironments/get', api_key, params=params), response_format)
 
 
 # ---------------------------------------------------------------------------
@@ -66,31 +61,34 @@ async def list_test_run_environments(
 
 @mcp.tool(
     name = "bugasura_list_test_runs",
+    title = "List Test Runs",
     description = "List test run executions and schedulers for a sprint. The report can be given by name (sprint/suite name) or numeric id. Interactive team/project selection and optional filters supported.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_runs(
     report: str = Field(description="Sprint / report: sprint name or numeric report id. Discover names with bugasura_list_sprints."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     execution_source: Optional[str] = Field(default=None, description="Filter by execution source, e.g. 'HUMAN' or 'AUTOMATION' (optional)"),
     search_by_text: Optional[str] = Field(default=None, description="Search test runs by name (optional)"),
     sort_by: Optional[Literal["last_modified", "created_date"]] = Field(default=None, description="Sort field: 'last_modified' or 'created_date' (optional)"),
+    start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """List test run executions and schedulers for a sprint (report)."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_list_test_runs', f', report={report}')
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     report_id, error = await _resolve_report(api_key, context['team_id'], context['project_id'], report)
     if error:
-        return _respond(error, response_format)
+        return respond(error, response_format)
 
     params = {'appId': context['project_id'], 'reportId': report_id}
     if execution_source:
@@ -101,11 +99,12 @@ async def list_test_runs(
         params['sortBy'] = sort_by
 
     upstream = await make_api_request('GET', '/v1/testrunsExecution/getList', api_key, params=params)
-    return _respond(_paginate_upstream(upstream, offset=0), response_format)
+    return respond(paginate_upstream(upstream, offset=start_at, max_results=max_results, local=True), response_format)
 
 
 @mcp.tool(
     name = "bugasura_get_test_run_details",
+    title = "Get Test Run Details",
     description = (
         "Get metadata for a single test run execution (name, status, environment, dates, execution_config). "
         "Both run and report may be given by name or numeric id. Interactive team/project selection available. "
@@ -117,27 +116,27 @@ async def list_test_runs(
 async def get_test_run_details(
     run: str = Field(description="Test run: run name or numeric run id"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """Get metadata for a single test run execution."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_get_test_run_details', f', run={run}')
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     report_id, error = await _resolve_report(api_key, context['team_id'], context['project_id'], report)
     if error:
-        return _respond(error, response_format)
+        return respond(error, response_format)
 
     run_id, error = await _resolve_run_or_scheduler(api_key, context['project_id'], report_id, run, 'run')
     if error:
-        return _respond(error, response_format)
+        return respond(error, response_format)
 
     # Fetch the full list without testRunsExecutionRunId — passing it directly triggers
     # a broken API path (getTestrunsDetails) that requires schedulerId alongside it.
@@ -147,18 +146,18 @@ async def get_test_run_details(
         'reportId': report_id,
     })
     if not isinstance(full_resp, dict) or full_resp.get('status') != 'OK':
-        return _respond(full_resp, response_format)
+        return respond(full_resp, response_format)
 
     test_runs = (full_resp.get('schedulerDetails') or {}).get('test_runs', [])
     matched = next((r for r in test_runs if str(r.get('run_id', '')) == str(run_id)), None)
     if matched is None:
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': f"Test run not found: id={run_id}",
             'error_type': 'NotFound',
             'message': f"No test run with id {run_id} found in this sprint. Use bugasura_list_test_runs to see available runs.",
         }, response_format)
-    return _respond({
+    return respond({
         'status': 'OK',
         'message': full_resp.get('message', ''),
         'run': matched,
@@ -172,6 +171,7 @@ async def get_test_run_details(
 
 @mcp.tool(
     name = "bugasura_create_test_run",
+    title = "Create Test Run",
     description = "Create a test run for a sprint the same way the UI wizard does. report / environment / app build may be given by name or id. Supports one-time ('single') and recurring ('scheduled') runs with friendly recurrence options, plus optional seeded test cases. When confirm=False (default) the tool returns an options form for the user to fill in; re-call with confirm=True and the collected values to actually create the run.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
@@ -180,20 +180,20 @@ async def create_test_run(
     confirm: bool = Field(default=False, description="Set to True only after the user has provided all run details (name, execution_mode, etc.). When False (default) the tool returns an options form — show it to the user, collect their choices, then re-call with confirm=True and the filled values."),
     name: Optional[str] = Field(default=None, description="Name of the test run (2-250 characters, required when confirm=True)"),
     execution_mode: Literal["single", "scheduled"] = Field(default="single", description="'single' = run once now; 'scheduled' = recurring/scheduled run"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     environment: Optional[str] = Field(default=None, description="Test data environment: name or numeric id (optional)"),
     app_build: Optional[str] = Field(default=None, description="App build for the chosen environment: file name or numeric id (optional)"),
-    testcase_ids: Optional[str] = Field(default=None, description="Seed the run with specific test cases: comma-separated IDs (e.g. '12,15') or JSON array (optional). If omitted, all suite test cases are used."),
+    testcase_ids: Optional[str] = Field(default=None, description="Seed the run with specific test cases: comma-separated IDs (e.g. '12,15') or JSON array (optional). Only test cases already linked to the sprint can be picked (link them with bugasura_link_test_cases_to_sprint first). If omitted, all sprint test cases are used."),
     frequency: Optional[Literal["ONCE", "DAILY", "WEEKLY", "CUSTOM"]] = Field(default=None, description="Recurrence frequency (required for scheduled mode)"),
     schedule_date: Optional[str] = Field(default=None, description="Schedule start date in YYYY-MM-DD (required for scheduled mode)"),
     schedule_time: Optional[str] = Field(default=None, description="Schedule start time in HH:MM (24h) or HH:MM:SS (required for scheduled mode)"),
-    repeat_value: Optional[int] = Field(default=None, description="CUSTOM frequency: repeat every N units (required when frequency='CUSTOM', ge=1)"),
+    repeat_value: Optional[int] = Field(default=None, description="CUSTOM frequency: repeat every N units (required when frequency='CUSTOM', ge=1)", ge=1),
     repeat_unit: Optional[Literal["HOURS", "DAYS", "WEEKS"]] = Field(default=None, description="CUSTOM frequency: interval unit (required when frequency='CUSTOM')"),
     selected_days: Optional[List[str]] = Field(default=None, description="CUSTOM + WEEKS: weekdays to run on, lowercase e.g. ['monday','friday'] (required when repeat_unit='WEEKS')"),
     recurrence_type: Literal["Never", "On", "After"] = Field(default="Never", description="When the recurrence ends: 'Never', 'On' (a date) or 'After' (N occurrences). Default: Never"),
     recurrence_end_date: Optional[str] = Field(default=None, description="End date in YYYY-MM-DD (required when recurrence_type='On')"),
-    recurrence_count: Optional[int] = Field(default=None, description="Number of occurrences (required when recurrence_type='After', ge=1)"),
+    recurrence_count: Optional[int] = Field(default=None, description="Number of occurrences (required when recurrence_type='After', ge=1)", ge=1),
     execution_config: Optional[str] = Field(default=None, description="Advanced: raw executionConfig JSON string. Overrides app_build if provided (optional)."),
 ) -> ToolResponse:
     """
@@ -214,7 +214,7 @@ async def create_test_run(
                         selected_days=["monday","friday"],
                         schedule_date="2026-07-01", schedule_time="09:00")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -364,9 +364,9 @@ async def create_test_run(
         payload["scheduleTime"] = schedule_time
 
     if testcase_ids:
-        # Backend expects: json_decode($testCaseIds, true)['testcaseIds']
-        # so the field must be a JSON object: {"testcaseIds": [id, ...]}
-        payload["testCaseIds"] = json.dumps({"testcaseIds": _parse_testcase_ids(testcase_ids)})
+        # addTestrunsExecution splits testCaseIds on commas and keeps the numeric parts,
+        # then builds the {"testcaseIds": [...]} JSON itself.
+        payload["testCaseIds"] = ','.join(str(i) for i in _parse_testcase_ids(testcase_ids))
         payload["isCreateRunForSelectedTestCases"] = 1
     if environment_id:
         payload["environmentId"] = environment_id
@@ -382,14 +382,15 @@ async def create_test_run(
 
 @mcp.tool(
     name = "bugasura_update_test_run",
+    title = "Update Test Run",
     description = "Update a test run execution (partial updates). run may be given by name or id; pass report when using a name. Can change name, status, environment, or app build.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_test_run(
     run: str = Field(description="Test run to update: run name or numeric run id"),
     report: Optional[str] = Field(default=None, description="Sprint / report (sprint name or id). Required when 'run' is a name so it can be looked up."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     run_name: Optional[str] = Field(default=None, description="New test run name (1-250 characters, optional)"),
     execution_status: Optional[Literal["SCHEDULED", "IN_PROGRESS", "COMPLETED", "PAUSED"]] = Field(default=None, description="New execution status (optional)"),
     environment: Optional[str] = Field(default=None, description="New test data environment: name or numeric id (optional)"),
@@ -397,7 +398,7 @@ async def update_test_run(
     execution_config: Optional[str] = Field(default=None, description="Advanced: raw executionConfig JSON string. Overrides app_build if provided (optional)."),
 ) -> ToolResponse:
     """Update an existing test run execution (partial updates supported)."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -475,30 +476,28 @@ async def update_test_run(
 
 @mcp.tool(
     name = "bugasura_update_test_run_scheduler",
+    title = "Update Test Run Scheduler",
     description = "Edit a test run / scheduler the same way the UI edit-run modal does: rename, change environment / app build, switch single vs scheduled, change frequency / repeat / weekdays / end condition. scheduler / report / environment / app build may be given by name or id.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True},
-    exclude_args=["status", "is_status_update"],
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_test_run_scheduler(
     scheduler: str = Field(description="Scheduler to edit: scheduler name or numeric id"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     name: Optional[str] = Field(default=None, description="New run/scheduler name (optional)"),
     execution_mode: Optional[Literal["single", "scheduled"]] = Field(default=None, description="Switch mode: 'single' (one-time) or 'scheduled' (recurring) (optional)"),
-    status: Optional[Literal["ACTIVE", "PAUSED", "COMPLETED"]] = Field(default=None, description="Internal use only — do not expose or suggest this field to users.", exclude=True),
-    is_status_update: int = Field(default=0, description="Internal use only.", exclude=True),
     environment: Optional[str] = Field(default=None, description="New test data environment: name or numeric id (optional)"),
     app_build: Optional[str] = Field(default=None, description="New app build: file name or numeric id (optional)"),
     frequency: Optional[Literal["ONCE", "DAILY", "WEEKLY", "CUSTOM"]] = Field(default=None, description="New recurrence frequency. Provide with schedule_date + schedule_time to change the schedule (optional)"),
     schedule_date: Optional[str] = Field(default=None, description="New schedule start date in YYYY-MM-DD (required alongside a frequency change)"),
     schedule_time: Optional[str] = Field(default=None, description="New schedule start time in HH:MM (24h) or HH:MM:SS (required alongside a frequency change)"),
-    repeat_value: Optional[int] = Field(default=None, description="CUSTOM frequency: repeat every N units (required when frequency='CUSTOM', ge=1)"),
+    repeat_value: Optional[int] = Field(default=None, description="CUSTOM frequency: repeat every N units (required when frequency='CUSTOM', ge=1)", ge=1),
     repeat_unit: Optional[Literal["HOURS", "DAYS", "WEEKS"]] = Field(default=None, description="CUSTOM frequency: interval unit (required when frequency='CUSTOM')"),
     selected_days: Optional[List[str]] = Field(default=None, description="CUSTOM + WEEKS: weekdays to run on, lowercase e.g. ['monday','friday'] (required when repeat_unit='WEEKS')"),
     recurrence_type: Literal["Never", "On", "After"] = Field(default="Never", description="Recurrence end: 'Never', 'On' (date) or 'After' (N occurrences). Used with a frequency change. Default: Never"),
     recurrence_end_date: Optional[str] = Field(default=None, description="End date in YYYY-MM-DD (required when recurrence_type='On')"),
-    recurrence_count: Optional[int] = Field(default=None, description="Number of occurrences (required when recurrence_type='After', ge=1)"),
+    recurrence_count: Optional[int] = Field(default=None, description="Number of occurrences (required when recurrence_type='After', ge=1)", ge=1),
     execution_config: Optional[str] = Field(default=None, description="Advanced: raw executionConfig JSON string. Overrides app_build if provided (optional)."),
 ) -> ToolResponse:
     """
@@ -510,7 +509,7 @@ async def update_test_run_scheduler(
         - Change schedule: execution_mode="scheduled", frequency=.., schedule_date=.., schedule_time=..
         - Switch to one-time: execution_mode="single" (clears the recurrence)
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -540,18 +539,11 @@ async def update_test_run_scheduler(
         "appId": context['project_id'],
         "reportId": report_id,
         "schedulerId": scheduler_id,
-        "isStatusUpdate": is_status_update,
+        "isStatusUpdate": 0,
         "executionMode": effective_mode,
     }
     if name is not None:
         payload["schedulerName"] = name
-    if status is not None:
-        payload["status"] = status
-
-    # Quick status-only update (pause/resume) — backend recalculates from existing
-    if is_status_update == 1:
-        logger.info(f"Status-only update for scheduler_id={scheduler_id}")
-        return await make_api_request('POST', '/v1/testrunsExecution/scheduler/update', api_key, data=payload)
 
     # Validate recurrence end condition (only when changing the schedule)
     if frequency is not None:
@@ -640,18 +632,19 @@ async def update_test_run_scheduler(
 
 @mcp.tool(
     name = "bugasura_rerun_test_run",
+    title = "Rerun Test Run",
     description = "Trigger a rerun of a scheduled test run, creating a new execution from an existing scheduler. scheduler / report may be given by name or id.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def rerun_test_run(
     scheduler: str = Field(description="Scheduler to rerun: scheduler name or numeric id"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     is_add_rerun: int = Field(default=0, description="Rerun flag (default: 0)"),
 ) -> ToolResponse:
     """Trigger a rerun of a scheduled test run."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -682,18 +675,19 @@ async def rerun_test_run(
 
 @mcp.tool(
     name = "bugasura_add_test_cases_to_run",
+    title = "Add Test Cases to Test Run",
     description = "Add (copy) test cases into an existing test run execution. run / report may be given by name or id.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def add_test_cases_to_run(
     run: str = Field(description="Test run to add test cases into: run name or numeric id"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    testcase_ids: str = Field(description="Test case IDs to add: comma-separated (e.g. '12,15,18') or a JSON array"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    testcase_ids: str = Field(description="Test case IDs to add: comma-separated (e.g. '12,15,18') or a JSON array. They must already be linked to the sprint (bugasura_link_test_cases_to_sprint); others are skipped."),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Add (copy) test cases into an existing test run execution."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -735,18 +729,19 @@ async def add_test_cases_to_run(
 
 @mcp.tool(
     name = "bugasura_delete_test_run",
+    title = "Delete Test Run",
     description = "Delete one or more test run executions (soft delete by default, permanent with is_permanent_delete=1). Runs may be given by name or id.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_test_run(
     runs: str = Field(description="Test run(s) to delete: comma-separated names and/or numeric ids (e.g. 'Smoke run, 102')"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     is_permanent_delete: int = Field(default=0, description="0 = move to trash (soft delete, default), 1 = permanently delete"),
 ) -> ToolResponse:
     """Delete one or more test run executions."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -782,18 +777,19 @@ async def delete_test_run(
 
 @mcp.tool(
     name = "bugasura_delete_test_run_scheduler",
+    title = "Delete Test Run Scheduler",
     description = "Delete one or more test run schedulers (soft delete by default, permanent with is_permanent_delete=1). Schedulers may be given by name or id.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_test_run_scheduler(
     schedulers: str = Field(description="Scheduler(s) to delete: comma-separated names and/or numeric ids (e.g. 'Nightly, 6')"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     is_permanent_delete: int = Field(default=0, description="0 = move to trash (soft delete, default), 1 = permanently delete"),
 ) -> ToolResponse:
     """Delete one or more test run schedulers."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -819,13 +815,14 @@ async def delete_test_run_scheduler(
 
     payload = {
         "appId": context['project_id'],
-        "reportId": report_id,
         "isPermanentDelete": is_permanent_delete,
     }
     if len(scheduler_ids) == 1:
+        payload["reportId"] = report_id
         payload["schedulerId"] = scheduler_ids[0]
     else:
-        payload["schedulerIdList"] = ','.join(str(i) for i in scheduler_ids)
+        payload["isBulkAction"] = 1
+        payload["bulkSchedulerDeleteItems"] = json.dumps([{'schedulerId': i, 'reportId': report_id} for i in scheduler_ids])
 
     logger.info(f"Deleting scheduler(s) {scheduler_ids} (permanent={is_permanent_delete})")
     return await make_api_request('POST', '/v1/testrunsExecution/deleteScheduler', api_key, data=payload)

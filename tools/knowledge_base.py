@@ -65,26 +65,21 @@ the complete set of Figma entries for the project and DELETES every stored Figma
 missing from it. `bugasura_import_figma_to_knowledge_base` therefore reads the existing
 entries first and carries them forward unless the caller explicitly asks to replace them.
 """
+import asyncio, json, mimetypes, os, urllib.parse
 from typing import Any, Dict, List, Literal, Optional
 
+import httpx
 from pydantic import Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import _get_api_key, validate_api_key
-from client import _get_http_client, _paginated, _respond, logger, make_api_request
+from auth import get_api_key, validate_api_key
+from client import get_http_client, paginated, respond, logger, make_api_request
 from helpers import (
-    _download_url_to_path, _download_url_tmp, _fetch_url_bytes,
-    _infer_filename_from_url_path, _normalise_share_url,
-    select_team_project_context, CDN_BASE_URL, WEB_BASE_URL,
+    download_url_to_path, download_url_tmp, fetch_url_bytes,
+    infer_filename_from_url_path, local_path_rejected, normalise_share_url,
+    redact_secrets, select_team_project_context, CDN_BASE_URL, WEB_BASE_URL,
 )
-
-import asyncio
-import httpx
-import json
-import mimetypes
-import os
-import urllib.parse
 
 
 # Folder type that scopes a project's knowledge base folders (projectFolders.folder_type).
@@ -151,6 +146,7 @@ _KB_DOC_IMPORTING_STAGES = ('IMPORT_PAGES', 'IMPORTING_PAGES')
 
 @mcp.tool(
     name="bugasura_create_knowledge_base_folder",
+    title="Create Knowledge Base Folder",
     description=(
         "Create a folder in a Bugasura project's Knowledge Base. Pass parent_folder_name (or "
         "parent_folder_id) to nest the new folder inside an existing knowledge base folder; omit both "
@@ -164,8 +160,8 @@ async def create_knowledge_base_folder(
     folder_name: str = Field(description="Name for the new knowledge base folder"),
     parent_folder_name: Optional[str] = Field(default=None, description="Existing knowledge base folder to nest the new folder inside. Matched case-insensitively anywhere in the folder tree. Omit for a root-level folder."),
     parent_folder_id: Optional[int] = Field(default=None, description="Parent folder identifier. Use only when the user picked a specific folder from a list — parent_folder_name is the normal way to target a parent.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Create a knowledge base folder, optionally nested under an existing one.
@@ -201,7 +197,7 @@ async def create_knowledge_base_folder(
         # Nested under an existing knowledge base folder
         create_knowledge_base_folder(folder_name="Testcase", parent_folder_name="Requirements")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -278,6 +274,7 @@ async def create_knowledge_base_folder(
 
 @mcp.tool(
     name="bugasura_rename_knowledge_base_folder",
+    title="Rename Knowledge Base Folder",
     description=(
         "Rename a folder in a Bugasura project's Knowledge Base. Identify the folder by its "
         "current name (matched case-insensitively anywhere in the folder tree) or by its id. "
@@ -292,8 +289,8 @@ async def rename_knowledge_base_folder(
     new_name: str = Field(description="New name for the folder. Up to 250 characters; cannot contain < > / or \\."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to rename, by its current name. Matched case-insensitively anywhere in the folder tree."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Rename a knowledge base folder.
@@ -334,7 +331,7 @@ async def rename_knowledge_base_folder(
         # Rename the folder the user picked from a list
         rename_knowledge_base_folder(folder_id=412, new_name="Archive", team_id=12, project_id=34)
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -467,6 +464,7 @@ async def rename_knowledge_base_folder(
 
 @mcp.tool(
     name="bugasura_list_knowledge_base_folders",
+    title="List Knowledge Base Folders",
     description=(
         "List the top-level folders in a Bugasura project's Knowledge Base (paginated), each with "
         "its full sub-folder tree (`sub_folders`) and every document they contain (`documents`: "
@@ -480,8 +478,8 @@ async def list_knowledge_base_folders(
     parent_folder_id: Optional[int] = Field(default=None, description="Filter to the direct children of this folder. Pass 0 for root-level folders only. Omit to get root-level folders (default).", ge=0),
     start_at: int = Field(default=0, description="Pagination offset over the top-level folders in scope (default: 0). Each returned folder's sub-folders and documents are always shown in full — this only limits how many top-level folders come back.", ge=0),
     max_results: int = Field(default=10, description="Number of top-level folders to return (default: 10, max 50).", ge=1, le=50),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -518,17 +516,17 @@ async def list_knowledge_base_folders(
         # A specific folder's direct children (each fully expanded)
         list_knowledge_base_folders(parent_folder_id=56)
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     context = await select_team_project_context(api_key, team_id, project_id,
                                                 'bugasura_list_knowledge_base_folders')
     if context.get('status') == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
     if context.get('status') == 'failed':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     team_id = context['team_id']
     project_id = context['project_id']
@@ -539,10 +537,10 @@ async def list_knowledge_base_folders(
     docs_folder_id = parent_folder_id or None
     folders_response, documents_response = await asyncio.gather(
         _fetch_kb_folders(api_key, team_id, project_id),
-        _fetch_kb_documents(api_key, team_id, project_id, docs_folder_id),
+        fetch_kb_documents(api_key, team_id, project_id, docs_folder_id),
     )
     if folders_response.get('status') != 'OK':
-        return _respond(folders_response, response_format)
+        return respond(folders_response, response_format)
     all_folders = folders_response['folders']
 
     parent_folder = None
@@ -552,7 +550,7 @@ async def list_knowledge_base_folders(
         if parent_folder is None:
             logger.error(f"list_knowledge_base_folders: folder_id={parent_folder_id} not found in "
                          f"project_id={project_id}")
-            return _respond({
+            return respond({
                 'status': 'failed',
                 'error': 'Knowledge base folder not found',
                 'error_type': 'FolderNotFound',
@@ -561,7 +559,7 @@ async def list_knowledge_base_folders(
             }, response_format)
 
     if documents_response.get('status') != 'OK':
-        return _respond(documents_response, response_format)
+        return respond(documents_response, response_format)
 
     # Compact document shape: the full record is available from bugasura_list_knowledge_base_documents.
     docs_by_folder: dict = {}
@@ -615,7 +613,7 @@ async def list_knowledge_base_folders(
 
     logger.info(f"list_knowledge_base_folders: Returning {len(page)} of {total} top-level folder(s) "
                 f"for project_id={project_id}")
-    envelope = _paginated(page, total=total, offset=start_at, **extras)
+    envelope = paginated(page, total=total, offset=start_at, **extras)
 
     if response_format == 'markdown':
         # Own rendering: the shared renderer lists items flat, this one shows the tree. Ids are
@@ -639,12 +637,13 @@ async def list_knowledge_base_folders(
             tree_lines.extend(render_level(f, 0))
         rendered = "\n\n".join(part for part in (
             message, "\n".join(tree_lines), _md_page_footer(envelope)) if part)
-        return _respond(rendered, response_format)
-    return _respond(envelope, response_format)
+        return respond(rendered, response_format)
+    return respond(envelope, response_format)
 
 
 @mcp.tool(
     name="bugasura_list_knowledge_base_documents",
+    title="List Knowledge Base Documents",
     description=(
         "List the documents in a Bugasura project's Knowledge Base. Pass folder_name (or folder_id) "
         "to list one folder and its sub-folders; omit both to list every document in the project. "
@@ -659,8 +658,8 @@ async def list_knowledge_base_documents(
     starred_only: bool = Field(default=False, description="List only the documents that have been starred (default: False)"),
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=25, description="Number of documents to return (default: 25)", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -694,17 +693,17 @@ async def list_knowledge_base_documents(
         # Starred documents only
         list_knowledge_base_documents(starred_only=True)
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     context = await select_team_project_context(api_key, team_id, project_id,
                                                 'bugasura_list_knowledge_base_documents')
     if context.get('status') == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
     if context.get('status') == 'failed':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     team_id = context['team_id']
     project_id = context['project_id']
@@ -717,15 +716,15 @@ async def list_knowledge_base_documents(
     if folder_id is not None or (folder_name and folder_name.strip()):
         folder = await _find_kb_folder(api_key, team_id, project_id, folder_id, folder_name)
         if folder.get('status') != 'OK':
-            return _respond(_with_hint(folder, "List the folders with "
+            return respond(_with_hint(folder, "List the folders with "
                                                "bugasura_list_knowledge_base_folders."), response_format)
         scope_folder_id = folder['folder_id']
         scope_folder_name = folder['folder_name']
 
-    documents_response = await _fetch_kb_documents(api_key, team_id, project_id,
+    documents_response = await fetch_kb_documents(api_key, team_id, project_id,
                                                    scope_folder_id, starred_only)
     if documents_response.get('status') != 'OK':
-        return _respond(documents_response, response_format)
+        return respond(documents_response, response_format)
 
     documents = documents_response['documents']
     page = documents[start_at:start_at + max_results]
@@ -752,7 +751,7 @@ async def list_knowledge_base_documents(
 
     logger.info(f"list_knowledge_base_documents: Returning {len(page)} of {len(documents)} "
                 f"document(s) for project_id={project_id}")
-    envelope = _paginated(page, total=len(documents), offset=start_at, **extras)
+    envelope = paginated(page, total=len(documents), offset=start_at, **extras)
     if response_format == 'markdown':
         # Own rendering: one row per folder rather than the shared flat item list. kb_id is kept
         # because markdown-mode callers need it to delete, star or link a document.
@@ -774,12 +773,13 @@ async def list_knowledge_base_documents(
                              f"| {doc_list} |")
             rendered = "\n\n".join(part for part in (
                 message, "\n".join(lines), _md_page_footer(envelope)) if part)
-        return _respond(rendered, response_format)
-    return _respond(envelope, response_format)
+        return respond(rendered, response_format)
+    return respond(envelope, response_format)
 
 
 @mcp.tool(
     name="bugasura_download_knowledge_base_document",
+    title="Download Knowledge Base Document",
     description=(
         "Get an uploaded Knowledge Base document as a file the user can open — a PDF, Word "
         "document, text or markdown file. Returns download_url, a direct link to the file "
@@ -798,12 +798,12 @@ async def list_knowledge_base_documents(
 )
 async def download_knowledge_base_document(
     document_identifier: str = Field(description="Document to download: its file name (e.g. 'PRD.pdf', matched exactly then partially) or its numeric id from bugasura_list_knowledge_base_documents"),
-    save_to_path: Optional[str] = Field(default=None, description="Absolute path on the MCP server's local filesystem to write the file to — a directory (the document's own file name is used) or a full file path. Omit to just get the download link. Only meaningful when the server runs on the user's own machine."),
+    save_to_path: Optional[str] = Field(default=None, description="Absolute path on the MCP server's local filesystem to write the file to — a directory (the document's own file name is used) or a full file path. Omit to just get the download link. Local STDIO servers only; rejected on the hosted server."),
     overwrite: bool = Field(default=False, description="Set True to replace the file at save_to_path when one is already there. Leave False to have the tool refuse rather than overwrite it (default: False)."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same file name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Get a download link for an uploaded knowledge base document, and optionally save it.
@@ -851,7 +851,7 @@ async def download_knowledge_base_document(
         download_knowledge_base_document(document_identifier="PRD.pdf",
                                          save_to_path="/home/me/specs/")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -957,6 +957,10 @@ async def download_knowledge_base_document(
         response['document_url'] = document_url
 
     if save_to_path and save_to_path.strip():
+        if rejected := local_path_rejected('save_to_path'):
+            return {**rejected, 'download_url': download_url,
+                    'message': ("save_to_path refers to the server's own filesystem, which a hosted "
+                                "server does not expose. Give the user download_url instead.")}
         destination = os.path.expanduser(save_to_path.strip())
         # A directory means "put it here under its own name"; anything else is the file path.
         # The document's own name is the one the user knows it by; fall back to the stored
@@ -1002,7 +1006,7 @@ async def download_knowledge_base_document(
                     f"('{document['doc_name']}') to '{destination}'")
         try:
             response['saved_bytes'] = await asyncio.to_thread(
-                _download_url_to_path, download_url, destination)
+                download_url_to_path, download_url, destination)
             response['saved_to'] = destination
         except Exception as e:
             logger.error(f"download_knowledge_base_document: Download failed for "
@@ -1038,6 +1042,7 @@ async def download_knowledge_base_document(
 
 @mcp.tool(
     name="bugasura_star_knowledge_base_document",
+    title="Star Knowledge Base Document",
     description=(
         "Star or unstar a document in a Bugasura project's Knowledge Base. Starring is the user's "
         "own shortlist — starred documents show up in the Knowledge Base page's Starred view and "
@@ -1051,8 +1056,8 @@ async def star_knowledge_base_document(
     starred: bool = Field(default=True, description="True to star the document, False to remove the star (default: True)"),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same file name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Star or unstar a knowledge base document.
@@ -1085,7 +1090,7 @@ async def star_knowledge_base_document(
         # Unstar it again
         star_knowledge_base_document(document_identifier="PRD.pdf", starred=False)
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1151,6 +1156,7 @@ async def star_knowledge_base_document(
 
 @mcp.tool(
     name="bugasura_delete_knowledge_base_document",
+    title="Delete Knowledge Base Document",
     description=(
         "Delete a document from a Bugasura project's Knowledge Base, permanently. Identify the "
         "document by its file name (e.g. 'PRD.pdf') or its id. The file and everything the AI "
@@ -1164,8 +1170,8 @@ async def delete_knowledge_base_document(
     document_identifier: str = Field(description="Document to delete: its file name (e.g. 'PRD.pdf', matched exactly then partially) or its numeric id from bugasura_list_knowledge_base_documents"),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same file name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Delete a document from a project's knowledge base.
@@ -1197,7 +1203,7 @@ async def delete_knowledge_base_document(
         # Delete by id, scoped to one folder
         delete_knowledge_base_document(document_identifier="3772", folder_name="Product Specs")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1254,6 +1260,7 @@ async def delete_knowledge_base_document(
 
 @mcp.tool(
     name="bugasura_delete_knowledge_base_folder",
+    title="Delete Knowledge Base Folder",
     description=(
         "Delete a folder from a Bugasura project's Knowledge Base. The folder and its sub-folders "
         "are removed from the knowledge base tree, and the documents inside them stop being "
@@ -1268,8 +1275,8 @@ async def delete_knowledge_base_folder(
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to delete. Matched case-insensitively anywhere in the folder tree."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     delete_documents: bool = Field(default=False, description="Set True to delete a folder that still holds documents — the documents stop being listed with it. Leave False to have the tool refuse and report what is inside (default: False)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Delete a knowledge base folder.
@@ -1311,7 +1318,7 @@ async def delete_knowledge_base_folder(
         # Delete a folder together with the documents inside it
         delete_knowledge_base_folder(folder_name="Old Specs", delete_documents=True)
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1335,7 +1342,7 @@ async def delete_knowledge_base_folder(
         return _with_hint(folder, "List the folders with bugasura_list_knowledge_base_folders.")
 
     # Count what would go with the folder — getDocs covers the folder and its sub-folders.
-    documents_response = await _fetch_kb_documents(api_key, team_id, project_id, folder['folder_id'])
+    documents_response = await fetch_kb_documents(api_key, team_id, project_id, folder['folder_id'])
     if documents_response.get('status') != 'OK':
         return documents_response
     documents = documents_response['documents']
@@ -1395,6 +1402,7 @@ async def delete_knowledge_base_folder(
 
 @mcp.tool(
     name="bugasura_create_knowledge_base_document",
+    title="Create Knowledge Base Document",
     description=(
         "Create a page document in a Bugasura project's Knowledge Base — the web app's "
         "'Create Document' flow. Unlike an uploaded file, a page document is written in "
@@ -1415,8 +1423,8 @@ async def create_knowledge_base_document(
     first_page_name: Optional[str] = Field(default=None, description="Name of the page the document starts with. Defaults to 'Untitled Page'."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to create the document in. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Create an empty page document in a project's knowledge base.
@@ -1457,7 +1465,7 @@ async def create_knowledge_base_document(
         # With a named first page
         create_knowledge_base_document(doc_name="API Guide", first_page_name="Overview")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1544,6 +1552,7 @@ async def create_knowledge_base_document(
 
 @mcp.tool(
     name="bugasura_rename_knowledge_base_document",
+    title="Rename Knowledge Base Document",
     description=(
         "Rename a page document in a Bugasura project's Knowledge Base. Works on documents "
         "created with bugasura_create_knowledge_base_document and on documents synced from "
@@ -1558,8 +1567,8 @@ async def rename_knowledge_base_document(
     new_name: str = Field(description="New name for the document. Trimmed to 250 characters; '<' and '>' are stripped upstream."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Rename a knowledge base page document.
@@ -1590,7 +1599,7 @@ async def rename_knowledge_base_document(
         # Give a freshly created document a real name
         rename_knowledge_base_document(document_identifier="Untitled Doc", new_name="Onboarding Spec")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1654,6 +1663,7 @@ async def rename_knowledge_base_document(
 
 @mcp.tool(
     name="bugasura_list_knowledge_base_pages",
+    title="List Knowledge Base Pages",
     description=(
         "List the pages of a Bugasura Knowledge Base page document. Use this to show the "
         "user a document's structure and to get the page id needed to rename, move, "
@@ -1671,8 +1681,8 @@ async def list_knowledge_base_pages(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=50, description="Number of pages to return (default: 50)", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -1703,19 +1713,19 @@ async def list_knowledge_base_pages(
         # By document id, scoped to one folder
         list_knowledge_base_pages(document_identifier="3772", folder_name="Product Specs")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     context = await select_team_project_context(
         api_key, team_id, project_id, 'bugasura_list_knowledge_base_pages',
         f', document_identifier="{document_identifier}"'
     )
     if context.get('status') == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
     if context.get('status') == 'failed':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     team_id = context['team_id']
     project_id = context['project_id']
@@ -1725,7 +1735,7 @@ async def list_knowledge_base_pages(
     doc = await _resolve_page_document(api_key, team_id, project_id, document_identifier,
                                        folder_id, folder_name)
     if doc.get('status') != 'OK':
-        return _respond(doc, response_format)
+        return respond(doc, response_format)
 
     document = doc['document']
     pages = _normalise_kb_pages(doc['pages'])
@@ -1756,11 +1766,12 @@ async def list_knowledge_base_pages(
 
     logger.info(f"list_knowledge_base_pages: Returning {len(page)} of {len(pages)} page(s) for "
                 f"kb_id={document['kb_id']}")
-    return _respond(_paginated(page, total=len(pages), offset=start_at, **extras), response_format)
+    return respond(paginated(page, total=len(pages), offset=start_at, **extras), response_format)
 
 
 @mcp.tool(
     name="bugasura_create_knowledge_base_page",
+    title="Create Knowledge Base Page",
     description=(
         "Add a page to a Bugasura Knowledge Base page document. By default the page is added "
         "at the end of the document, at root level. Pass parent_page to nest it under an "
@@ -1781,8 +1792,8 @@ async def create_knowledge_base_page(
     after_page: Optional[str] = Field(default=None, description="Existing page to place the new page right after, as its sibling, by page name or page id. Cannot be combined with parent_page."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Add a page to a knowledge base page document.
@@ -1829,7 +1840,7 @@ async def create_knowledge_base_page(
         create_knowledge_base_page(document_identifier="Onboarding Spec", page_name="Step 1",
                                    parent_page="Rollout", content="# Step 1\\n\\nInvite the user.")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1948,6 +1959,7 @@ async def create_knowledge_base_page(
 
 @mcp.tool(
     name="bugasura_rename_knowledge_base_page",
+    title="Rename Knowledge Base Page",
     description=(
         "Rename a page in a Bugasura Knowledge Base page document. Identify the document by "
         "name or id, and the page by its current page name or its page id from "
@@ -1962,8 +1974,8 @@ async def rename_knowledge_base_page(
     new_name: str = Field(description="New name for the page. Trimmed to 250 characters; '<' and '>' are stripped upstream."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Rename a page of a knowledge base page document.
@@ -1997,7 +2009,7 @@ async def rename_knowledge_base_page(
         rename_knowledge_base_page(document_identifier="Onboarding Spec",
                                    page_identifier="Untitled Page", new_name="Overview")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2072,6 +2084,7 @@ async def rename_knowledge_base_page(
 
 @mcp.tool(
     name="bugasura_get_knowledge_base_page_content",
+    title="Get Knowledge Base Page Content",
     description=(
         "Read the current markdown body of a page in a Bugasura Knowledge Base page document. "
         "ALWAYS call this before changing a page the user wants edited rather than rewritten "
@@ -2088,8 +2101,8 @@ async def get_knowledge_base_page_content(
     page_identifier: str = Field(description="Page to read: its page name (matched exactly then partially) or its page id (e.g. 'page_20250104120500')"),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Read a knowledge base document page's markdown body.
@@ -2131,7 +2144,7 @@ async def get_knowledge_base_page_content(
         get_knowledge_base_page_content(document_identifier="Onboarding Spec",
                                         page_identifier="Overview")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2212,6 +2225,7 @@ async def get_knowledge_base_page_content(
 
 @mcp.tool(
     name="bugasura_update_knowledge_base_page_content",
+    title="Update Knowledge Base Page Content",
     description=(
         "Write the markdown body of a page in a Bugasura Knowledge Base page document. "
         "mode='replace' (the default) REPLACES the whole body and the previous content "
@@ -2234,8 +2248,8 @@ async def update_knowledge_base_page_content(
     mode: Literal["replace", "append", "prepend"] = Field(default="replace", description="'replace' overwrites the whole body (default); 'append' adds the text to the end of the current body; 'prepend' adds it to the start. Append/prepend read the current body first and separate the two halves with a blank line."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Write, extend or clear the markdown body of a knowledge base document page.
@@ -2290,7 +2304,7 @@ async def update_knowledge_base_page_content(
         update_knowledge_base_page_content(document_identifier="Onboarding Spec",
                                            page_identifier="Overview", content="")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2417,6 +2431,7 @@ async def update_knowledge_base_page_content(
 
 @mcp.tool(
     name="bugasura_duplicate_knowledge_base_page",
+    title="Duplicate Knowledge Base Page",
     description=(
         "Duplicate a page in a Bugasura Knowledge Base page document. The copy is placed "
         "right after the original as its sibling, named '<page name> (Copy)', and carries "
@@ -2432,8 +2447,8 @@ async def duplicate_knowledge_base_page(
     include_sub_pages: bool = Field(default=True, description="Copy the page's sub pages along with it (default: True). Set False to copy just the page itself."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Duplicate a page of a knowledge base page document.
@@ -2474,7 +2489,7 @@ async def duplicate_knowledge_base_page(
         duplicate_knowledge_base_page(document_identifier="Onboarding Spec",
                                       page_identifier="Rollout", include_sub_pages=False)
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2553,6 +2568,7 @@ async def duplicate_knowledge_base_page(
 
 @mcp.tool(
     name="bugasura_move_knowledge_base_page",
+    title="Move Knowledge Base Page",
     description=(
         "Move a page to a different place in a Bugasura Knowledge Base page document. Pass "
         "parent_page to nest it under another page, after_page to place it directly after a "
@@ -2571,8 +2587,8 @@ async def move_knowledge_base_page(
     to_root: bool = Field(default=False, description="Move the page to the top level of the document, at the end. Cannot be combined with parent_page or after_page (default: False)."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Re-parent or reorder a page of a knowledge base page document.
@@ -2622,7 +2638,7 @@ async def move_knowledge_base_page(
         move_knowledge_base_page(document_identifier="Onboarding Spec",
                                  page_identifier="Step 1", to_root=True)
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2763,6 +2779,7 @@ async def move_knowledge_base_page(
 
 @mcp.tool(
     name="bugasura_delete_knowledge_base_page",
+    title="Delete Knowledge Base Page",
     description=(
         "Delete a page from a Bugasura Knowledge Base page document, permanently. The "
         "page's content and everything the AI learned from it are removed, and a page that "
@@ -2779,8 +2796,8 @@ async def delete_knowledge_base_page(
     delete_sub_pages: bool = Field(default=False, description="Set True to delete a page that has sub pages — they are deleted with it. Leave False to have the tool refuse and report what is underneath (default: False)."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Delete a page, and its sub pages, from a knowledge base page document.
@@ -2822,7 +2839,7 @@ async def delete_knowledge_base_page(
         delete_knowledge_base_page(document_identifier="Onboarding Spec",
                                    page_identifier="Rollout", delete_sub_pages=True)
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2917,6 +2934,7 @@ async def delete_knowledge_base_page(
 
 @mcp.tool(
     name="bugasura_upload_knowledge_base_document",
+    title="Upload Knowledge Base Document",
     description=(
         "Upload a document (.txt/.pdf/.doc/.docx/.md) to a Bugasura project's Knowledge Base. "
         "Folders are handled automatically: pass folder_name to file the document in that folder — "
@@ -2935,13 +2953,13 @@ async def delete_knowledge_base_page(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def upload_knowledge_base_document(
-    file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (terminal/CLI use). Ask the user for the exact path — never construct or guess it. Multiple files are uploaded into the same folder."),
+    file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server). Ask the user for the exact path — never construct or guess it. Multiple files are uploaded into the same folder."),
     source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. IMPORTANT: a Google Drive link must be set to 'Anyone with the link'."),
     source_url_filename: Optional[str] = Field(default=None, description="Original filename with extension (e.g. 'PRD.pdf'). Optional — inferred from the URL path or the Content-Disposition header when omitted. Only pass it if auto-detection fails or the user names the file."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to add the document to. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Upload one or more documents to a project's knowledge base.
@@ -2989,6 +3007,9 @@ async def upload_knowledge_base_document(
     if context.get('status') != 'OK':
         return context
     api_key, team_id, project_id = context['api_key'], context['team_id'], context['project_id']
+
+    if file_paths and (rejected := local_path_rejected('file_paths')):
+        return rejected
 
     # Need exactly one content source.
     if not file_paths and not source_url:
@@ -3067,6 +3088,7 @@ async def upload_knowledge_base_document(
 
 @mcp.tool(
     name="bugasura_import_website_to_knowledge_base",
+    title="Import Website to Knowledge Base",
     description=(
         "Import a website into a Bugasura project's Knowledge Base — the Knowledge Base "
         "page's 'Import from Website' action. Bugasura crawls the URL and the pages linked "
@@ -3087,8 +3109,8 @@ async def import_website_to_knowledge_base(
     include_linked_pages: bool = Field(default=True, description="Follow links from the given page and import those too (default: True). Set False to import only the one page at website_url."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to import into. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Import a website into a project's knowledge base.
@@ -3220,6 +3242,7 @@ async def import_website_to_knowledge_base(
 
 @mcp.tool(
     name="bugasura_list_coda_docs",
+    title="List Coda Docs",
     description=(
         "List the Coda docs a Coda API key can see, so the user can pick which one to import "
         "into a Bugasura Knowledge Base. Ask the user for their Coda API key (Coda → account "
@@ -3255,14 +3278,14 @@ async def list_coda_docs(
     Examples:
         list_coda_docs(coda_api_key="abcd-1234")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     docs_response = await _fetch_coda_docs(api_key, coda_api_key)
     if docs_response.get('status') != 'OK':
-        return _respond(docs_response, response_format)
+        return respond(docs_response, response_format)
 
     docs = docs_response['docs']
     page = docs[start_at:start_at + max_results]
@@ -3273,12 +3296,13 @@ async def list_coda_docs(
                    "to the account holding the doc they want to import.")
 
     logger.info(f"list_coda_docs: Returning {len(page)} of {len(docs)} Coda doc(s)")
-    return _respond(_paginated(page, total=len(docs), offset=start_at, docs=page,
+    return respond(paginated(page, total=len(docs), offset=start_at, docs=page,
                                message=message), response_format)
 
 
 @mcp.tool(
     name="bugasura_list_coda_pages",
+    title="List Coda Pages",
     description=(
         "List the pages of one Coda doc, so the user can choose which pages to import into a "
         "Bugasura Knowledge Base. Pass the doc's URL, its id, or its name as shown by "
@@ -3318,18 +3342,18 @@ async def list_coda_pages(
         list_coda_pages(coda_api_key="abcd-1234",
                         coda_doc="https://coda.io/d/Product-Spec_dAbC123")
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     doc = await _resolve_coda_doc(api_key, coda_api_key, coda_doc)
     if doc.get('status') != 'OK':
-        return _respond(doc, response_format)
+        return respond(doc, response_format)
 
     pages_response = await _fetch_coda_pages(api_key, coda_api_key, doc['doc_id'])
     if pages_response.get('status') != 'OK':
-        return _respond(pages_response, response_format)
+        return respond(pages_response, response_format)
 
     pages = pages_response['pages']
     page = pages[start_at:start_at + max_results]
@@ -3340,13 +3364,14 @@ async def list_coda_pages(
 
     logger.info(f"list_coda_pages: Returning {len(page)} of {len(pages)} page(s) for Coda "
                 f"doc_id={doc['doc_id']}")
-    return _respond(_paginated(page, total=len(pages), offset=start_at, pages=page,
+    return respond(paginated(page, total=len(pages), offset=start_at, pages=page,
                                doc_id=doc['doc_id'], doc_name=doc['doc_name'],
                                message=message), response_format)
 
 
 @mcp.tool(
     name="bugasura_import_coda_to_knowledge_base",
+    title="Import Coda to Knowledge Base",
     description=(
         "Import a Coda doc into a Bugasura project's Knowledge Base — the Knowledge Base page's "
         "'Superhuman Import' action. Bugasura pulls the doc's pages in and turns them into "
@@ -3368,8 +3393,8 @@ async def import_coda_to_knowledge_base(
     page_identifiers: List[str] = Field(default=[], description="Pages to import, by page name or page id (see bugasura_list_coda_pages). Omit to import every page in the doc. A page whose parent is left out is re-filed under the nearest ancestor that was included."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to import into. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Import a Coda doc into a project's knowledge base.
@@ -3489,6 +3514,7 @@ async def import_coda_to_knowledge_base(
 
 @mcp.tool(
     name="bugasura_list_jira_projects",
+    title="List Jira Projects",
     description=(
         "List the Jira projects an account can see, so the user can pick which ones to import "
         "into a Bugasura Knowledge Base. Ask the user for their Jira site URL, the account "
@@ -3505,8 +3531,8 @@ async def list_jira_projects(
     deployment_type: Literal["CLOUD", "SERVER"] = Field(default="CLOUD", description="'CLOUD' for Jira Cloud (*.atlassian.net, API token), 'SERVER' for a self-hosted Jira/Data Center (password). Default: CLOUD."),
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=_KB_CONNECTOR_PAGE_SIZE, description=f"Number of projects to return (default: {_KB_CONNECTOR_PAGE_SIZE})", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -3534,17 +3560,17 @@ async def list_jira_projects(
                                        'bugasura_list_jira_projects', 'list_jira_projects',
                                        f', jira_url="{jira_url}", user_name="{user_name}"')
     if context.get('status') != 'OK':
-        return _respond(context, response_format)
+        return respond(context, response_format)
     api_key, team_id, project_id = context['api_key'], context['team_id'], context['project_id']
 
     invalid_url = _require_http_url(jira_url.strip(), 'jira_url', 'https://acme.atlassian.net')
     if invalid_url:
-        return _respond(invalid_url, response_format)
+        return respond(invalid_url, response_format)
 
     credentials = _jira_credentials(jira_url.strip(), user_name, api_token, deployment_type)
     projects_response = await _fetch_jira_projects(api_key, team_id, project_id, credentials)
     if projects_response.get('status') != 'OK':
-        return _respond(projects_response, response_format)
+        return respond(projects_response, response_format)
 
     projects = projects_response['projects']
     page = projects[start_at:start_at + max_results]
@@ -3555,12 +3581,13 @@ async def list_jira_projects(
                    f"that the account has access to at least one project.")
 
     logger.info(f"list_jira_projects: Returning {len(page)} of {len(projects)} Jira project(s)")
-    return _respond(_paginated(page, total=len(projects), offset=start_at, projects=page,
+    return respond(paginated(page, total=len(projects), offset=start_at, projects=page,
                                message=message), response_format)
 
 
 @mcp.tool(
     name="bugasura_list_jira_issues",
+    title="List Jira Issues",
     description=(
         "List (or search) the issues of one Jira project, so the user can pick individual issues "
         "to import into a Bugasura Knowledge Base. Same credentials as "
@@ -3581,8 +3608,8 @@ async def list_jira_issues(
     search_text: str = Field(default="", description="Filter issues whose summary or key matches this text. Omit to list the project's issues in order."),
     page_token: str = Field(default="", description="Continue from a previous call — pass the `next_page_token` it returned. Omit for the first page."),
     max_results: int = Field(default=_KB_CONNECTOR_PAGE_SIZE, description=f"Number of issues to return (default: {_KB_CONNECTOR_PAGE_SIZE})", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -3615,12 +3642,12 @@ async def list_jira_issues(
                                        'bugasura_list_jira_issues', 'list_jira_issues',
                                        f', jira_url="{jira_url}", project_key="{project_key}"')
     if context.get('status') != 'OK':
-        return _respond(context, response_format)
+        return respond(context, response_format)
     api_key, team_id, project_id = context['api_key'], context['team_id'], context['project_id']
 
     invalid_url = _require_http_url(jira_url.strip(), 'jira_url', 'https://acme.atlassian.net')
     if invalid_url:
-        return _respond(invalid_url, response_format)
+        return respond(invalid_url, response_format)
 
     credentials = _jira_credentials(jira_url.strip(), user_name, api_token, deployment_type)
     response = await make_api_request('POST', '/v1/testpert/searchToolsProjectIssues', api_key,
@@ -3640,7 +3667,7 @@ async def list_jira_issues(
     if response.get('status') != 'OK':
         logger.error(f"list_jira_issues: Failed to list issues of '{project_key}': "
                      f"{response.get('message')}")
-        return _respond(_fail('Failed to list Jira issues',
+        return respond(_fail('Failed to list Jira issues',
                               response.get('message', f"Jira did not return the issues of "
                                                       f"'{project_key}'."),
                               error_type='JiraFetchError'), response_format)
@@ -3659,19 +3686,20 @@ async def list_jira_issues(
     logger.info(f"list_jira_issues: Returning {len(issues)} issue(s) of '{project_key}'")
     # Jira pages with an opaque token, so the envelope describes this page only and the
     # continuation is `next_page_token` rather than `next_offset`. total=None keeps
-    # _paginated from computing a total it cannot know; has_more is overridden from Jira's
+    # paginated from computing a total it cannot know; has_more is overridden from Jira's
     # own is_last_page, so a caller reading the standard envelope still sees more pages.
-    envelope = _paginated(issues, total=None, offset=0,
+    envelope = paginated(issues, total=None, offset=0,
                           issues=issues, project_key=project_key,
                           project_issue_count=response.get('totalCount'),
                           next_page_token=next_page_token, is_last_page=is_last_page,
                           message=message)
     envelope['has_more'] = not is_last_page
-    return _respond(envelope, response_format)
+    return respond(envelope, response_format)
 
 
 @mcp.tool(
     name="bugasura_import_jira_to_knowledge_base",
+    title="Import Jira to Knowledge Base",
     description=(
         "Import Jira issues into a Bugasura project's Knowledge Base — the Knowledge Base page's "
         "'Jira Import' action. Bugasura pulls the selected projects' issues in and turns them "
@@ -3697,8 +3725,8 @@ async def import_jira_to_knowledge_base(
     document_identifier: Optional[str] = Field(default=None, description="Add the issues to this existing Knowledge Base document instead of creating a new one — its name or its kb_id (see bugasura_list_knowledge_base_documents). Only a page document accepts an import; an uploaded file does not."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to import into (or, with document_identifier, the folder to look the document up in). Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Import Jira issues into a project's knowledge base.
@@ -3847,6 +3875,7 @@ async def import_jira_to_knowledge_base(
 
 @mcp.tool(
     name="bugasura_list_confluence_spaces",
+    title="List Confluence Spaces",
     description=(
         "List the Confluence spaces an account can see, so the user can pick which ones to "
         "import into a Bugasura Knowledge Base. Ask the user for their Confluence site URL, the "
@@ -3862,8 +3891,8 @@ async def list_confluence_spaces(
     api_token: str = Field(default="", description="The Confluence API token. Ask the user — never guess or reuse one. Omit to use the project's saved Confluence integration."),
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=_KB_CONNECTOR_PAGE_SIZE, description=f"Number of spaces to return (default: {_KB_CONNECTOR_PAGE_SIZE})", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -3891,12 +3920,12 @@ async def list_confluence_spaces(
                                        'bugasura_list_confluence_spaces',
                                        'list_confluence_spaces')
     if context.get('status') != 'OK':
-        return _respond(context, response_format)
+        return respond(context, response_format)
     api_key, team_id, project_id = context['api_key'], context['team_id'], context['project_id']
 
     supplied = [value for value in (confluence_url, user_email, api_token) if value.strip()]
     if supplied and len(supplied) < 3:
-        return _respond(_fail('Incomplete Confluence credentials',
+        return respond(_fail('Incomplete Confluence credentials',
                               'Pass confluence_url, user_email and api_token together, or leave '
                               'all three out to use the project\'s saved Confluence '
                               'integration.'), response_format)
@@ -3905,7 +3934,7 @@ async def list_confluence_spaces(
                    if supplied else {})
     spaces_response = await _fetch_confluence_spaces(api_key, team_id, project_id, credentials)
     if spaces_response.get('status') != 'OK':
-        return _respond(spaces_response, response_format)
+        return respond(spaces_response, response_format)
 
     spaces = spaces_response['spaces']
     page = spaces[start_at:start_at + max_results]
@@ -3916,12 +3945,13 @@ async def list_confluence_spaces(
                    "that the account has access to at least one space.")
 
     logger.info(f"list_confluence_spaces: Returning {len(page)} of {len(spaces)} space(s)")
-    return _respond(_paginated(page, total=len(spaces), offset=start_at, spaces=page,
+    return respond(paginated(page, total=len(spaces), offset=start_at, spaces=page,
                                message=message), response_format)
 
 
 @mcp.tool(
     name="bugasura_list_confluence_pages",
+    title="List Confluence Pages",
     description=(
         "List the pages of one Confluence space, so the user can pick individual pages to import "
         "into a Bugasura Knowledge Base. Same credentials as bugasura_list_confluence_spaces. "
@@ -3937,8 +3967,8 @@ async def list_confluence_pages(
     api_token: str = Field(default="", description="The Confluence API token. Ask the user — never guess or reuse one. Omit to use the project's saved Confluence integration."),
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=_KB_CONNECTOR_PAGE_SIZE, description=f"Number of pages to return (default: {_KB_CONNECTOR_PAGE_SIZE})", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -3967,12 +3997,12 @@ async def list_confluence_pages(
                                        'bugasura_list_confluence_pages',
                                        'list_confluence_pages', f', space_key="{space_key}"')
     if context.get('status') != 'OK':
-        return _respond(context, response_format)
+        return respond(context, response_format)
     api_key, team_id, project_id = context['api_key'], context['team_id'], context['project_id']
 
     supplied = [value for value in (confluence_url, user_email, api_token) if value.strip()]
     if supplied and len(supplied) < 3:
-        return _respond(_fail('Incomplete Confluence credentials',
+        return respond(_fail('Incomplete Confluence credentials',
                               'Pass confluence_url, user_email and api_token together, or leave '
                               'all three out to use the project\'s saved Confluence '
                               'integration.'), response_format)
@@ -3982,7 +4012,7 @@ async def list_confluence_pages(
     pages_response = await _fetch_confluence_pages(api_key, team_id, project_id, credentials,
                                                    space_key)
     if pages_response.get('status') != 'OK':
-        return _respond(pages_response, response_format)
+        return respond(pages_response, response_format)
 
     pages = pages_response['pages']
     page = pages[start_at:start_at + max_results]
@@ -3993,12 +4023,13 @@ async def list_confluence_pages(
 
     logger.info(f"list_confluence_pages: Returning {len(page)} of {len(pages)} page(s) of "
                 f"space '{space_key}'")
-    return _respond(_paginated(page, total=len(pages), offset=start_at, pages=page,
+    return respond(paginated(page, total=len(pages), offset=start_at, pages=page,
                                space_key=space_key, message=message), response_format)
 
 
 @mcp.tool(
     name="bugasura_import_confluence_to_knowledge_base",
+    title="Import Confluence to Knowledge Base",
     description=(
         "Import Confluence pages into a Bugasura project's Knowledge Base — the Knowledge Base "
         "page's 'Confluence Import' action. Bugasura pulls the selected spaces in and turns them "
@@ -4022,8 +4053,8 @@ async def import_confluence_to_knowledge_base(
     document_identifier: Optional[str] = Field(default=None, description="Add the pages to this existing Knowledge Base document instead of creating a new one — its name or its kb_id (see bugasura_list_knowledge_base_documents). Only a page document accepts an import; an uploaded file does not."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to import into (or, with document_identifier, the folder to look the document up in). Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Import Confluence pages into a project's knowledge base.
@@ -4177,6 +4208,7 @@ async def import_confluence_to_knowledge_base(
 
 @mcp.tool(
     name="bugasura_import_figma_to_knowledge_base",
+    title="Import Figma to Knowledge Base",
     description=(
         "Import Figma frames into a Bugasura project's Knowledge Base — the Knowledge Base "
         "page's 'Figma Import' action. Each frame is rendered to an image and stored as design "
@@ -4197,8 +4229,8 @@ async def import_figma_to_knowledge_base(
     replace_existing: bool = Field(default=False, description="Remove the project's existing Figma frames instead of keeping them (default: False). Only set True when the user explicitly asks to replace what is already imported — this deletes those knowledge base entries."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to import into. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Import Figma frames into a project's knowledge base.
@@ -4351,6 +4383,7 @@ async def import_figma_to_knowledge_base(
 
 @mcp.tool(
     name="bugasura_import_file_to_knowledge_base_document",
+    title="Import File to Knowledge Base Document",
     description=(
         "Import a Markdown, CSV or Excel file into an existing Bugasura Knowledge Base document "
         "— the document editor's 'Import' menu. "
@@ -4368,14 +4401,14 @@ async def import_figma_to_knowledge_base(
 )
 async def import_file_to_knowledge_base_document(
     document_identifier: str = Field(description="The Knowledge Base document to import into — its name or its kb_id (see bugasura_list_knowledge_base_documents). Must be a page document; an uploaded file has no pages to import into."),
-    file_path: Optional[str] = Field(default=None, description="Absolute path on the MCP server's local filesystem (terminal/CLI use). Ask the user for the exact path — never construct or guess it. Must be a .md, .csv, .xlsx or .xls file."),
+    file_path: Optional[str] = Field(default=None, description="Absolute path on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server). Ask the user for the exact path — never construct or guess it. Must be a .md, .csv, .xlsx or .xls file."),
     source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. IMPORTANT: a Google Drive link must be set to 'Anyone with the link'."),
     source_url_filename: Optional[str] = Field(default=None, description="Original filename with extension (e.g. 'metrics.csv'). Optional — inferred from the URL path when omitted. Only pass it if auto-detection fails or the user names the file."),
     page_identifier: Optional[str] = Field(default=None, description="For a CSV/Excel import, the page to append the table to — its name or its page id (see bugasura_list_knowledge_base_pages). Omit to use the document's first page. Ignored for a Markdown import, which always creates its own page."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder the document lives in. Only needed when the same document name exists in more than one folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Import a Markdown, CSV or Excel file into an existing knowledge base page document.
@@ -4432,6 +4465,9 @@ async def import_file_to_knowledge_base_document(
         return context
     api_key, team_id, project_id = context['api_key'], context['team_id'], context['project_id']
 
+    if file_path and (rejected := local_path_rejected('file_path')):
+        return rejected
+
     # Need exactly one content source.
     if not file_path and not source_url:
         return _fail('No file provided',
@@ -4481,6 +4517,7 @@ async def import_file_to_knowledge_base_document(
         return response
 
     pages = _pages_from_update_response(response, kb_id)
+    response.pop('knowledgeBaseDetails', None)
     response['kb_id'] = kb_id
     response['doc_name'] = target['doc_name']
     response['import_type'] = import_type
@@ -4860,7 +4897,7 @@ def _normalise_kb_document(raw: dict, folder_names: dict,
     return document
 
 
-async def _fetch_kb_documents(api_key: str, team_id: int, project_id: int,
+async def fetch_kb_documents(api_key: str, team_id: int, project_id: int,
                               folder_id: Optional[int] = None,
                               starred_only: bool = False,
                               include_connection_details: bool = False) -> dict:
@@ -4880,7 +4917,7 @@ async def _fetch_kb_documents(api_key: str, team_id: int, project_id: int,
     })
 
     if response.get('status') != 'OK':
-        logger.error(f"_fetch_kb_documents: Failed to fetch KB documents for project_id={project_id}, "
+        logger.error(f"fetch_kb_documents: Failed to fetch KB documents for project_id={project_id}, "
                      f"folder_id={folder_id}: {response.get('message')}")
         return {
             'status': 'failed',
@@ -4894,7 +4931,7 @@ async def _fetch_kb_documents(api_key: str, team_id: int, project_id: int,
     documents = [_normalise_kb_document(doc, folder_names, include_connection_details)
                  for doc in response.get('kbDocsDetails') or []]
 
-    logger.info(f"_fetch_kb_documents: Found {len(documents)} document(s) for project_id={project_id}, "
+    logger.info(f"fetch_kb_documents: Found {len(documents)} document(s) for project_id={project_id}, "
                 f"folder_id={folder_id or 'ALL'}")
     return {'status': 'OK', 'documents': documents, 'folders': folders}
 
@@ -4924,7 +4961,7 @@ async def _find_kb_document(api_key: str, team_id: int, project_id: int,
             'message': 'Provide the document id or its file name (e.g. "PRD.pdf").'
         }
 
-    documents_response = await _fetch_kb_documents(api_key, team_id, project_id, folder_id,
+    documents_response = await fetch_kb_documents(api_key, team_id, project_id, folder_id,
                                                    include_connection_details=include_connection_details)
     if documents_response.get('status') != 'OK':
         return documents_response
@@ -5214,7 +5251,7 @@ def _read_kb_page_content(page: dict) -> dict:
         }
 
     try:
-        raw, exceeded = _fetch_url_bytes(content_url, _KB_MAX_PAGE_CONTENT_BYTES)
+        raw, exceeded = fetch_url_bytes(content_url, _KB_MAX_PAGE_CONTENT_BYTES)
     except Exception as e:
         logger.error(f"_read_kb_page_content: Could not fetch '{content_url}': {e}")
         return {
@@ -5470,7 +5507,7 @@ async def _connector_context(team_id: Optional[int], project_id: Optional[int],
         dict: {'status': 'OK', 'api_key': str, 'team_id': int, 'project_id': int}, or the
         selection prompt / failure envelope to hand straight back to the caller.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -5531,7 +5568,8 @@ async def _submit_kb_import(api_key: str, team_id: int, project_id: int, kb_type
     response['folder_id'] = folder['folder_id']
     response['folder_name'] = folder['folder_name']
     response['folder_created'] = folder.get('created', False)
-    return response
+    # Jira/Confluence adds echo the stored credentials inside kbDocDetails.
+    return redact_secrets(response)
 
 
 async def _submit_doc_page_import(api_key: str, team_id: int, project_id: int, kb_id: Any,
@@ -5567,8 +5605,10 @@ async def _submit_doc_page_import(api_key: str, team_id: int, project_id: int, k
     if page_content is not None:
         data['pageContent'] = page_content
 
-    return await make_api_request('POST', '/v1/knowledgebase/importDocPages', api_key,
-                                  data=data, files=files)
+    response = await make_api_request('POST', '/v1/knowledgebase/importDocPages', api_key,
+                                      data=data, files=files)
+    # knowledgeBaseDetails is the raw row, whose connection_details holds Jira/Confluence secrets.
+    return redact_secrets(response)
 
 
 async def _resolve_import_target_page(api_key: str, team_id: int, project_id: int,
@@ -6050,7 +6090,7 @@ async def _figma_api_get(path: str, figma_api_key: str) -> dict:
         dict: {'status': 'OK', 'data': {...}} or a failure envelope.
     """
     try:
-        response = await _get_http_client().get(f"{_KB_FIGMA_API_BASE}{path}",
+        response = await get_http_client().get(f"{_KB_FIGMA_API_BASE}{path}",
                                                 headers={'X-FIGMA-TOKEN': figma_api_key})
     except httpx.HTTPError as e:
         logger.error(f"_figma_api_get: Request to '{path}' failed: {e}")
@@ -6217,7 +6257,7 @@ def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
 
     try:
         if source_url and not file_paths:
-            download_url = _normalise_share_url(source_url)
+            download_url = normalise_share_url(source_url)
 
             if source_url_filename:
                 # User supplied the filename — validate the extension before downloading.
@@ -6229,8 +6269,8 @@ def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
             else:
                 # Try the URL path first (cheap, no network); fall back to the
                 # Content-Disposition header of the download response.
-                path_name = (_infer_filename_from_url_path(download_url)
-                             or _infer_filename_from_url_path(source_url))
+                path_name = (infer_filename_from_url_path(download_url)
+                             or infer_filename_from_url_path(source_url))
                 inferred_ext = os.path.splitext(path_name)[1].lstrip('.').lower() if path_name else ''
                 if inferred_ext in _KB_DOC_EXTS:
                     safe_name = os.path.basename(path_name)
@@ -6240,7 +6280,7 @@ def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
                     download_suffix = '.tmp'
 
             try:
-                tmp_path, content_disposition_name = _download_url_tmp(
+                tmp_path, content_disposition_name = download_url_tmp(
                     download_url, download_suffix,
                     max_bytes=_KB_MAX_FILE_SIZE_MB * 1024 * 1024)
             except Exception as e:
@@ -6346,10 +6386,10 @@ def _collect_doc_import_file(file_path: Optional[str], source_url: Optional[str]
     tmp_path = None
     try:
         if source_url:
-            download_url = _normalise_share_url(source_url)
+            download_url = normalise_share_url(source_url)
             path_name = (source_url_filename
-                         or _infer_filename_from_url_path(download_url)
-                         or _infer_filename_from_url_path(source_url))
+                         or infer_filename_from_url_path(download_url)
+                         or infer_filename_from_url_path(source_url))
             display_name = os.path.basename(path_name) if path_name else ''
             extension = os.path.splitext(display_name)[1].lstrip('.').lower()
             if extension not in _KB_DOC_IMPORT_TYPES:
@@ -6359,7 +6399,7 @@ def _collect_doc_import_file(file_path: Optional[str], source_url: Optional[str]
                              f"Pass source_url_filename with the original filename and extension.")
 
             try:
-                tmp_path, _ = _download_url_tmp(
+                tmp_path, _ = download_url_tmp(
                     download_url, f'.{extension}',
                     max_bytes=_KB_DOC_IMPORT_MAX_FILE_SIZE_MB * 1024 * 1024)
             except Exception as e:

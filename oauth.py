@@ -1,22 +1,19 @@
 """OAuth 2.0 front door: FastMCP's OAuthProxy in front of Bugasura's authorization server.
 
 MCP clients (Claude Desktop, claude.ai, Claude Code, Cursor, VS Code, Antigravity, ChatGPT/Codex,
-Inspector) register themselves with this server via Dynamic Client Registration and run PKCE
-against it. The proxy holds Bugasura's single pre-registered client and does the upstream code
-exchange at ``<MCP_PUBLIC_BASE_URL>/auth/callback``. Bugasura's own token is never handed to the
+Inspector) register themselves with this server via Dynamic Client Registration or a Client ID
+Metadata Document (CIMD) and run PKCE against it. The proxy holds Bugasura's single pre-registered
+client and does the upstream code exchange at ``<MCP_PUBLIC_BASE_URL>/auth/callback``. Bugasura's own token is never handed to the
 MCP client; the proxy issues its own JWT and swaps it for the upstream token on every request.
 """
 import hashlib
 import time
 from typing import Any, Optional
 
-from urllib.parse import urlencode
-
 import httpx
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from fastmcp.server.auth import AccessToken, OAuthProxy, TokenVerifier
-from fastmcp.server.auth.redirect_validation import validate_redirect_uri
 from mcp.server.auth.provider import RegistrationError
 from mcp.shared.auth import OAuthClientInformationFull
 
@@ -24,38 +21,12 @@ from client import ACCESS_TOKEN_PREFIX
 from config import (
     BUGASURA_OAUTH_AUTHORIZE_URL, BUGASURA_OAUTH_CLIENT_ID, BUGASURA_OAUTH_CLIENT_SECRET,
     BUGASURA_OAUTH_INTROSPECT_URL, BUGASURA_OAUTH_REVOKE_URL, BUGASURA_OAUTH_TOKEN_URL,
-    MCP_JWT_SIGNING_KEY, MCP_PUBLIC_BASE_URL, OAUTH_ALLOWED_REDIRECT_URIS,
-    OAUTH_INTROSPECTION_CACHE_TTL, OAUTH_REQUIRE_CONSENT, OAUTH_STORAGE_PATH, WEB_BASE_URL,
+    DEFAULT_ALLOWED_REDIRECT_URIS, MCP_JWT_SIGNING_KEY, MCP_PUBLIC_BASE_URL,
+    OAUTH_ALLOWED_REDIRECT_URIS, OAUTH_FALLBACK_TOKEN_EXPIRY_SECONDS,
+    OAUTH_INTROSPECTION_CACHE_MAX_ENTRIES, OAUTH_INTROSPECTION_CACHE_TTL,
+    OAUTH_INTROSPECTION_TIMEOUT_SECONDS, OAUTH_REQUIRE_CONSENT, OAUTH_STORAGE_PATH, WEB_BASE_URL,
     logger, oauth_configured,
 )
-
-
-# Redirect URIs MCP clients may register via DCR (fnmatch patterns; '*' also matches '/').
-# FastMCP's consent screen is the real guard against a rogue client; this list is belt and braces.
-DEFAULT_ALLOWED_REDIRECT_URIS = [
-    # Loopback: Claude Code, Cline, Roo Code, MCP Inspector, fastmcp Client and Cursor CLI take a
-    # random port; VS Code registers "http://127.0.0.1/" and picks the port at authorize time (RFC 8252).
-    "http://localhost:*",
-    "http://localhost/*",
-    "http://127.0.0.1:*",
-    "http://127.0.0.1/*",
-    # Claude Desktop / claude.ai custom connectors
-    "https://claude.ai/api/mcp/auth_callback",
-    "https://claude.com/api/mcp/auth_callback",
-    # VS Code (Copilot) stable and Insiders, browser and app-scheme callbacks; Cline and Roo Code run
-    # inside VS Code and use its vscode:// scheme
-    "https://vscode.dev/redirect",
-    "https://insiders.vscode.dev/redirect",
-    "vscode://*",
-    "vscode-insiders://*",
-    # Cursor and Windsurf desktop apps (app-scheme callbacks)
-    "cursor://*",
-    "windsurf://*",
-    # Google Antigravity
-    "https://antigravity.google/oauth-callback",
-    # ChatGPT connectors (also what Codex registers through); the last segment is a per-connector ID
-    "https://chatgpt.com/connector/oauth/*",
-]
 
 
 class BugasuraTokenVerifier(TokenVerifier):
@@ -68,8 +39,11 @@ class BugasuraTokenVerifier(TokenVerifier):
     """
 
     def __init__(self, *, introspection_url: str, client_id: str, client_secret: str,
-                 cache_ttl: int = 60, timeout: float = 10.0):
-        super().__init__(base_url=MCP_PUBLIC_BASE_URL)
+                 cache_ttl: int = OAUTH_INTROSPECTION_CACHE_TTL,
+                 timeout: float = OAUTH_INTROSPECTION_TIMEOUT_SECONDS):
+        # Every Bugasura token carries `api`; requiring it makes FastMCP challenge with scope="api"
+        # on 401 and answer a token without it with 403 insufficient_scope.
+        super().__init__(base_url=MCP_PUBLIC_BASE_URL, required_scopes=["api"])
         self._url = introspection_url
         self._client_id = client_id
         self._client_secret = client_secret
@@ -135,79 +109,42 @@ class BugasuraTokenVerifier(TokenVerifier):
         )
         ttl = self._ttl if exp is None else min(self._ttl, max(0, exp - int(time.time())))
         self._cache[key] = (now + ttl, access)
-        if len(self._cache) > 5000:
+        if len(self._cache) > OAUTH_INTROSPECTION_CACHE_MAX_ENTRIES:
             self._cache = {k: v for k, v in self._cache.items() if v[0] > now}
         return access
 
 
 class BugasuraOAuthProxy(OAuthProxy):
     """
-    OAuthProxy that enforces the redirect-URI allow-list at registration.
-
-    FastMCP 2.14 treats `allowed_client_redirect_uris` as a soft check: a callback that
-    misses every pattern still passes because the client registered it for itself. With
-    the consent interstitial off, that would let a rogue client register its own callback
-    and receive a user's Bugasura session. Rejecting such registrations up front closes it.
-
-    It also gives clients that register without a `scope` (ChatGPT, Antigravity) the server's
-    valid scopes. FastMCP otherwise stores them with an empty scope, and their authorize request
-    for `scope=api` then fails with invalid_scope.
+    OAuthProxy with two Bugasura touches. FastMCP 4 already enforces the redirect-URI
+    allow-list, fills a default scope and forwards upstream errors to the client.
     """
 
-    def _default_client_scope(self) -> str:
-        return " ".join(self.client_registration_options.valid_scopes or [])
-
-    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        client = await super().get_client(client_id)
-        # Clients stored before the default above existed still have an empty scope
-        if client is not None and not client.scope:
-            client.scope = self._default_client_scope()
-        return client
-
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        if not client_info.scope:
-            client_info.scope = self._default_client_scope()
-        patterns = self._allowed_client_redirect_uris
-        for uri in client_info.redirect_uris or []:
-            if not validate_redirect_uri(uri, patterns):
-                logger.warning(f"Rejected client registration with redirect_uri {uri} "
-                               f"(client_name={getattr(client_info, 'client_name', None)!r})")
-                raise RegistrationError(
-                    error="invalid_redirect_uri",
-                    error_description=(f"redirect_uri {uri} is not allowed by this server. "
-                                       "Set OAUTH_ALLOWED_REDIRECT_URIS on the server to permit it."),
-                )
-        await super().register_client(client_info)
+        # Log rejected callbacks so a new MCP client's URI can be added to the allow-list
+        try:
+            await super().register_client(client_info)
+        except RegistrationError:
+            logger.warning(f"Rejected client registration with redirect_uris {client_info.redirect_uris} "
+                           f"(client_name={getattr(client_info, 'client_name', None)!r})")
+            raise
 
     async def _handle_idp_callback(self, request: Request) -> HTMLResponse | RedirectResponse:
         """
-        When Bugasura answers with an OAuth error (the user clicked Deny, or the request was
-        rejected), pass it to the MCP client on its own redirect URI with its original state,
-        as RFC 6749 §4.1.2.1 requires; the client then shows its own "declined" state. FastMCP
-        would otherwise stop here and render a generic page. Successful callbacks are unchanged.
-        A callback whose transaction is unknown (expired or replayed) has no client to return
-        to, so the browser is sent to the Bugasura web app's error page.
+        An upstream error whose transaction is unknown (expired or replayed) has no client to
+        return to, so send the browser to the Bugasura web app's error page instead of
+        FastMCP's generic one. Everything else, including forwarding errors to a known
+        client with its state and `iss`, is FastMCP's own handling.
         """
         error = request.query_params.get("error")
-        if not error:
-            return await super()._handle_idp_callback(request)
-
-        description = request.query_params.get("error_description") or ""
         txn_id = request.query_params.get("state") or ""
-        transaction = await self._transaction_store.get(key=txn_id) if txn_id else None
-        logger.info(f"Upstream OAuth error forwarded to client: {error} ({description or 'no description'})")
-
-        if transaction is None:
+        if error and (not txn_id or await self._transaction_store.get(key=txn_id) is None):
+            logger.info(f"Upstream OAuth error with unknown transaction: {error}")
             return RedirectResponse(url=f"{WEB_BASE_URL}oauth/error", status_code=302)
-
-        await self._transaction_store.delete(key=txn_id)
-        params = {"error": error}
-        if description:
-            params["error_description"] = description
-        if transaction.client_state:
-            params["state"] = transaction.client_state
-        separator = "&" if "?" in transaction.client_redirect_uri else "?"
-        return RedirectResponse(url=f"{transaction.client_redirect_uri}{separator}{urlencode(params)}", status_code=302)
+        if error:
+            logger.info(f"Upstream OAuth error forwarded to client: {error} "
+                        f"({request.query_params.get('error_description') or 'no description'})")
+        return await super()._handle_idp_callback(request)
 
 
 def _build_client_storage():
@@ -218,17 +155,30 @@ def _build_client_storage():
                        "MCP client must sign in again after a restart")
         return MemoryStore()
 
+    from pathlib import Path
+
     from cryptography.fernet import Fernet
     from fastmcp.server.auth.jwt_issuer import derive_jwt_key
-    from key_value.aio.stores.disk import DiskStore
+    from key_value.aio.stores.filetree import (
+        FileTreeStore, FileTreeV1CollectionSanitizationStrategy, FileTreeV1KeySanitizationStrategy,
+    )
     from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
     # OAuthProxy only encrypts the store it creates itself, so wrap ours explicitly.
     material = MCP_JWT_SIGNING_KEY or BUGASURA_OAUTH_CLIENT_SECRET
     fernet_key = derive_jwt_key(high_entropy_material=material,
                                 salt="bugasura-mcp-oauth-storage-encryption")
-    return FernetEncryptionWrapper(key_value=DiskStore(directory=OAUTH_STORAGE_PATH),
-                                   fernet=Fernet(fernet_key))
+    # One JSON file per entry (FastMCP's own default); replaces the pickle-based DiskStore (CVE-2025-69872)
+    storage_dir = Path(OAUTH_STORAGE_PATH)
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    file_store = FileTreeStore(
+        data_directory=storage_dir,
+        key_sanitization_strategy=FileTreeV1KeySanitizationStrategy(storage_dir),
+        collection_sanitization_strategy=FileTreeV1CollectionSanitizationStrategy(storage_dir),
+    )
+    # An entry that no longer decrypts (key changed) reads as missing, so that client signs in again
+    return FernetEncryptionWrapper(key_value=file_store, fernet=Fernet(fernet_key),
+                                   raise_on_decryption_error=False)
 
 
 def build_auth_provider() -> Optional[OAuthProxy]:
@@ -255,6 +205,8 @@ def build_auth_provider() -> Optional[OAuthProxy]:
         upstream_client_secret=BUGASURA_OAUTH_CLIENT_SECRET,
         token_verifier=verifier,
         base_url=MCP_PUBLIC_BASE_URL,
+        # Pinned so the metadata issuer and the RFC 9207 `iss` on redirects are the same string
+        issuer_url=MCP_PUBLIC_BASE_URL,
         redirect_path="/auth/callback",
         allowed_client_redirect_uris=allowed,
         valid_scopes=["api"],
@@ -262,10 +214,10 @@ def build_auth_provider() -> Optional[OAuthProxy]:
         token_endpoint_auth_method="client_secret_post",
         client_storage=_build_client_storage(),
         jwt_signing_key=MCP_JWT_SIGNING_KEY or None,
-        # Off by default so users only see Bugasura's own login + consent. The redirect-URI
+        # Off by default ("external"): users only see Bugasura's own login + consent. The redirect-URI
         # allow-list above is then the only check on which MCP client receives the session.
-        require_authorization_consent=OAUTH_REQUIRE_CONSENT,
-        fallback_access_token_expiry_seconds=3600,
+        require_authorization_consent=True if OAUTH_REQUIRE_CONSENT else "external",
+        fallback_access_token_expiry_seconds=OAUTH_FALLBACK_TOKEN_EXPIRY_SECONDS,
     )
     logger.info(f"OAuth sign-in enabled: issuer={MCP_PUBLIC_BASE_URL} "
                 f"authorize={BUGASURA_OAUTH_AUTHORIZE_URL} token={BUGASURA_OAUTH_TOKEN_URL}")

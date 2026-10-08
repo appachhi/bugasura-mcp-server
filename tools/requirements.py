@@ -1,28 +1,19 @@
 """Bugasura MCP tools: requirements."""
-from typing import Any, List, Literal, Optional
+from typing import Literal, Optional
 
 from fastmcp import Context
 from pydantic import Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import _fetch_user_context, _get_api_key, _invalidate_user_context_cache, validate_api_key
-from client import (
-    _paginate_upstream, _paginated, _prepare_post_params, _render_markdown,
-    _respond, _validate_id, logger, make_api_request,
-)
-from helpers import (
-    _fetch_team_members, _find_user_ids_by_names_or_emails,
-    _resolve_issue_identifier_to_id, _resolve_team_identifier,
-    filter_large_fields, select_team_project_context,
-)
-
-import json
-import requests  # for except blocks referencing requests.RequestException
+from auth import get_api_key, validate_api_key
+from client import paginate_upstream, paginated, respond, logger, make_api_request
+from helpers import find_user_ids_by_names_or_emails, filter_large_fields, select_team_project_context
 
 
 @mcp.tool(
     name="bugasura_list_requirements",
+    title="List Requirements",
     description=(
         "List requirements for a project with pagination and filtering. Returns requirement summaries "
         "with support for folders, sprints, sorting, and search. Interactive team/project selection "
@@ -33,8 +24,8 @@ import requests  # for except blocks referencing requests.RequestException
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_requirements(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier for filtering requirements", ge=1),
     folder_id: str = Field(default="", description="Folder identifier (empty string fetches all root requirements)"),
     sort_by: str = Field(default="", description="Sort order for requirements"),
@@ -45,8 +36,8 @@ async def list_requirements(
     report_id: str = Field(default="", description="Report identifier for filtering"),
     req_type: str = Field(default="", description="Requirement type filter"),
     status: str = Field(default="", description="Requirement status filter"),
-    start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)"),
-    max_results: int = Field(default=10, description="Number of results to return (default: 10, ge=1, le=100)"),
+    start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)", ge=0),
+    max_results: int = Field(default=10, description="Number of results to return (default: 10, ge=1, le=100)", ge=1, le=100),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
@@ -91,21 +82,21 @@ async def list_requirements(
         OR a selection prompt if team_id/project_id not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get("valid"):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Use centralized context selection helper
     context = await select_team_project_context(api_key, team_id, project_id, "list_requirements")
 
     # If context selection is needed, return the selection prompt
     if "status" in context and context["status"] == "selection_required":
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # If context selection failed, return the error
     if "status" in context and context["status"] == "failed":
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # All required parameters provided - proceed with listing requirements
     # Construct request params mapped to API endpoint expectations
@@ -151,18 +142,19 @@ async def list_requirements(
                 requirement['id'] = f"REQ{requirement['id']}"
 
     # Name the list explicitly: requirementsList is a dict, so the first list picked was the priorities.
-    return _respond(_paginate_upstream(response, items_key='requirementsList', offset=start_at),
+    return respond(paginate_upstream(response, items_key='requirementsList', offset=start_at, max_results=max_results),
                     response_format)
 
 
 @mcp.tool(
     name="bugasura_list_requirement_folders",
+    title="List Requirement Folders",
     description="List all requirement folders for a project with hierarchical structure. Use this to view available folders before creating requirements or to check if a folder name already exists.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_requirement_folders(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     parent_folder_id: Optional[int] = Field(default=None, description="Filter by parent folder ID (optional - omit to get all folders)"),
     include_hierarchy: bool = Field(default=True, description="Include full folder hierarchy (default: True)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
@@ -219,16 +211,16 @@ async def list_requirement_folders(
         list_requirement_folders(api_key)
     """
     # Validate API key
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Use centralized context selection
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_list_requirement_folders')
 
     if context.get('status') == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # Extract validated IDs
     team_id = context['team_id']
@@ -247,11 +239,11 @@ async def list_requirement_folders(
     }
 
     # Make API request to get folders
-    response = await make_api_request('GET', '/v1/testRepo/get', api_key, params=params)
+    response = await make_api_request('GET', '/v1/projectFolders/get', api_key, params=params)
 
     if response.get('status') != 'OK':
         logger.error(f"list_requirement_folders: Failed to fetch folders: {response.get('message')}")
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': 'Failed to fetch requirement folders',
             'message': response.get('message', 'Could not retrieve folder list')
@@ -295,20 +287,21 @@ async def list_requirement_folders(
     else:
         message = f"Retrieved {len(folders_list)} requirement folders"
 
-    return _respond(_paginated(folders_list, total=len(folders_list), offset=0,
+    return respond(paginated(folders_list, total=len(folders_list), offset=0,
                       folders=folders_list,
                       project_id=project_id, team_id=team_id, message=message), response_format)
 
 
 @mcp.tool(
     name="bugasura_create_requirement",
+    title="Create Requirement",
     description="Create a new requirement in Bugasura with automatic folder management. If no folder exists for requirements, creates a default folder first. Supports smart assignee resolution and interactive team/project selection.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_requirement(
     title: str = Field(description="Requirement title"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     app_id: Optional[int] = Field(default=None, description="Application identifier"),
     details: str = Field(default="", description="Detailed description of the requirement"),
     overview: str = Field(default="", description="Brief overview of the requirement"),
@@ -320,7 +313,7 @@ async def create_requirement(
     folder_name: str = Field(default="Requirements", description="Folder name to use/create if folder_id not provided (default: 'Requirements')"),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier", ge=1),
     type: str = Field(default="EPIC", description="Requirement type (e.g., EPIC, STORY, TASK)"),
-    status: str = Field(default="NEW", description="Requirement status (e.g., NEW, IN_PROGRESS, COMPLETED)"),
+    status: str = Field(default="NEW", description="Requirement status: one of the project's requirement statuses, e.g. 'New', 'In Progress', 'Completed' (case-insensitive; underscores read as spaces). Unknown values fall back to the project's first status."),
     parent_id: Optional[int] = Field(default=None, description="Parent requirement ID for hierarchical structure"),
     tags: str = Field(default="", description="Comma-separated tags for categorization"),
     isQuickAdd: int = Field(default=0, description="Quick add flag (0 or 1)"),
@@ -353,7 +346,7 @@ async def create_requirement(
         folder_name: Name for new folder if creation needed (default: 'Requirements')
         sprint_id: Optional sprint ID (0 if not assigned)
         type: EPIC/STORY/TASK/BUG (default EPIC)
-        status: NEW/IN_PROGRESS/COMPLETED/BLOCKED (default NEW)
+        status: One of the project's requirement statuses, e.g. New / In Progress (default NEW)
         parent_id: Parent requirement ID for sub-requirements
         tags: Comma-separated tags
         isQuickAdd: 0 or 1 (default 0)
@@ -412,7 +405,7 @@ async def create_requirement(
     logger.info(f"create_requirement: Starting for title='{title}'")
 
     # Validate API key
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         logger.error(f"create_requirement: API key validation failed")
@@ -472,10 +465,10 @@ async def create_requirement(
             'folderType': 'REQUIREMENTS'
         }
 
-        logger.debug(f"create_requirement: Calling testRepo/get with params: {folder_check_params}")
+        logger.debug(f"create_requirement: Calling projectFolders/get with params: {folder_check_params}")
         folder_check_response = await make_api_request(
             'GET',
-            '/v1/testRepo/get',
+            '/v1/projectFolders/get',
             api_key,
             params=folder_check_params
         )
@@ -502,10 +495,10 @@ async def create_requirement(
                     'folderType': 'REQUIREMENTS'
                 }
 
-                logger.debug(f"create_requirement: Calling testRepo/add with payload: {create_folder_payload}")
+                logger.debug(f"create_requirement: Calling projectFolders/add with payload: {create_folder_payload}")
                 create_folder_response = await make_api_request(
                     'POST',
-                    '/v1/testRepo/add',
+                    '/v1/projectFolders/add',
                     api_key,
                     data=create_folder_payload
                 )
@@ -551,7 +544,7 @@ async def create_requirement(
         logger.info(f"create_requirement: Resolving assignees '{assignees}' for team_id={team_id}")
 
         try:
-            resolution = await _find_user_ids_by_names_or_emails(api_key, team_id, assignees)
+            resolution = await find_user_ids_by_names_or_emails(api_key, team_id, assignees)
 
             if resolution["status"] != "OK":
                 logger.error(f"create_requirement: Failed to resolve assignees: {resolution.get('error')}")
@@ -561,7 +554,7 @@ async def create_requirement(
             user_ids_list = resolution["user_ids"].split(',')
             assignee_ids_str = ",".join(user_ids_list)
             logger.info(f"create_requirement: Resolved to user IDs: {assignee_ids_str}")
-        except (KeyError, AttributeError, TypeError, ValueError, requests.RequestException) as e:
+        except (KeyError, AttributeError, TypeError, ValueError) as e:
             logger.error(f"create_requirement: Exception while resolving assignees: {str(e)}")
             return {
                 'status': 'failed',
@@ -595,16 +588,9 @@ async def create_requirement(
             'message': f'Type must be one of: {", ".join(allowed_types)}'
         }
 
-    # Validate status
-    status = status.upper()
-    allowed_status = ['NEW', 'IN_PROGRESS', 'COMPLETED', 'BLOCKED']
-    if status not in allowed_status:
-        logger.error(f"create_requirement: Invalid status: {status}")
-        return {
-            'status': 'failed',
-            'error': f'Invalid status: {status}',
-            'message': f'Status must be one of: {", ".join(allowed_status)}'
-        }
+    # Statuses are per project ("In Progress"); the API matches names case-insensitively and
+    # falls back to the project's first status on no match.
+    status = _normalise_requirement_status(status)
 
     # Validate source - database allowed values
     source = source.upper()
@@ -671,13 +657,14 @@ async def create_requirement(
 
 @mcp.tool(
     name="bugasura_get_requirement_details",
+    title="Get Requirement Details",
     description="Get specific requirement details by ID. Returns full requirement data, parent details, and priority list. Interactive team/project selection available.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_requirement_details(
     requirement_id: int = Field(description="Requirement numeric ID"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -700,10 +687,10 @@ async def get_requirement_details(
               - standardPriorityList: Priority settings for the project
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Use centralized context selection helper
     context = await select_team_project_context(
@@ -716,7 +703,7 @@ async def get_requirement_details(
 
     # If context selection is needed, return the selection prompt
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # GET request - build parameters
     # NOTE: API accepts both camelCase and snake_case variants
@@ -738,18 +725,19 @@ async def get_requirement_details(
     )
 
     # Return full response with requirement details, parent details, and priority list
-    return _respond(response, response_format)
+    return respond(response, response_format)
 
 
 @mcp.tool(
     name="bugasura_update_requirement",
+    title="Update Requirement",
     description="Update a requirement by ID with partial fields. Can update any field including title, details, severity, priority, tags, status, assignees, type, folder, sprint, overview, and parent requirement. Interactive team/project selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_requirement(
     requirement_id: int = Field(description="Requirement numeric ID to update"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     title: Optional[str] = Field(default=None, description="Updated requirement title"),
     details: Optional[str] = Field(default=None, description="Updated detailed description"),
     severity: Optional[str] = Field(default=None, description="Updated severity level (e.g., LOW, MEDIUM, HIGH, CRITICAL)"),
@@ -760,7 +748,7 @@ async def update_requirement(
     sprint_id: Optional[int] = Field(default=None, description="Updated sprint identifier", ge=1),
     type: Optional[str] = Field(default=None, description="Updated requirement type (e.g., EPIC, STORY, TASK)"),
     overview: Optional[str] = Field(default=None, description="Updated brief overview"),
-    status: Optional[str] = Field(default=None, description="Updated requirement status (e.g., NEW, IN_PROGRESS, COMPLETED)"),
+    status: Optional[str] = Field(default=None, description="Updated requirement status: one of the project's requirement statuses, e.g. 'New', 'In Progress', 'Completed' (case-insensitive; underscores read as spaces)"),
     parent_id: Optional[int] = Field(default=None, description="Updated parent requirement ID"),
 ) -> ToolResponse:
     """
@@ -790,7 +778,7 @@ async def update_requirement(
         sprint_id: Sprint/Report ID (optional)
         type: Requirement type - EPIC/STORY/TASK (optional)
         overview: Requirement overview (optional)
-        status: Requirement status - NEW/IN_PROGRESS/COMPLETED/BLOCKED (optional)
+        status: One of the project's requirement statuses, e.g. In Progress (optional)
         parent_id: Parent requirement ID for hierarchy (optional)
 
     Returns:
@@ -798,7 +786,7 @@ async def update_requirement(
 
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if isinstance(validation, list):
         return {'status': 'failed', 'error': 'Unexpected API response format', 'details': str(validation)}
@@ -888,14 +876,20 @@ async def update_requirement(
             }
 
     if status is not None:
-        status = status.upper()
-        valid_statuses = ['NEW', 'IN_PROGRESS', 'COMPLETED', 'BLOCKED']
-        if status not in valid_statuses:
-            return {
-                'status': 'failed',
-                'error': 'Invalid requirement status',
-                'message': f"Status must be one of: {', '.join(valid_statuses)}. Got: {status}"
-            }
+        # Check against the project's own statuses; the API silently resets unknown ones to the first.
+        status = _normalise_requirement_status(status)
+        valid_statuses = [s.get('name') for s in existing_req_response.get('requirementStatusList') or []
+                          if isinstance(s, dict) and s.get('name')]
+        if valid_statuses:
+            match = next((v for v in valid_statuses if v.upper() == status.upper()), None)
+            if match is None:
+                return {
+                    'status': 'failed',
+                    'error': 'Invalid requirement status',
+                    'error_type': 'ValidationError',
+                    'message': f"Status must be one of this project's statuses: {', '.join(valid_statuses)}. Got: {status}"
+                }
+            status = match
 
     if severity is not None:
         severity = severity.upper()
@@ -911,7 +905,7 @@ async def update_requirement(
     resolved_assignees = None
     if assignees is not None:
         logger.info(f"update_requirement: Resolving assignee identifiers '{assignees}' for team_id={team_id}")
-        resolution_result = await _find_user_ids_by_names_or_emails(api_key, team_id, assignees)
+        resolution_result = await find_user_ids_by_names_or_emails(api_key, team_id, assignees)
         if resolution_result['status'] != 'OK':
             logger.error(f"update_requirement: Failed to resolve assignee identifiers: {resolution_result.get('error')}")
             return resolution_result
@@ -1028,13 +1022,14 @@ async def update_requirement(
 
 @mcp.tool(
     name="bugasura_create_requirement_folder",
+    title="Create Requirement Folder",
     description="Create a new folder for organizing requirements in a project. Folders help organize requirements into logical groups.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_requirement_folder(
     folder_name: str = Field(description="Name for the new folder"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     parent_folder_id: int = Field(default=0, description="Parent folder ID for nested folders (0 for root level)"),
 ) -> ToolResponse:
     """
@@ -1070,7 +1065,7 @@ async def create_requirement_folder(
         create_requirement_folder(api_key, folder_name="Product Features")
     """
     # Validate API key
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1110,7 +1105,7 @@ async def create_requirement_folder(
     logger.info(f"create_requirement_folder: Checking for duplicate folder name '{folder_name}' at parent_folder_id={parent_folder_id}")
 
     # Fetch existing folders to check for duplicates
-    existing_folders_response = await make_api_request('GET', '/v1/testRepo/get', api_key, params={
+    existing_folders_response = await make_api_request('GET', '/v1/projectFolders/get', api_key, params={
         'appId': str(project_id),
         'teamId': str(team_id),
         'folderId': '',
@@ -1159,7 +1154,7 @@ async def create_requirement_folder(
     }
 
     # Call API to create folder
-    response = await make_api_request('POST', '/v1/testRepo/add', api_key, data=payload)
+    response = await make_api_request('POST', '/v1/projectFolders/add', api_key, data=payload)
 
     if response.get('status') == 'OK':
         # Extract folder ID from folderDetails (API returns: folderDetails.id)
@@ -1181,15 +1176,16 @@ async def create_requirement_folder(
 
 @mcp.tool(
     name = "bugasura_delete_requirement",
+    title = "Delete Requirement",
     description = "Delete requirement(s) permanently by numeric ID, requirement key (e.g., 'REQ5', 'MCP11'), or exact/partial title match. Supports single or multiple deletions. Uses 3-step matching: exact key → exact title → partial title. Interactive selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_requirement(
     requirement_identifier: str = Field(description="Requirement identifier: numeric ID (e.g., '123'), requirement key (e.g., 'REQ5', 'MCP11'), or requirement title text for matching"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint ID (optional - if provided, deletes from sprint; otherwise deletes from project, ge=1)"),
-    folder_id: Optional[int] = Field(default=None, description="Folder ID (optional, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint ID (optional - if provided, deletes from sprint; otherwise deletes from project, ge=1)", ge=1),
+    folder_id: Optional[int] = Field(default=None, description="Folder ID (optional, ge=1)", ge=1),
     selected_requirement_ids: Optional[str] = Field(default=None, description="Comma-separated list of requirement IDs for bulk deletion (optional)"),
 ) -> ToolResponse:
     """
@@ -1240,7 +1236,7 @@ async def delete_requirement(
         delete_requirement(api_key, requirement_identifier="REQ5")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1295,15 +1291,12 @@ async def delete_requirement(
             # It could be a requirement key (e.g., "REQ5", "MCP11") or a title - search for it
             logger.info(f"delete_requirement: Searching for requirement by key or title: '{requirement_identifier}'")
 
-            # NOTE: Requirement endpoints use 'app_id' not 'project_id'
-            params = {
-                'team_id': str(team_id),
-                'app_id': str(project_id),
-                'start_at': 0,
-                'max_results': 100  # Get more results for better matching
-            }
-
-            requirements_response = await make_api_request('GET', '/v1/requirements/list', api_key, params=params)
+            # The list endpoint reads teamId/appId and searches title or 'REQ<id>' with searchText.
+            requirements_response = await make_api_request('GET', '/v1/requirements/list', api_key, params={
+                'teamId': team_id,
+                'appId': project_id,
+                'searchText': requirement_identifier,
+            })
 
             if requirements_response.get('status') != 'OK':
                 return {
@@ -1312,21 +1305,25 @@ async def delete_requirement(
                     'message': requirements_response.get('message', 'Could not retrieve requirements list')
                 }
 
-            requirements = requirements_response.get('requirements', [])
+            # requirementsList is {'parents': [...], 'others': [...], 'childs': [...]}.
+            groups = requirements_response.get('requirementsList') or {}
+            requirements = [req for group in (groups.values() if isinstance(groups, dict) else [groups])
+                            if isinstance(group, list) for req in group if isinstance(req, dict)]
+            for req in requirements:
+                req['requirement_key'] = f"REQ{req.get('id')}"
 
-            # Try exact match by requirement key (case-insensitive)
-            # Requirement keys are usually in format like "REQ5", "MCP11", etc.
-            matching_requirements = [req for req in requirements if req.get('requirement_key', '').upper() == requirement_identifier.upper()]
+            # Try exact match by requirement key (case-insensitive), e.g. "REQ5"
+            matching_requirements = [req for req in requirements if req['requirement_key'].upper() == requirement_identifier.upper()]
 
             if matching_requirements:
                 logger.info(f"delete_requirement: Found requirement by key: {matching_requirements[0].get('requirement_key')}")
             else:
                 # Try exact match by title (case-insensitive)
-                matching_requirements = [req for req in requirements if req.get('title', '').lower() == requirement_identifier.lower()]
+                matching_requirements = [req for req in requirements if (req.get('title') or '').lower() == requirement_identifier.lower()]
 
                 if not matching_requirements:
                     # Try partial match by title
-                    matching_requirements = [req for req in requirements if requirement_identifier.lower() in req.get('title', '').lower()]
+                    matching_requirements = [req for req in requirements if requirement_identifier.lower() in (req.get('title') or '').lower()]
 
             if not matching_requirements:
                 return {
@@ -1336,7 +1333,7 @@ async def delete_requirement(
                 }
 
             if len(matching_requirements) > 1:
-                requirement_list = '\n'.join([f"  - ID: {req['requirement_id']}, Key: {req.get('requirement_key', 'N/A')}, Title: {req['title']}" for req in matching_requirements[:10]])
+                requirement_list = '\n'.join([f"  - ID: {req['requirement_id']}, Key: {req.get('requirement_key', 'N/A')}, Title: {req.get('title')}" for req in matching_requirements[:10]])
                 return {
                     'status': 'failed',
                     'error': 'Multiple requirements found',
@@ -1410,18 +1407,19 @@ async def delete_requirement(
 
 @mcp.tool(
     name="bugasura_link_unlink_requirement_testcases",
+    title="Link or Unlink Requirement Test Cases",
     description="Link or unlink test cases to/from a requirement. Supports interactive team/project selection and bulk operations with comma-separated test case IDs.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def link_unlink_requirement_testcases(
     requirement_id: int = Field(description="Requirement numeric ID to link/unlink test cases"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     testcase_ids: Optional[str] = Field(default=None, description="Comma-separated test case IDs to link (e.g., '123,456,789'). Required for linking."),
     unlink_testcase_id: Optional[int] = Field(default=None, description="Single test case ID to unlink from requirement. Required for unlinking."),
     is_delete: bool = Field(default=False, description="Set to True to unlink test cases, False to link (default)"),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)"),
-    folder_id: Optional[int] = Field(default=None, description="Folder identifier (optional, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)", ge=1),
+    folder_id: Optional[int] = Field(default=None, description="Folder identifier (optional, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Link or unlink test cases to/from a requirement for traceability.
@@ -1431,7 +1429,7 @@ async def link_unlink_requirement_testcases(
 
     **Linking Test Cases** (is_delete=False):
     - Provide testcase_ids as comma-separated IDs (e.g., "123,456,789")
-    - Links multiple test cases to the requirement in one operation
+    - Links each test case with its own API call and reports which linked and which failed
     - Creates traceability between requirements and test cases
 
     **Unlinking Test Cases** (is_delete=True):
@@ -1488,7 +1486,7 @@ async def link_unlink_requirement_testcases(
         )
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if isinstance(validation, list):
         return {'status': 'failed', 'error': 'Unexpected API response format', 'details': str(validation)}
@@ -1544,30 +1542,66 @@ async def link_unlink_requirement_testcases(
                 'message': 'testcase_ids is required when linking test cases (is_delete=False)'
             }
 
-        logger.info(f"Linking test cases {testcase_ids} to requirement {requirement_id}")
+        ids = [i.strip() for i in str(testcase_ids).split(',') if i.strip()]
+        invalid_ids = [i for i in ids if not i.isdigit()]
+        if not ids or invalid_ids:
+            return {
+                'status': 'failed',
+                'error': 'Invalid testcase_ids',
+                'message': f"testcase_ids must be comma-separated numeric IDs; invalid: {invalid_ids or [testcase_ids]}"
+            }
 
-        payload = {
-            "app_id": project_id,
-            "team_id": team_id,
-            "requirement_id": requirement_id,
-            "isDelete": 0,
-            "testCaseId": testcase_ids  # API accepts comma-separated IDs
+        logger.info(f"Linking test cases {ids} to requirement {requirement_id}")
+
+        # The API validates testCaseId as a single int, so link one ID per call.
+        linked, failed = [], []
+        for tc_id in ids:
+            payload = {
+                "app_id": project_id,
+                "team_id": team_id,
+                "requirement_id": requirement_id,
+                "isDelete": 0,
+                "testCaseId": tc_id
+            }
+            if sprint_id is not None:
+                payload["sprint_id"] = sprint_id
+            if folder_id is not None:
+                payload["folder_id"] = folder_id
+
+            response = await make_api_request('POST', '/v1/requirement/linkUnlinkRequirementTestCases', api_key, data=payload)
+            if response.get('status') == 'OK':
+                linked.append(int(tc_id))
+            else:
+                logger.error(f"Failed to link test case {tc_id} to requirement {requirement_id}: {response.get('message')}")
+                failed.append({'testcase_id': int(tc_id), 'message': response.get('message') or response.get('error')})
+
+        if not failed:
+            logger.info(f"Successfully linked test case(s) {linked} to requirement {requirement_id}")
+            return {
+                'status': 'OK',
+                'message': f"Linked {len(linked)} test case(s) to requirement {requirement_id}",
+                'linked_testcase_ids': linked
+            }
+        return {
+            'status': 'failed' if not linked else 'partial_success',
+            'error': f"Failed to link {len(failed)} of {len(ids)} test case(s)",
+            'message': failed[0]['message'],
+            'linked_testcase_ids': linked,
+            'failed': failed
         }
 
-        if sprint_id is not None:
-            payload["sprint_id"] = sprint_id
-        if folder_id is not None:
-            payload["folder_id"] = folder_id
-
     # Make the API request
-    logger.info(f"Sending {'unlink' if is_delete else 'link'} request for requirement_id={requirement_id}")
+    logger.info(f"Sending unlink request for requirement_id={requirement_id}")
     response = await make_api_request('POST', '/v1/requirement/linkUnlinkRequirementTestCases', api_key, data=payload)
 
-    # Add helpful information to response
     if response.get('status') == 'OK':
-        operation = 'unlinked' if is_delete else 'linked'
-        logger.info(f"Successfully {operation} test case(s) for requirement {requirement_id}")
+        logger.info(f"Successfully unlinked test case {unlink_testcase_id} from requirement {requirement_id}")
     else:
-        logger.error(f"Failed to {'unlink' if is_delete else 'link'} test case(s): {response.get('message')}")
+        logger.error(f"Failed to unlink test case: {response.get('message')}")
 
     return response
+
+
+def _normalise_requirement_status(status: str) -> str:
+    """'IN_PROGRESS' -> 'IN PROGRESS': project statuses are space-separated names."""
+    return ' '.join(str(status).replace('_', ' ').split())

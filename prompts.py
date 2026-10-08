@@ -1,21 +1,22 @@
 """MCP prompt registrations."""
 from app import mcp
+from config import MCP_CONNECT_URL
 
 
-@mcp.prompt()
+@mcp.prompt(title="Connect to Bugasura")
 def connect_bugasura() -> str:
     """
     How authentication works and what to tell the user when a tool returns
     status 'api_key_required'. Tools carry no credential arguments any more.
     """
-    return """
+    return f"""
 Bugasura MCP signs users in with OAuth 2.0 when used over HTTP, and falls back to an
 API key only for local STDIO setups.
 
 **Hosted / HTTP (recommended)** — the MCP client handles sign-in; tools take no key.
 - Claude Desktop / claude.ai: Settings → Connectors → Add custom connector →
-  URL `https://mcp.bugasura.io/mcp` → Connect → sign in to Bugasura → Allow.
-- Claude Code: `claude mcp add --transport http bugasura https://mcp.bugasura.io/mcp`,
+  URL `{MCP_CONNECT_URL}` → Connect → sign in to Bugasura → Allow.
+- Claude Code: `claude mcp add --transport http bugasura {MCP_CONNECT_URL}`,
   then run `/mcp`, pick Bugasura → Authenticate.
 - Cursor / VS Code / Windsurf / Cline / Roo Code: add the URL; the client detects
   OAuth and opens the browser on first use.
@@ -31,7 +32,7 @@ Access tokens last 1 hour and refresh silently for 30 days.
 """
 
 
-@mcp.prompt()
+@mcp.prompt(title="Knowledge Base Upload Guide")
 def kb_upload_guide() -> str:
     """
     Instructions for AI assistants on how to handle file uploads to a Bugasura
@@ -86,7 +87,7 @@ Make one call per file. Each call to bugasura_testpert_upload_kb handles one sou
 """
 
 
-@mcp.prompt()
+@mcp.prompt(title="Project Search Guidance")
 def search_projects_guidance() -> str:
     """
     Guidance for AI assistants on how to handle project search/listing when user
@@ -101,10 +102,10 @@ def search_projects_guidance() -> str:
 When a user asks to "list projects", "find project", or "search for projects"
 WITHOUT specifying a team:
 
-## Best Approach - Use find_project_by_name()
+## Best Approach - Use bugasura_find_project_by_name()
 
 If the user mentions a project name or keyword:
-✓ Use: find_project_by_name(project_name)
+✓ Use: bugasura_find_project_by_name(project_name)
   - Searches across ALL teams automatically
   - Returns project_id and team_id for each match
   - Supports partial, case-insensitive matching
@@ -114,22 +115,22 @@ Example user requests:
 - "Search for projects with 'api' in the name"
 - "Show me the authentication project"
 
-## Alternative Approach - Use get_user_context()
+## Alternative Approach - Use bugasura_get_user_context()
 
 If the user wants to see ALL projects (no search term):
-✓ Use: get_user_context()
+✓ Use: bugasura_get_user_context()
   - Returns all teams and their projects in one call
   - Shows complete project hierarchy
-  - More efficient than calling list_teams() then list_projects() for each team
+  - More efficient than calling bugasura_list_teams() then bugasura_list_projects() for each team
 
 Example user requests:
 - "List all my projects"
 - "Show me all projects I have access to"
 - "What projects are available?"
 
-## When to Use list_projects()
+## When to Use bugasura_list_projects()
 
-ONLY use list_projects(team_id) when:
+ONLY use bugasura_list_projects(team_id) when:
 - User specifically mentions a team name or ID
 - You've already identified the team_id from previous context
 - User wants filtered/paginated results for a specific team
@@ -140,12 +141,12 @@ Example user requests:
 
 ## DO NOT:
 ❌ Ask user for team_id first when they just want to search/list projects
-❌ Use list_projects() without team_id (it will fail)
+❌ Use bugasura_list_projects() without team_id (it will fail)
 ❌ Make the user specify team when it's not necessary
 
 ## Best User Experience Flow:
 1. User: "Find my mobile project"
-2. AI: Calls find_project_by_name(api_key, "mobile")
+2. AI: Calls bugasura_find_project_by_name(project_name="mobile")
 3. AI: "I found 2 projects: Mobile App (Team: Acme Corp), Mobile Web (Team: Client XYZ)"
 4. User can then work with the discovered project
 """

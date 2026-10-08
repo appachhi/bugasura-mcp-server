@@ -1,36 +1,30 @@
 """Bugasura MCP tools: issues."""
-from typing import Any, List, Literal, Optional
+from typing import Literal, Optional
 
 from fastmcp import Context
 from pydantic import Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import _fetch_user_context, _get_api_key, _invalidate_user_context_cache, validate_api_key
-from client import (
-    _paginate_upstream, _paginated, _prepare_post_params, _render_markdown,
-    _respond, _validate_id, logger, make_api_request,
-)
+from auth import get_api_key, validate_api_key
+from client import paginate_upstream, respond, validate_id, logger, make_api_request
 from helpers import (
-    _fetch_team_members, _find_user_ids_by_names_or_emails,
-    _resolve_issue_identifier_to_id, _resolve_team_identifier,
+    find_user_ids_by_names_or_emails, resolve_issue_identifier_to_id,
     filter_large_fields, select_team_project_context,
 )
-
-import json
-import requests  # for except blocks referencing requests.RequestException
 
 
 @mcp.tool(
     name = "bugasura_create_issue",
+    title = "Create Issue",
     description = "Create a new issue/bug with required summary. Supports severity, status, environment details, tags, assignees, and custom fields. Interactive team/project/sprint selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_issue(
-    summary: str = Field(description="Issue summary/title (required, min_length=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional - will prompt if not provided, ge=1)"),
+    summary: str = Field(description="Issue summary/title (required, min_length=1)", min_length=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional - will prompt if not provided, ge=1)", ge=1),
     description: str = Field(default="", description="Detailed issue description (optional, supports HTML)"),
     severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"] = Field(default="MEDIUM", description="Severity: 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW' (default: MEDIUM)"),
     status: str = Field(default="New", description="Status (default: New, must match project workflow)"),
@@ -83,7 +77,7 @@ async def create_issue(
         OR a selection prompt if team_id/project_id/sprint_id not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -211,13 +205,14 @@ async def create_issue(
 
 @mcp.tool(
     name = "bugasura_get_issue",
+    title = "Get Issue",
     description = "Get detailed issue information by numeric ID. Returns full issue details including comments and attachments. Interactive team/project selection available.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_issue(
-    issue_id: int = Field(description="Issue numeric ID (testresults_id, ge=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    issue_id: int = Field(description="Issue numeric ID (testresults_id, ge=1)", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -238,17 +233,17 @@ async def get_issue(
         Use bugasura_list_issues() to find the issue_id if you don't know it.
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Use centralized context selection helper
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_get_issue', f', issue_id={issue_id}')
 
     # If context selection is needed, return the selection prompt
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # GET request - integers are fine (auto-converted to strings in URL)
     response = await make_api_request('GET', '/v1/issues/get', api_key, params={
@@ -257,23 +252,24 @@ async def get_issue(
         'issue_key': issue_id
     })
 
-    # Return full response for individual issue (including tools_integration_settings if needed)
-    return _respond(response, response_format)
+    # Integration settings/mappings can run to 100KB+ and are not issue data
+    return respond(filter_large_fields(response), response_format)
 
 
 @mcp.tool(
     name = "bugasura_update_issue",
+    title = "Update Issue",
     description = "Update an existing issue (partial updates supported). Can update any field including summary, description, severity, status, tags, assignees, environment, and custom fields. Interactive selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_issue(
     issue_id: int = Field(description="Issue numeric ID to update", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)", ge=1),
     summary: Optional[str] = Field(default=None, description="New issue summary/title (optional)"),
     description: Optional[str] = Field(default=None, description="New description (optional, supports HTML)"),
-    severity: Optional[str] = Field(default=None, description="New severity: 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW' (optional)"),
+    severity: Optional[Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]] = Field(default=None, description="New severity: 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW' (optional)"),
     status: Optional[str] = Field(default=None, description="New status (optional, must match project workflow)"),
     tags: Optional[str] = Field(default=None, description="New tags, comma-separated (optional)"),
     issue_type: Optional[str] = Field(default=None, description="New issue type/category (optional)"),
@@ -339,7 +335,7 @@ async def update_issue(
                     sprint_id=456)
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -473,14 +469,15 @@ async def update_issue(
 
 @mcp.tool(
     name = "bugasura_delete_issue",
-    description = "Delete an issue permanently by numeric ID, issue key (e.g., 'ISS09'), or exact/partial summary match. Uses 3-step matching: exact key → exact summary → partial summary. Interactive selection available.",
+    title = "Delete Issue",
+    description = "Move an issue to Trash (restorable from the web app) by numeric ID, issue key (e.g., 'ISS09'), or exact/partial summary match. Uses 3-step matching: exact key → exact summary → partial summary. Interactive selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_issue(
     issue_identifier: str = Field(description="Issue identifier: numeric ID (e.g., '123'), issue key (e.g., 'ISS09'), or summary text for matching"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional - narrows search scope, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional - narrows search scope, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Delete an issue/bug from Bugasura by ID, issue key, or summary/title.
@@ -488,8 +485,8 @@ async def delete_issue(
     Interactive flow: If team_id/project_id are not provided, this function
     will guide you through selection.
 
-    WARNING: This action cannot be undone. The issue and all its data
-    (comments, attachments, history) will be permanently removed.
+    The issue is moved to Trash with its comments, attachments and history, and can be
+    restored from the web app.
 
     Args:
         issue_identifier: Issue ID (numeric), issue key (e.g., "ISS09"), or issue summary/title (string) to delete (required)
@@ -520,7 +517,7 @@ async def delete_issue(
         delete_issue(api_key, issue_identifier="ISS09")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
@@ -539,69 +536,11 @@ async def delete_issue(
     team_id = context['team_id']
     project_id = context['project_id']
 
-    # Resolve issue_identifier to issue_id
-    issue_id = None
-
-    # Check if it's a numeric ID
-    if issue_identifier.isdigit():
-        issue_id = int(issue_identifier)
-        logger.info(f"delete_issue: Using numeric issue_id={issue_id}")
-    else:
-        # It could be an issue key (e.g., "ISS09") or a summary/title - search for it
-        logger.info(f"delete_issue: Searching for issue by key or summary: '{issue_identifier}'")
-
-        params = {
-            'team_id': str(team_id),
-            'project_id': str(project_id),
-            'start_at': 0,
-            'max_results': 100  # Get more results for better matching
-        }
-
-        if sprint_id:
-            params['sprint_id'] = str(sprint_id)
-
-        issues_response = await make_api_request('GET', '/v1/issues/list', api_key, params=params)
-
-        if issues_response.get('status') != 'OK':
-            return {
-                'status': 'failed',
-                'error': 'Failed to fetch issues',
-                'message': issues_response.get('message', 'Could not retrieve issues list')
-            }
-
-        issues = issues_response.get('issues', [])
-
-        # Step 1: Try exact match by issue key (case-insensitive)
-        # Issue keys are usually in format like "ISS09", "BUG123", etc.
-        matching_issues = [i for i in issues if i.get('issue_id', '').upper() == issue_identifier.upper()]
-
-        if matching_issues:
-            logger.info(f"delete_issue: Found issue by issue key: {matching_issues[0].get('issue_id')}")
-        else:
-            # Step 2: Try exact match by summary (case-insensitive)
-            matching_issues = [i for i in issues if i.get('reason', '').lower() == issue_identifier.lower()]
-
-            if not matching_issues:
-                # Step 3: Try partial match by summary
-                matching_issues = [i for i in issues if issue_identifier.lower() in i.get('reason', '').lower()]
-
-        if not matching_issues:
-            return {
-                'status': 'failed',
-                'error': 'Issue not found',
-                'message': f"No issue found with key or summary '{issue_identifier}' in project {project_id}"
-            }
-
-        if len(matching_issues) > 1:
-            issue_list = '\n'.join([f"  - ID: {i['testresults_id']}, Key: {i.get('issue_id', 'N/A')}, Summary: {i['reason']}" for i in matching_issues[:10]])
-            return {
-                'status': 'failed',
-                'error': 'Multiple issues found',
-                'message': f"Multiple issues match '{issue_identifier}'. Please use the issue ID or unique issue key instead:\n{issue_list}"
-            }
-
-        issue_id = matching_issues[0]['testresults_id']
-        logger.info(f"delete_issue: Found issue '{issue_identifier}' with ID {issue_id}")
+    resolved = await resolve_issue_identifier_to_id(api_key, team_id, project_id, issue_identifier,
+                                                    "delete_issue", sprint_id=sprint_id)
+    if resolved.get('status') != 'OK':
+        return resolved
+    issue_id = resolved['issue_id']
 
     # Build payload
     payload = {
@@ -615,6 +554,7 @@ async def delete_issue(
 
 @mcp.tool(
     name = "bugasura_list_issues",
+    title = "List Issues",
     description = (
         "List issues for a project with optional sprint or run-level filter and pagination. "
         "Returns issue summaries with key details. "
@@ -624,23 +564,23 @@ async def delete_issue(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_issues(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id) to filter issues by sprint (optional, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id) to filter issues by sprint (optional, ge=1)", ge=1),
     test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID. When provided, scopes issues to that specific run only. Obtain from bugasura_list_test_runs."),
-    start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)"),
-    max_results: int = Field(default=10, description="Number of results to return (default: 10, ge=1, le=100)"),
+    start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)", ge=0),
+    max_results: int = Field(default=10, description="Number of results to return (default: 10, ge=1, le=100)", ge=1, le=100),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_list_issues')
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     project_id = context['project_id']
     max_results = max(1, min(100, max_results))
@@ -667,7 +607,7 @@ async def list_issues(
         await ctx.report_progress(0.75, total=1.0, message="Normalizing response")
 
     if not isinstance(response, dict) or response.get('status') != 'OK':
-        return _respond(response, response_format)
+        return respond(response, response_format)
 
     issue_list_details = response.get('issueListDetails') or {}
     raw_issues = issue_list_details.get('bugsList') or []
@@ -697,22 +637,23 @@ async def list_issues(
         for bug in raw_issues
     ]
     normalized = {'status': 'OK', 'issue_list': issues, 'total_rows': total_count or len(issues)}
-    return _respond(_paginate_upstream(normalized, items_key='issue_list', offset=start_at), response_format)
+    return respond(paginate_upstream(normalized, items_key='issue_list', offset=start_at, max_results=max_results), response_format)
 
 
 @mcp.tool(
     name="bugasura_list_issue_comments",
+    title="List Issue Comments",
     description="List all comments for a specific issue. Returns comment history with user details, timestamps, and content. Supports interactive team/project/issue selection.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_issue_comments(
-    issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     creator_id: Optional[int] = Field(default=None, description="Filter by comment author ID (optional)"),
     get_user_comments_only: bool = Field(default=False, description="If True, return only user comments (exclude system comments)"),
-    start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)"),
-    max_results: int = Field(default=10, description="Number of results to return (10-100, default: 10, ge=1, le=100)"),
+    start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)", ge=0),
+    max_results: int = Field(default=10, description="Number of results to return (10-100, default: 10, ge=1, le=100)", ge=1, le=100),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
@@ -769,17 +710,17 @@ async def list_issue_comments(
         Set get_user_comments_only=True to exclude them.
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Step 1 & 2: Use centralized context selection helper for team and project
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_list_issue_comments')
 
     # If context selection is needed, return the selection prompt
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # Extract validated team_id and project_id
     team_id = context['team_id']
@@ -798,18 +739,18 @@ async def list_issue_comments(
         })
 
         if issues_response.get('status') != 'OK':
-            return _respond(issues_response, response_format)
+            return respond(issues_response, response_format)
 
         issues = issues_response.get('issue_list', [])
 
         if not issues:
-            return _respond({
+            return respond({
                 'status': 'failed',
                 'error': 'No issues found in the selected project.',
                 'suggestion': 'Please create an issue first using create_issue() tool.'
             }, response_format)
 
-        return _respond({
+        return respond({
             'status': 'selection_required',
             'step': 'issue_selection',
             'message': 'Please select an issue to view comments:',
@@ -856,19 +797,20 @@ async def list_issue_comments(
         logger.error(f"list_issue_comments: Failed to fetch comments: {response.get('message')}")
 
     response = filter_large_fields(response)
-    return _respond(_paginate_upstream(response, items_key='comment_list', offset=start_at), response_format)
+    return respond(paginate_upstream(response, items_key='comment_list', offset=start_at, max_results=max_results), response_format)
 
 
 @mcp.tool(
     name="bugasura_get_issue_comment",
+    title="Get Issue Comment",
     description="Get details of a specific comment by comment ID. Returns full comment data including text, user info, and timestamps. Supports interactive team/project/issue selection.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_issue_comment(
-    comment_id: Optional[int] = Field(default=None, description="Comment numeric ID (optional - will prompt if not provided, ge=1)"),
-    issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    comment_id: Optional[int] = Field(default=None, description="Comment numeric ID (optional - will prompt if not provided, ge=1)", ge=1),
+    issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -907,17 +849,17 @@ async def get_issue_comment(
         get_issue_comment(api_key, comment_id=789, team_id=456)
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Step 1 & 2: Use centralized context selection helper for team and project
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_get_issue_comment', f', comment_id={comment_id}')
 
     # If context selection is needed, return the selection prompt
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # Extract validated team_id and project_id
     team_id = context['team_id']
@@ -936,19 +878,19 @@ async def get_issue_comment(
         })
 
         if issues_response.get('status') != 'OK':
-            return _respond(issues_response, response_format)
+            return respond(issues_response, response_format)
 
         issues = issues_response.get('issue_list', [])
 
 
         if not issues:
-            return _respond({
+            return respond({
                 'status': 'failed',
                 'error': 'No issues found in the selected project.',
                 'suggestion': 'Please create an issue first using create_issue() tool.'
             }, response_format)
 
-        return _respond({
+        return respond({
             'status': 'selection_required',
             'step': 'issue_selection',
             'message': f'Please select an issue to get comment {comment_id} from:',
@@ -983,19 +925,20 @@ async def get_issue_comment(
     else:
         logger.error(f"get_issue_comment: Failed to fetch comment: {response.get('message')}")
 
-    return _respond(response, response_format)
+    return respond(response, response_format)
 
 
 @mcp.tool(
     name="bugasura_add_issue_comment",
+    title="Add Issue Comment",
     description="Add a comment to an issue. Supports text comments with optional attachments and mentions. Interactive team/project/issue selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def add_issue_comment(
     comment: str = Field(description="Comment text content (required, 1-65535 characters, supports HTML, min_length=1)"),
-    issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     is_public_comment: int = Field(default=1, description="Comment visibility: 1 for public (default), 0 for private"),
     source: str = Field(default="API", description="Comment source (default: API)"),
 ) -> ToolResponse:
@@ -1091,7 +1034,7 @@ async def add_issue_comment(
         - Private comments are only visible to team members
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1226,15 +1169,16 @@ async def add_issue_comment(
 
 @mcp.tool(
     name="bugasura_update_issue_comment",
+    title="Update Issue Comment",
     description="Update an existing issue comment. Supports full interactive selection - prompts for team/project/issue/comment if not provided. Guides user through entire flow.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_issue_comment(
     comment: str = Field(default="", description="Updated comment text (required when comment_id provided, 1-65535 characters, supports HTML, min_length=1)"),
-    comment_id: Optional[int] = Field(default=None, description="Comment numeric ID to update (optional - will prompt if not provided, ge=1)"),
-    issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    comment_id: Optional[int] = Field(default=None, description="Comment numeric ID to update (optional - will prompt if not provided, ge=1)", ge=1),
+    issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     comment_attachment_names: str = Field(default="", description="Comma-separated attachment filenames (optional, preserves existing if empty)"),
 ) -> ToolResponse:
     """
@@ -1293,7 +1237,7 @@ async def update_issue_comment(
         )
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1486,17 +1430,18 @@ async def update_issue_comment(
 
 @mcp.tool(
     name="bugasura_delete_issue_comment",
-    description="Delete an issue comment permanently. Supports full interactive selection - prompts for team/project/issue/comment if not provided. Shows deletion warnings.",
+    title="Delete Issue Comment",
+    description="Delete an issue comment (its content is removed and a 'deleted by' placeholder stays in the thread). Supports full interactive selection - prompts for team/project/issue/comment if not provided. Shows deletion warnings.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_issue_comment(
-    comment_id: Optional[int] = Field(default=None, description="Comment numeric ID to delete (optional - will prompt if not provided, ge=1)"),
-    issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    comment_id: Optional[int] = Field(default=None, description="Comment numeric ID to delete (optional - will prompt if not provided, ge=1)", ge=1),
+    issue_id: Optional[int] = Field(default=None, description="Issue numeric ID (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
-    Delete an issue comment permanently with full interactive flow.
+    Delete an issue comment (content removed, placeholder kept) with full interactive flow.
     Interactive flow (prompts for missing context):
     1. Select team (if team_id not provided)
     2. Select project (if project_id not provided)
@@ -1546,7 +1491,7 @@ async def delete_issue_comment(
         )
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1697,23 +1642,20 @@ async def delete_issue_comment(
     if response.get('status') == 'OK':
         logger.info(f"delete_issue_comment: Successfully deleted comment {comment_id}")
 
-        # Add warning about permanence and what was deleted
-        response['warning'] = 'Comment has been permanently deleted. This action cannot be undone.'
+        # The API keeps a "deleted by" placeholder in the thread instead of removing the row.
+        response['note'] = ("The comment's content was removed; a 'This comment is deleted by ...' "
+                            "placeholder stays in the issue's comment list.")
         response['operation'] = 'delete'
-        response['permanent'] = True
 
         # Log if attachments were deleted
         if response.get('commentContent'):
             logger.info(f"delete_issue_comment: Comment replaced with deletion message: {response['commentContent']}")
             response['replaced_with'] = response['commentContent']
 
-        # Add helpful deletion summary
         response['deletion_summary'] = {
             'comment_id': comment_id,
             'issue_id': issue_id,
             'deleted_successfully': True,
-            'attachments_removed': True,
-            'notifications_sent': True
         }
     else:
         logger.error(f"delete_issue_comment: Failed to delete comment: {response.get('message')}")
@@ -1723,14 +1665,15 @@ async def delete_issue_comment(
 
 @mcp.tool(
     name = "bugasura_add_issue_assignees",
+    title = "Add Issue Assignees",
     description = "Add assignees to an issue by issue ID, identifier (e.g., 'NEW3'), user IDs, email addresses, or names. Supports comma-separated values. Interactive team/project selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def add_issue_assignees(
     issue_id: str = Field(description="Issue numeric ID or identifier (e.g., 'NEW3')"),
     assignees: str = Field(description="Comma-separated assignees: user IDs (e.g., '123'), emails (e.g., 'john@example.com'), or names (e.g., 'John Doe')"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
     """
@@ -1772,7 +1715,7 @@ async def add_issue_assignees(
         add_issue_assignees(api_key, issue_id=123, assignees="John, jane@example.com, 789")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
@@ -1794,7 +1737,7 @@ async def add_issue_assignees(
     # Resolve issue identifier to numeric ID if needed
     if ctx is not None:
         await ctx.report_progress(0.2, total=1.0, message="Resolving issue identifier")
-    resolution_result = await _resolve_issue_identifier_to_id(api_key, team_id, project_id, issue_id, "add_issue_assignees")
+    resolution_result = await resolve_issue_identifier_to_id(api_key, team_id, project_id, issue_id, "add_issue_assignees")
     if resolution_result['status'] != 'OK':
         return resolution_result
     issue_id = resolution_result['issue_id']
@@ -1804,7 +1747,7 @@ async def add_issue_assignees(
     if ctx is not None:
         await ctx.report_progress(0.5, total=1.0, message=f"Resolving {assignees.count(',') + 1} assignee identifier(s)")
     try:
-        resolution_result = await _find_user_ids_by_names_or_emails(api_key, team_id, assignees)
+        resolution_result = await find_user_ids_by_names_or_emails(api_key, team_id, assignees)
         logger.info(f"add_issue_assignees: Resolution result status: {resolution_result.get('status')}")
 
         if resolution_result['status'] != 'OK':
@@ -1813,12 +1756,12 @@ async def add_issue_assignees(
 
         assignee_ids = resolution_result['user_ids']
         logger.info(f"add_issue_assignees: Resolved to user_ids: {assignee_ids}")
-    except (KeyError, AttributeError, TypeError, ValueError, requests.RequestException) as e:
+    except (KeyError, AttributeError, TypeError, ValueError) as e:
         logger.critical(f"add_issue_assignees: Exception during resolution: {type(e).__name__}: {str(e)}", exc_info=True)
         return {
             'status': 'failed',
-            'error': f'Internal error during identifier resolution: {str(e)}',
-            'error_type': type(e).__name__
+            'error': 'Internal error during identifier resolution.',
+            'error_type': 'InternalError'
         }
 
     # Call API to add assignees
@@ -1841,14 +1784,15 @@ async def add_issue_assignees(
 
 @mcp.tool(
     name="bugasura_get_issue_assignees",
+    title="Get Issue Assignees",
     description="Get the list of assignees for an issue. Returns assignee details including names, emails, user IDs, and profile images. Interactive team/project selection available.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_issue_assignees(
-    issue_id: int = Field(description="Issue numeric ID (testresults_id, ge=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)"),
+    issue_id: int = Field(description="Issue numeric ID (testresults_id, ge=1)", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -1899,13 +1843,13 @@ async def get_issue_assignees(
     """
     # Validate API key before proceeding
     logger.info(f"get_issue_assignees: Starting for issue_id={issue_id}")
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
 
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
         logger.error("get_issue_assignees: API validation returned unexpected list format")
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': 'Unexpected API response format',
             'details': str(validation)
@@ -1913,14 +1857,14 @@ async def get_issue_assignees(
 
     if not validation.get('valid'):
         logger.error(f"get_issue_assignees: API key validation failed: {validation.get('error')}")
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Validate issue_id
     try:
-        issue_id = _validate_id(issue_id, "issue_id")
+        issue_id = validate_id(issue_id, "issue_id")
     except ValueError as e:
         logger.error(f"get_issue_assignees: Invalid issue_id: {str(e)}")
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': str(e),
             'error_type': 'ValidationError'
@@ -1935,7 +1879,7 @@ async def get_issue_assignees(
 
     # If context selection is needed, return the selection prompt
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # Extract validated team_id
     team_id = context['team_id']
@@ -1974,19 +1918,20 @@ async def get_issue_assignees(
     else:
         logger.warning(f"get_issue_assignees: Unexpected response type: {type(response)}")
 
-    return _respond(response, response_format)
+    return respond(response, response_format)
 
 
 @mcp.tool(
     name = "bugasura_remove_issue_assignees",
+    title = "Remove Issue Assignees",
     description = "Remove assignees from an issue by user IDs, email addresses, or names (auto-resolves to IDs). Supports comma-separated values. Interactive team/project selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def remove_issue_assignees(
     issue_id: str = Field(description="Issue numeric ID or identifier (e.g., 'NEW3')"),
     assignees: str = Field(description="Comma-separated assignees to remove: user IDs (e.g., '123'), emails (e.g., 'john@example.com'), or names (e.g., 'John Doe')"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
     """
@@ -2025,7 +1970,7 @@ async def remove_issue_assignees(
         remove_issue_assignees(api_key, issue_id=123, assignees="John, jane@example.com")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
@@ -2047,7 +1992,7 @@ async def remove_issue_assignees(
     # Resolve issue identifier to numeric ID if needed
     if ctx is not None:
         await ctx.report_progress(0.2, total=1.0, message="Resolving issue identifier")
-    resolution_result = await _resolve_issue_identifier_to_id(api_key, team_id, project_id, issue_id, "remove_issue_assignees")
+    resolution_result = await resolve_issue_identifier_to_id(api_key, team_id, project_id, issue_id, "remove_issue_assignees")
     if resolution_result['status'] != 'OK':
         return resolution_result
     issue_id = resolution_result['issue_id']
@@ -2057,7 +2002,7 @@ async def remove_issue_assignees(
     if ctx is not None:
         await ctx.report_progress(0.5, total=1.0, message=f"Resolving {assignees.count(',') + 1} assignee identifier(s)")
     try:
-        resolution_result = await _find_user_ids_by_names_or_emails(api_key, team_id, assignees)
+        resolution_result = await find_user_ids_by_names_or_emails(api_key, team_id, assignees)
         logger.info(f"remove_issue_assignees: Resolution result status: {resolution_result.get('status')}")
 
         if resolution_result['status'] != 'OK':
@@ -2066,12 +2011,12 @@ async def remove_issue_assignees(
 
         assignee_ids = resolution_result['user_ids']
         logger.info(f"remove_issue_assignees: Resolved to user_ids: {assignee_ids}")
-    except (KeyError, AttributeError, TypeError, ValueError, requests.RequestException) as e:
+    except (KeyError, AttributeError, TypeError, ValueError) as e:
         logger.critical(f"remove_issue_assignees: Exception during resolution: {type(e).__name__}: {str(e)}", exc_info=True)
         return {
             'status': 'failed',
-            'error': f'Internal error during identifier resolution: {str(e)}',
-            'error_type': type(e).__name__
+            'error': 'Internal error during identifier resolution.',
+            'error_type': 'InternalError'
         }
 
     # Call API to remove assignees

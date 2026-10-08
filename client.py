@@ -1,9 +1,8 @@
 """HTTP client, response envelopes, and shared low-level helpers."""
 import json
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, Optional
 
 import httpx
-import requests  # noqa: F401 — legacy alias for except blocks
 from fastmcp.server.dependencies import get_http_request
 
 from config import API_BASE, logger
@@ -13,7 +12,7 @@ from config import API_BASE, logger
 ACCESS_TOKEN_PREFIX = "bgs_at_"
 
 
-def _in_http_request() -> bool:
+def in_http_request() -> bool:
     """True while serving a streamable-HTTP request, False under STDIO."""
     try:
         get_http_request()
@@ -22,13 +21,13 @@ def _in_http_request() -> bool:
         return False
 
 
-def _auth_required_payload(reason: str = "missing") -> dict:
+def auth_required_payload(reason: str = "missing") -> dict:
     """
     The `api_key_required` envelope. The status value is kept so callers that branch on it
     keep working, but the guidance no longer asks the assistant to collect a key: over HTTP
     the user reconnects the OAuth session, under STDIO they set BUGASURA_API_KEY.
     """
-    if _in_http_request():
+    if in_http_request():
         expired = reason == "expired"
         return {
             'status': 'api_key_required',
@@ -56,13 +55,13 @@ _http_client: Optional[httpx.AsyncClient] = None
 
 # Keys stripped from the upstream response before merging "extras" into the
 # pagination envelope — they either describe the envelope itself or are
-# rewritten by _paginated().
+# rewritten by paginated().
 _PAGINATION_META_KEYS = {'total_rows', 'total', 'count', 'nrows',
                          'start_at', 'max_results', 'items', 'has_more',
                          'next_offset', 'offset'}
 
 
-def _validate_id(value: Any, param_name: str) -> int:
+def validate_id(value: Any, param_name: str) -> int:
     """
     Validate and convert ID parameters to integers.
 
@@ -80,7 +79,7 @@ def _validate_id(value: Any, param_name: str) -> int:
         ValueError: If value cannot be converted to integer
 
     Example:
-        team_id = _validate_id(team_id, "team_id")
+        team_id = validate_id(team_id, "team_id")
     """
     try:
         # Convert to int if it's not already
@@ -92,7 +91,7 @@ def _validate_id(value: Any, param_name: str) -> int:
             raise ValueError(f"{param_name} must be a positive integer, got {int_value}")
 
         return int_value
-    except (ValueError, TypeError) as e:
+    except (ValueError, TypeError):
         raise ValueError(f"Invalid {param_name}: expected integer, got {type(value).__name__} ({value})")
 
 
@@ -189,7 +188,11 @@ def _render_markdown(data: Any, title: Optional[str] = None) -> str:
         has_more = data.get('has_more', False)
         lines.append(f"**{len(data['items'])} of {total}** (offset {offset}{', more available' if has_more else ''})")
         lines.append("")
-        for item in data['items'][:50]:
+        shown = data['items'][:50]
+        if len(data['items']) > len(shown):
+            lines.append(f"_Showing the first {len(shown)} rows of this page; request JSON or a smaller max_results to see the rest._")
+            lines.append("")
+        for item in shown:
             if isinstance(item, dict):
                 ident = (item.get('issue_id') or item.get('issue_key') or
                          item.get('project_id') or item.get('team_id') or
@@ -230,7 +233,7 @@ def _render_markdown(data: Any, title: Optional[str] = None) -> str:
     return "\n".join(lines) if lines else json.dumps(data, indent=2)
 
 
-def _respond(data: Any, response_format: str = "json") -> Any:
+def respond(data: Any, response_format: str = "json") -> Any:
     """
     Finalize a tool response.
 
@@ -251,11 +254,11 @@ def _respond(data: Any, response_format: str = "json") -> Any:
     return data
 
 
-def _display_team_name(team: dict) -> Optional[str]:
+def display_team_name(team: dict) -> Optional[str]:
     """
     Bugasura's team display-name rule: a team still on its default name is shown
-    as "... Projects". Mirrors the Bugasura web app's own normalisation so
-    every tool renders the same name the web app does.
+    as "... Projects". Mirrors the backend's own normalisation so every tool
+    renders the same name the web app does.
 
     Accepts rows from either /v1/teams/get ('name'/'alias') or /v1/teams/getApps
     ('team_name'/'team_alias_name').
@@ -269,7 +272,7 @@ def _display_team_name(team: dict) -> Optional[str]:
     return name
 
 
-def _paginated(items: list, total: Optional[int] = None, offset: int = 0,
+def paginated(items: list, total: Optional[int] = None, offset: int = 0,
                max_results: Optional[int] = None, **extras) -> dict:
     """
     Wrap a page of items in the standard pagination envelope (mcp-builder §Pagination).
@@ -289,8 +292,11 @@ def _paginated(items: list, total: Optional[int] = None, offset: int = 0,
     """
     count = len(items)
     if total is None:
-        total = count + offset  # unknown upstream total — treat current page as terminal
-    has_more = (offset + count) < total
+        # Unknown upstream total: a full page may have more behind it; total is then a lower bound
+        total = count + offset
+        has_more = bool(max_results) and count >= max_results
+    else:
+        has_more = (offset + count) < total
     next_offset = offset + count if has_more else None
     envelope = {
         'status': 'OK',
@@ -305,13 +311,15 @@ def _paginated(items: list, total: Optional[int] = None, offset: int = 0,
     return envelope
 
 
-def _paginate_upstream(upstream: dict, items_key: Optional[str] = None,
-                       offset: int = 0) -> dict:
+def paginate_upstream(upstream: dict, items_key: Optional[str] = None,
+                       offset: int = 0, max_results: Optional[int] = None,
+                       local: bool = False) -> dict:
     """
     Wrap a Bugasura upstream list response in the standard pagination envelope.
 
     items_key: name of the field carrying the list (e.g. 'project_list', 'comment_list').
                If None, the first list-valued field is used.
+    local:     the endpoint returns everything; slice [offset:offset+max_results] here.
     Non-OK upstream responses pass through unchanged.
     """
     if not isinstance(upstream, dict) or upstream.get('status') != 'OK':
@@ -330,14 +338,17 @@ def _paginate_upstream(upstream: dict, items_key: Optional[str] = None,
              or upstream.get('nrows')
              or upstream.get('total')
              or upstream.get('count'))
+    if local:
+        total = len(items)
+        items = items[offset:offset + max_results] if max_results else items[offset:]
     extras = {k: v for k, v in upstream.items()
               if k not in _PAGINATION_META_KEYS
               and k != items_key
               and k != 'status'}
-    return _paginated(items, total=total, offset=offset, **extras)
+    return paginated(items, total=total, offset=offset, max_results=max_results, **extras)
 
 
-def _get_http_client() -> httpx.AsyncClient:
+def get_http_client() -> httpx.AsyncClient:
     """Return a process-shared AsyncClient with a sensible default timeout."""
     global _http_client
     if _http_client is None or _http_client.is_closed:
@@ -361,7 +372,7 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
         endpoint: API endpoint path (e.g., '/v1/issues/list')
         api_key: Credential for authentication — the OAuth access token resolved for
                  this request (HTTP) or the legacy BUGASURA_API_KEY (STDIO)
-        **kwargs: Additional arguments passed to requests.request()
+        **kwargs: Additional arguments passed to httpx.AsyncClient.request()
                   - params: Query parameters for GET (integers OK)
                   - data: Form data for POST (IDs auto-converted to strings)
                   - json: JSON body for POST (IDs auto-converted to strings)
@@ -436,7 +447,7 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
 
     # No credential resolved: OAuth session missing (HTTP) or env var unset (STDIO)
     if not api_key or not api_key.strip():
-        return _auth_required_payload()
+        return auth_required_payload()
 
     # Log API request (without sensitive data)
     # SECURITY: Never log the full credential, only a hint for debugging
@@ -459,13 +470,11 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
     if method.upper() in ('POST', 'PUT', 'PATCH'):
         # Handle form-encoded data (data parameter)
         if 'data' in kwargs and kwargs['data']:
-            original_data = kwargs['data'].copy()
             kwargs['data'] = _prepare_post_params(kwargs['data'])
             logger.debug(f"POST data prepared: {len(kwargs['data'])} fields")
 
         # Handle JSON data (json parameter)
         if 'json' in kwargs and kwargs['json']:
-            original_json = kwargs['json'].copy()
             kwargs['json'] = _prepare_post_params(kwargs['json'])
             logger.debug(f"JSON data prepared: {len(kwargs['json'])} fields")
 
@@ -475,7 +484,7 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
         safe_params = {k: v for k, v in kwargs['params'].items() if k not in ['api_key', 'password', 'token']}
         logger.debug(f"Request params: {safe_params}")
 
-    client = _get_http_client()
+    client = get_http_client()
     try:
         # Make the HTTP request with constructed URL and headers
         logger.debug(f"Sending {method} request to {url}")
@@ -505,10 +514,11 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
         logger.error(f"HTTP Error: {method} {endpoint} - Status {status_code}: {str(e)}")
 
         if status_code == 401:
-            return _auth_required_payload("expired")
+            return auth_required_payload("expired")
 
+        # Details stay in the log; the caller gets the status and Bugasura's own JSON message.
         error_response = {
-            "error": str(e),
+            "error": f"Bugasura API returned HTTP {status_code}.",
             "status": "failed",
             "error_type": "HTTPError",
             "status_code": e.response.status_code if e.response is not None else None,
@@ -523,26 +533,23 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
                 if isinstance(error_body, dict):
                     logger.error(f"API Error Details: {error_body.get('message', error_body.get('error', 'No message'))}")
             except (ValueError, json.JSONDecodeError):
-                error_text = e.response.text[:500]
-                error_response["response_text"] = error_text
-                logger.error(f"API Error Response (non-JSON): {error_text[:200]}")
+                logger.error(f"API Error Response (non-JSON): {e.response.text[:500]}")
 
         return error_response
 
     except httpx.ConnectError as e:
         logger.error(f"Connection Error: {method} {endpoint} - Cannot reach {API_BASE}: {str(e)}")
         return {
-            "error": str(e),
+            "error": "Could not connect to the Bugasura API.",
             "status": "failed",
             "error_type": "ConnectionError",
-            "message": "Failed to connect to Bugasura API. Check network connectivity and API_BASE_URL configuration.",
-            "api_base": API_BASE
+            "message": "Failed to connect to Bugasura API. Try again shortly; if it persists, the server's API_BASE_URL configuration may be wrong.",
         }
 
     except httpx.TimeoutException as e:
         logger.error(f"Timeout Error: {method} {endpoint} - Request timed out: {str(e)}")
         return {
-            "error": str(e),
+            "error": "The Bugasura API did not respond in time.",
             "status": "failed",
             "error_type": "Timeout",
             "message": "Request to Bugasura API timed out. The server may be slow or unresponsive.",
@@ -552,17 +559,17 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
     except httpx.RequestError as e:
         logger.error(f"Request Error: {method} {endpoint} - {type(e).__name__}: {str(e)}")
         return {
-            "error": str(e),
+            "error": "The request to the Bugasura API failed.",
             "status": "failed",
-            "error_type": type(e).__name__,
+            "error_type": "RequestError",
             "message": "Unexpected error occurred while making API request."
         }
 
     except (json.JSONDecodeError, ValueError) as e:
         logger.critical(f"Unexpected Error: {method} {endpoint} - {type(e).__name__}: {str(e)}", exc_info=True)
         return {
-            "error": str(e),
+            "error": "The Bugasura API returned a response that could not be read.",
             "status": "failed",
-            "error_type": type(e).__name__,
+            "error_type": "InvalidResponse",
             "message": "Unexpected internal error occurred."
         }

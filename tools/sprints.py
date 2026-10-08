@@ -1,34 +1,26 @@
 """Bugasura MCP tools: sprints."""
-from typing import Any, List, Literal, Optional
+from typing import Literal, Optional
 
-from fastmcp import Context
 from pydantic import Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import _fetch_user_context, _get_api_key, _invalidate_user_context_cache, validate_api_key
-from client import (
-    _paginate_upstream, _paginated, _prepare_post_params, _render_markdown,
-    _respond, _validate_id, logger, make_api_request,
-)
-from helpers import (
-    _fetch_team_members, _find_user_ids_by_names_or_emails,
-    _resolve_issue_identifier_to_id, _resolve_team_identifier,
-    filter_large_fields, select_team_project_context,
-)
-
-import json
-import requests  # for except blocks referencing requests.RequestException
+from auth import get_api_key, validate_api_key
+from client import paginate_upstream, respond, logger, make_api_request
+from helpers import select_team_project_context
 
 
 @mcp.tool(
     name = "bugasura_list_sprints",
+    title = "List Sprints",
     description = "List all sprints for a project. Supports interactive team/project selection if IDs not provided.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_sprints(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -45,35 +37,42 @@ async def list_sprints(
         dict: List of sprints or selection prompt if context not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Use centralized context selection helper
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_list_sprints')
 
     # If context selection is needed, return the selection prompt
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # Context validated - proceed with operation
+    # The endpoint pages server-side (default 10, minimum 10, maximum 100) and reports total_rows.
     upstream = await make_api_request('GET', '/v1/sprints/list', api_key, params={
         'team_id': context['team_id'],
-        'project_id': context['project_id']
+        'project_id': context['project_id'],
+        'start_at': start_at,
+        'max_results': max_results,
     })
-    return _respond(_paginate_upstream(upstream, offset=0), response_format)
+    if isinstance(upstream, dict) and isinstance(upstream.get('sprintsList'), list):
+        upstream['sprintsList'] = upstream['sprintsList'][:max_results]
+    return respond(paginate_upstream(upstream, items_key='sprintsList', offset=start_at, max_results=max_results),
+                   response_format)
 
 
 @mcp.tool(
     name = "bugasura_get_sprint_details",
+    title = "Get Sprint Details",
     description = "Get detailed sprint information and statistics. Supports interactive team/project selection.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_sprint_details(
     sprint_id: int = Field(description="Sprint identifier", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -91,20 +90,20 @@ async def get_sprint_details(
         dict: Sprint details or selection prompt if context not provided
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Use centralized context selection helper
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_get_sprint_details', f', sprint_id={sprint_id}')
 
     # If context selection is needed, return the selection prompt
     if 'status' in context and context['status'] == 'selection_required':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # Context validated - proceed with operation
-    return _respond(await make_api_request('GET', '/v1/sprints/get', api_key, params={
+    return respond(await make_api_request('GET', '/v1/sprints/get', api_key, params={
         'team_id': context['team_id'],
         'project_id': context['project_id'],
         'sprint_id': sprint_id
@@ -113,13 +112,14 @@ async def get_sprint_details(
 
 @mcp.tool(
     name = "bugasura_create_sprint",
+    title = "Create Sprint",
     description = "Create a new sprint for a project. Requires sprint_name (5-250 chars). Supports dates, duration, and status. Interactive team/project selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_sprint(
-    sprint_name: str = Field(description="Name of the sprint (5-250 characters required, min_length=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_name: str = Field(description="Name of the sprint (5-250 characters required, min_length=1)", min_length=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     start_date: Optional[str] = Field(default=None, description="Sprint start date in YYYY-MM-DD format (optional)"),
     end_date: Optional[str] = Field(default=None, description="Sprint end date in YYYY-MM-DD format (optional)"),
     duration: Optional[int] = Field(default=None, description="Sprint duration in days (optional)"),
@@ -178,7 +178,7 @@ async def create_sprint(
                      duration=14, sprint_status="IN PROGRESS")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -239,13 +239,14 @@ async def create_sprint(
 
 @mcp.tool(
     name = "bugasura_update_sprint",
+    title = "Update Sprint",
     description = "Update sprint details (partial updates supported). Can update name, dates, duration, or status. Interactive team/project selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_sprint(
     sprint_id: int = Field(description="Sprint identifier", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_name: Optional[str] = Field(default=None, description="New sprint name (5-250 characters, optional)"),
     start_date: Optional[str] = Field(default=None, description="New start date in YYYY-MM-DD format (optional)"),
     end_date: Optional[str] = Field(default=None, description="New end date in YYYY-MM-DD format (optional)"),
@@ -295,7 +296,7 @@ async def update_sprint(
                      sprint_status="IN PROGRESS")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -393,13 +394,14 @@ async def update_sprint(
 
 @mcp.tool(
     name = "bugasura_delete_sprint",
-    description = "Delete a sprint permanently by numeric ID or exact name match. Supports interactive team/project selection.",
+    title = "Delete Sprint",
+    description = "Move a sprint to Trash (restorable from the web app) by numeric ID or exact name match. Supports interactive team/project selection.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_sprint(
     sprint_identifier: str = Field(description="Sprint identifier: numeric ID (e.g., '123') or exact sprint name (e.g., 'Sprint 15')"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Delete a sprint from a project by ID or name.
@@ -407,8 +409,8 @@ async def delete_sprint(
     Interactive flow: If team_id/project_id are not provided, this function
     will guide you through selection.
 
-    WARNING: This action cannot be undone. The sprint and all its associations
-    will be permanently removed.
+    The sprint is moved to Trash with its associations and can be restored from the web
+    app; its name gets a '-deleted-on-<date>' suffix.
 
     Args:
         sprint_identifier: Sprint ID (numeric) or sprint name (string) to delete (required)
@@ -432,7 +434,7 @@ async def delete_sprint(
         delete_sprint(api_key, sprint_identifier="Sprint 15")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation

@@ -1,28 +1,18 @@
 """Bugasura MCP tools: discovery."""
-from typing import Any, List, Literal, Optional
+from typing import Literal
 
-from fastmcp import Context
 from pydantic import Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import _fetch_user_context, _get_api_key, _invalidate_user_context_cache, validate_api_key
-from client import (
-    _paginate_upstream, _paginated, _prepare_post_params, _render_markdown,
-    _respond, _validate_id, logger, make_api_request,
-)
-from helpers import (
-    _fetch_team_members, _find_user_ids_by_names_or_emails,
-    _resolve_issue_identifier_to_id, _resolve_team_identifier,
-    filter_large_fields, select_team_project_context,
-)
-
-import json
-import requests  # for except blocks referencing requests.RequestException
+from auth import fetch_user_context, get_api_key
+from client import paginated, respond
+from helpers import search_projects_by_name
 
 
 @mcp.tool(
     name = "bugasura_get_user_context",
+    title = "Get User Context",
     description = "Get complete user context including all teams and their projects. Returns comprehensive information for discovery and finding team_id/project_id values.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
@@ -70,17 +60,18 @@ async def get_user_context(response_format: Literal["json", "markdown"] = Field(
         Now you have the IDs to use in list_issues()
     """
     # Resolve API key from parameter or environment
-    api_key = _get_api_key()
-    return _respond(await _fetch_user_context(api_key), response_format)
+    api_key = get_api_key()
+    return respond(await fetch_user_context(api_key), response_format)
 
 
 @mcp.tool(
     name = "bugasura_find_project_by_name",
+    title = "Find Project by Name",
     description = "Find projects by name across ALL teams. Searches case-insensitive, partial match. Returns team_id and project_id for use in other operations.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def find_project_by_name(
-    project_name: str = Field(description="Project name to search for (case-insensitive, partial match supported, min_length=1)"),
+    project_name: str = Field(description="Project name to search for (case-insensitive, partial match supported, min_length=1)", min_length=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -125,46 +116,31 @@ async def find_project_by_name(
     """
     # Validation
     if not project_name or not project_name.strip():
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': 'project_name cannot be empty'
         }, response_format)
 
     # Resolve API key from parameter or environment
-    api_key = _get_api_key()
+    api_key = get_api_key()
 
-    # Get user context using internal helper
-    context = await _fetch_user_context(api_key)
-    if context.get('status') != 'OK':
-        return _respond(context, response_format)
+    search = await search_projects_by_name(api_key, project_name)
+    if search.get('status') != 'OK':
+        return respond(search, response_format)
+    matches = search['matches']
 
-    # Search for matching projects
-    matches = []
-    search_term = project_name.lower().strip()
-
-    for team in context['teams']:
-        for project in team.get('projects', []):
-            if search_term in project.get('project_name', '').lower():
-                matches.append({
-                    'team_id': team.get('team_id'),
-                    'team_name': team.get('team_name'),
-                    'project_id': project.get('project_id'),
-                    'project_name': project.get('project_name'),
-                    'platform': project.get('platform', ''),
-                    'platform_type': project.get('platform_type', '')
-                })
-
-    return _respond(_paginated(matches, total=len(matches), offset=0,
+    return respond(paginated(matches, total=len(matches), offset=0,
                       query=project_name, matches=matches), response_format)
 
 
 @mcp.tool(
     name = "bugasura_find_team_by_name",
+    title = "Find Team by Name",
     description = "Find teams by name (case-insensitive, partial match). Returns team_id and project count for teams the user belongs to.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def find_team_by_name(
-    team_name: str = Field(description="Team name to search for (case-insensitive, partial match supported, min_length=1)"),
+    team_name: str = Field(description="Team name to search for (case-insensitive, partial match supported, min_length=1)", min_length=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -203,18 +179,18 @@ async def find_team_by_name(
     """
     # Validation
     if not team_name or not team_name.strip():
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': 'team_name cannot be empty'
         }, response_format)
 
     # Resolve API key from parameter or environment
-    api_key = _get_api_key()
+    api_key = get_api_key()
 
     # Get user context using internal helper
-    context = await _fetch_user_context(api_key)
+    context = await fetch_user_context(api_key)
     if context.get('status') != 'OK':
-        return _respond(context, response_format)
+        return respond(context, response_format)
 
     # Search for matching teams
     matches = []
@@ -230,5 +206,5 @@ async def find_team_by_name(
                 'is_expired': team.get('is_expired')
             })
 
-    return _respond(_paginated(matches, total=len(matches), offset=0,
+    return respond(paginated(matches, total=len(matches), offset=0,
                       query=team_name, matches=matches), response_format)

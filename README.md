@@ -79,7 +79,7 @@ Click **Connect**, sign in to Bugasura, and click **Allow** on the consent page.
 <details>
 <summary><b>VS Code</b></summary>
 
-Add to your VS Code MCP config:
+[Install in VS Code](https://insiders.vscode.dev/redirect/mcp/install?name=bugasura&config=%7B%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A//mcp.bugasura.io/mcp%22%7D), or add to your VS Code MCP config:
 
 ```json
 {
@@ -112,9 +112,32 @@ Then run `/mcp` inside Claude Code, choose **Bugasura → Authenticate**, and co
 </details>
 
 <details>
+<summary><b>ChatGPT</b></summary>
+
+Settings → Apps & Connectors → Advanced → turn on **Developer mode**, then **Create**:
+
+- Name: `Bugasura`
+- MCP Server URL: `https://mcp.bugasura.io/mcp`
+- Authentication: **OAuth**
+
+Click **Create**, sign in to Bugasura, and click **Allow**.
+
+</details>
+
+<details>
+<summary><b>Codex</b></summary>
+
+```bash
+codex mcp add bugasura --url https://mcp.bugasura.io/mcp
+codex mcp login bugasura
+```
+
+</details>
+
+<details>
 <summary><b>Cursor</b></summary>
 
-Add to `~/.cursor/mcp.json`:
+[Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=bugasura&config=eyJ1cmwiOiJodHRwczovL21jcC5zdGFnZS5idWdhc3VyYS5pby9tY3AifQ==), or add to `~/.cursor/mcp.json`:
 
 ```json
 {
@@ -753,6 +776,8 @@ Show all projects in team 456
 - `bugasura_create_test_case` - Create a new test case
 - `bugasura_update_test_case` - Update test case (partial updates supported, assignees by name/email/ID)
 - `bugasura_delete_test_case` - Delete a test case permanently (supports ID, test case key like "TES5", or scenario name)
+- `bugasura_link_test_cases_to_sprint` - Add existing test cases to a sprint (comma-separated test case IDs)
+- `bugasura_unlink_test_cases_from_sprint` - Remove test cases from a sprint; they stay in the project
 
 **Note:** All test case tools support interactive context selection. Delete operations can be performed using numeric IDs, test case keys (e.g., "TES5"), or scenario names.
 
@@ -1062,7 +1087,76 @@ python server.py --transport stdio
 python server.py --transport streamable-http --port 8000
 ```
 
-The hosted version at `https://mcp.bugasura.io/mcp` uses streamable HTTP.
+The hosted version at `https://mcp.bugasura.io/mcp` uses streamable HTTP. Built on FastMCP 4, the server speaks both MCP protocol eras on the same endpoint: the stateless 2026-07-28 protocol and the older 2025-11-25 `initialize` handshake. Each connection negotiates its own, so older and newer clients both work without any setting. This transport requires the OAuth sign-in to be configured (next section); the server refuses to start without it. STDIO needs nothing beyond `BUGASURA_API_KEY`.
+
+---
+
+## Deploying the OAuth sign-in
+
+> For whoever operates the server. Users never see any of this.
+
+The MCP server is an OAuth 2.0 front door built on FastMCP's `OAuthProxy` (`oauth.py`). MCP clients identify themselves either through Dynamic Client Registration or with a Client ID Metadata Document (CIMD, a URL they use as their `client_id`), and run PKCE against it. Both are accepted; the server itself is one pre-registered, confidential client of Bugasura and exchanges the code with the Bugasura API server-to-server. Bugasura's token never reaches the MCP client — the server issues its own short-lived token and swaps it on every request, validating the Bugasura token with `POST /v1/oauth/introspect` (cached for 60 s).
+
+### 1. Get client credentials from Bugasura
+
+The server signs in to Bugasura as the confidential OAuth client `bugasura-mcp`. Its client secret, and the callback `<MCP_PUBLIC_BASE_URL>/auth/callback`, are registered on Bugasura's side, so a self-hosted instance needs them issued by the Bugasura team ([support@bugasura.io](mailto:support@bugasura.io)).
+
+Bugasura's tokens are tied to the user's API key: regenerating the key in Bugasura signs out every MCP session that user has.
+
+### 2. Configure the MCP server
+
+Add to the instance's dotenv file (`.env`, or the tenant file named by `MCP_ENV_FILE`):
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `MCP_PUBLIC_BASE_URL` | yes | Public https origin, no trailing slash, e.g. `https://mcp.example.com`. Becomes the OAuth issuer (also sent as the RFC 9207 `iss` on every redirect back to the client) and the callback host. |
+| `BUGASURA_OAUTH_CLIENT_ID` | yes | `bugasura-mcp` |
+| `BUGASURA_OAUTH_CLIENT_SECRET` | yes | The plaintext whose hash is in the API config |
+| `MCP_JWT_SIGNING_KEY` | recommended | Signs the tokens issued to MCP clients and encrypts stored state. Without it both derive from the client secret, so rotating the secret signs everyone out. |
+| `OAUTH_STORAGE_PATH` | recommended | Directory for persistent OAuth state (`/var/lib/bugasura-mcp/<tenant>`), a Fernet-encrypted `FileTreeStore` (one JSON file per entry, FastMCP's own default). Without it, sessions live in memory and every client re-authenticates after a restart. Upgrading from the earlier `DiskStore` layout signs every client out once; the old diskcache files (`cache.db*`) in the directory can be deleted after the deploy. |
+| `OAUTH_REQUIRE_CONSENT` | no | `true` shows FastMCP's own consent interstitial before Bugasura's login (default `false`; see *About consent pages*). |
+| `BUGASURA_WEBSITE_URL` | no | Public product site linked from the server metadata and from the page a browser gets on `/mcp` (default `https://bugasura.io`). |
+| `MCP_SERVER_ICON_URL` | no | PNG logo on the server's consent interstitial and in the icons offered to MCP clients (default `https://bugasura.io/bugasura_icon_1024.png`). `MCP_SERVER_NAME` is the name shown there. |
+| `MCP_SERVER_ICON_SVG_URL` | no | SVG logo offered to MCP clients alongside the PNG (default `https://bugasura.io/bugasura_icon_512.svg`). |
+| `OPENAI_APPS_CHALLENGE_TOKEN` | no | ChatGPT app domain-verification token, served as plain text at `/.well-known/openai-apps-challenge`. Unset ⇒ 404. Set it only on the instance being submitted. |
+| `OAUTH_ALLOWED_REDIRECT_URIS` | no | Comma-separated extra redirect patterns for MCP clients beyond the built-in list (loopback, claude.ai, VS Code / Cline / Roo Code, Cursor, Windsurf, Antigravity, ChatGPT / Codex). Scheme, host and port are matched separately: the host is exact or `*.example.com`, `*` in the path matches anything, and a loopback pattern without a port matches any port. `cursor://*` matches nothing; write `cursor://anysphere.cursor-mcp/*`. |
+| `OAUTH_INTROSPECTION_CACHE_TTL` | no | Seconds a positive token check is cached (default 60). Also bounds how long a revoked session keeps working. |
+| `BUGASURA_OAUTH_*_URL` | no | Override the derived upstream endpoints (`{WEB_BASE_URL}oauth/authorize`, `{API_BASE}/v1/oauth/{token,introspect,revoke}`). |
+
+Start with `--forwarded-allow-ips` set to the reverse proxy's address. The server validates `Host` and `Origin` as the MCP spec requires against DNS rebinding (`app.py`). Allowed are the host and origin of `MCP_PUBLIC_BASE_URL`, plus loopback, so a reverse proxy works whether or not it preserves `Host`. A request with a foreign `Origin` gets `403` and one with an unknown `Host` gets `421`. Requests without an `Origin` header (CLI and desktop clients, claude.ai's connector) are unaffected; a browser page on another origin, such as the MCP Inspector's web UI against a deployed server, is rejected.
+
+CIMD clients make the server fetch their metadata document over https, with private and loopback addresses blocked. A tenant whose host can only reach the internet through an egress proxy sets `FASTMCP_SSRF_TRUST_PROXY=true` and `HTTPS_PROXY`.
+
+**Local testing.** Claude Code, Cursor and the Inspector can talk to `http://localhost:8000`: set `MCP_PUBLIC_BASE_URL=http://localhost:8000` and start with `--allow-insecure-http`. Claude Desktop and claude.ai are different: their connector runs from Anthropic's servers, so the MCP server must be reachable on the public internet over https. Put a tunnel in front of the local port and use its URL as the public base:
+
+```bash
+ngrok http 8000                      # note the https://xxxx.ngrok-free.app URL
+MCP_PUBLIC_BASE_URL=https://xxxx.ngrok-free.app \
+BUGASURA_OAUTH_CLIENT_ID=bugasura-mcp BUGASURA_OAUTH_CLIENT_SECRET=... \
+python server.py --transport streamable-http --port 8000 --forwarded-allow-ips '*'
+```
+
+Then add `https://xxxx.ngrok-free.app/mcp` as a custom connector. The tunnel's callback (`https://xxxx.ngrok-free.app/auth/callback`) must be one the Bugasura API accepts for your client id. Free ngrok shows a "Visit Site" interstitial the first time the browser lands on the tunnel; click through it.
+
+### About consent pages
+
+By default users see one screen on first connect: Bugasura's own login + consent page. FastMCP's proxy also has its own interstitial that names the MCP client and its callback address; it is off (`OAUTH_REQUIRE_CONSENT=false`) so the flow looks like Bugasura end to end.
+
+What keeps that safe: MCP clients register themselves (DCR) or bring their own metadata document (CIMD), so the server enforces a redirect-URI allow-list at registration, when the metadata document is loaded, and again at `/authorize` (`DEFAULT_ALLOWED_REDIRECT_URIS` in `config.py`). Only loopback addresses and the callbacks of the clients documented above (Claude Desktop / claude.ai, VS Code including Cline and Roo Code, Claude Code, Cursor, Windsurf, Google Antigravity, ChatGPT connectors including Codex) are accepted, plus anything in `OAUTH_ALLOWED_REDIRECT_URIS`; a client registering any other callback gets `invalid_redirect_uri` (DCR rejections are logged as `Rejected client registration`; a CIMD client whose callback is not allowed is rejected without a log line, so when a new client cannot sign in, check its callback against the list first). Without that check, a rogue client could register its own callback and receive a user's session. Set `OAUTH_REQUIRE_CONSENT=true` to bring the interstitial back as a second layer.
+
+### 3. Reverse proxy
+
+Forward the whole origin, not just `/mcp`. FastMCP mounts these at the root: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/mcp`, `/authorize`, `/token`, `/register`, `/revoke`, `/auth/callback`, `/consent`, plus `/mcp`, `/health` and `/sse`. Only `/mcp` requires a token.
+
+### 4. Check it
+
+```bash
+curl -s https://mcp.example.com/.well-known/oauth-authorization-server | jq '{issuer, client_id_metadata_document_supported, authorization_response_iss_parameter_supported}'
+curl -si -X POST https://mcp.example.com/mcp -H 'content-type: application/json' -d '{}' | grep -i www-authenticate   # 401 + resource_metadata
+curl -s https://mcp.example.com/health   # "auth": "oauth"
+```
+
+Then add the URL in Claude Code (`claude mcp add --transport http …`, `/mcp` → Authenticate) and confirm the browser lands on the Bugasura consent page and back.
 
 ---
 
@@ -1398,11 +1492,19 @@ delete_team_user(team_name="Sales", user_identifier="john@example.com")
 
 ---
 
+## Privacy Policy
+
+The server passes your requests to the Bugasura API under your own account. It keeps your session's OAuth tokens encrypted, caches your team/project list in memory for a few minutes, and writes operational logs; it has no database of its own. Data collection, usage, storage, sharing and retention are covered by the [Bugasura Privacy Policy](https://bugasura.io/privacy/) and [Terms of Service](https://bugasura.io/terms-of-service/). Questions: [support@bugasura.io](mailto:support@bugasura.io).
+
+---
+
 ## Support
 
 - 🌐 [Website](https://bugasura.io)
-- 📧 Contact support for assistance
+- 📧 [support@bugasura.io](mailto:support@bugasura.io)
 - 📚 [API Documentation](https://docs.bugasura.io)
+- 🔒 [Privacy Policy](https://bugasura.io/privacy/)
+- 📄 [Terms of Service](https://bugasura.io/terms-of-service/)
 
 ---
 

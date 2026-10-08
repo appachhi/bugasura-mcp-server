@@ -12,28 +12,21 @@ This module mirrors the web frontend's createFunctionalReport payload for an
 existing project.
 """
 
+import asyncio, base64, json, mimetypes, os, tempfile, time
 from typing import Any, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import _get_api_key, validate_api_key
+from auth import get_api_key, validate_api_key
 from client import logger, make_api_request
 from helpers import (
-    _download_url_tmp, _infer_filename_from_url_path, _normalise_share_url,
+    download_url_tmp, infer_filename_from_url_path, local_path_rejected, normalise_share_url,
     select_team_project_context, WEB_BASE_URL,
 )
 from tools.projects import get_project_details
-from tools.knowledge_base import _fetch_kb_documents
-
-import asyncio
-import base64
-import json
-import mimetypes
-import os
-import tempfile
-import time
+from tools.knowledge_base import fetch_kb_documents
 
 # --- Polling ------------------------------------------------------------------
 _KB_POLL_INTERVAL_SECONDS = 5
@@ -149,7 +142,8 @@ _REACHED = {
         "then bugasura_testpert_regenerate_testcases(feature_id=<id>, sprint_id=...) for each they want to redo; "
         "(2) call bugasura_list_test_cases(sprint_id=...) to show test cases, ask which one, "
         "then bugasura_update_test_case(testcase_id=<id>, sprint_id=..., assign_to_agent=True) — "
-        "functional test cases route to the Browser Agent, API test cases to the Testpert Agent automatically; "
+        "API test cases go to the API Agent; for the Browser Agent also pass platform_type='DESKTOP_WEB' "
+        "(the agents only run test cases of their platform), and edit test_data in the same call if needed; "
         "(3) call bugasura_create_test_run(report=<sprint_id>) — the tool will collect all run "
         "options from the user (name, single vs scheduled, environment, etc.) before creating."
     ),
@@ -189,13 +183,14 @@ _DEEPEN_SUBCAT_ORDER = ['product', 'business', 'tech', 'test', 'user']
 
 @mcp.tool(
     name = "bugasura_create_testpert_sprint",
+    title = "Create TestPert Sprint",
     description = "Create a TestPert (AI deep-enrichment) sprint for a project. The project (app) must be TestPert-enabled. Requires sprint_name (5-250 chars). Configurable options: feature_name, testing_type (Human/Agent/Automation), testing_depth (Quick/Deep), and skip_enrich_requirements. When called without confirm_options=True, returns the editable options for the user to confirm before the sprint is created. Interactive team/project selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_testpert_sprint(
-    sprint_name: str = Field(description="Name of the sprint (5-250 characters required, min_length=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_name: str = Field(description="Name of the sprint (5-250 characters required, min_length=1)", min_length=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     start_date: Optional[str] = Field(default=None, description="Sprint start date in YYYY-MM-DD format (optional)"),
     end_date: Optional[str] = Field(default=None, description="Sprint end date in YYYY-MM-DD format (optional)"),
     duration: Optional[int] = Field(default=None, description="Sprint duration in days (optional)"),
@@ -247,7 +242,7 @@ async def create_testpert_sprint(
         }
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -265,16 +260,18 @@ async def create_testpert_sprint(
     # The project must be TestPert-enabled to create a TestPert sprint.
     # Reuse get_project_details() (/v1/projects/get), which now returns
     # is_testpert_enabled, instead of a separate app lookup.
-    proj_resp = await get_project_details.fn(team_id=context['team_id'], project_id=context['project_id'],
-                                             response_format="json", api_key=api_key)
+    proj_resp = await get_project_details(team_id=context['team_id'], project_id=context['project_id'],
+                                          response_format="json")
     app_record = proj_resp.get('project_details') if isinstance(proj_resp, dict) and proj_resp.get('status') == 'OK' else None
     if not _is_testpert_enabled(app_record):
         return {
             'status': 'failed',
             'error': 'Project is not TestPert-enabled',
             'error_type': 'ValidationError',
-            'message': (f"Project {context['project_id']} does not have TestPert enabled. "
-                        f"Use bugasura_create_sprint to create a standard sprint.")
+            'message': (f"Project {context['project_id']} does not have TestPert enabled. TestPert is "
+                        f"switched on per project by Bugasura (it depends on the plan), not from here; "
+                        f"ask your Bugasura admin or support to enable it, or use bugasura_create_sprint "
+                        f"to create a standard sprint.")
         }
 
     # Surface the editable options to the user before creating the sprint, unless
@@ -330,6 +327,7 @@ async def create_testpert_sprint(
 
 @mcp.tool(
     name = "bugasura_prepare_kb_upload",
+    title = "Prepare KB Upload",
     description = (
         "CALL THIS FIRST — before doing anything else — whenever the user wants to upload a file "
         "(PDF, DOCX, image, screenshot, or any other file) to a Bugasura TestPert sprint or to a "
@@ -377,6 +375,7 @@ async def prepare_kb_upload(
 
 @mcp.tool(
     name = "bugasura_testpert_upload_kb",
+    title = "Upload TestPert KB",
     description = (
         "Attach knowledge-base material to a TestPert sprint. PREFER existing_kb_ids: link "
         "document(s) already in the project's Knowledge Base (get ids from "
@@ -393,17 +392,17 @@ async def prepare_kb_upload(
 async def upload_testpert_kb(
     source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. Share links are auto-converted to direct download URLs. IMPORTANT: the link must be set to 'Anyone with the link' access."),
     source_url_filename: Optional[str] = Field(default=None, description="Original filename with extension (e.g. 'PRD.pdf', 'wireframe.png'). Optional — the filename is inferred from the URL path or HTTP Content-Disposition header when not provided. Only pass this if auto-detection fails or the user explicitly names the file."),
-    file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (terminal/CLI use). Ask the user for the exact path — never construct or guess it."),
+    file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server). Ask the user for the exact path — never construct or guess it."),
     text_content: Optional[str] = Field(default=None, description="Plain text the user pasted directly into the chat. Only for text kb_types. Not for PDFs, DOCX, or images — use source_url for those."),
     text_content_filename: Optional[str] = Field(default=None, description="Filename for the text_content upload (e.g. 'notes.md'). Text-native extensions (.md, .json, .txt) are preserved as-is."),
     existing_kb_ids: List[int] = Field(default=[], description="IDs of documents already in the project's Knowledge Base (from bugasura_list_knowledge_base_documents) to link to this sprint instead of re-uploading them."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). If omitted, you'll be prompted to pick a sprint (ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). If omitted, you'll be prompted to pick a sprint (ge=1).", ge=1),
     kb_type: Literal[
         'document', 'api_docs', 'meeting_notes', 'user_flow', 'test_data',
         'architecture_image', 'db_schema_image', 'wireframe_image', 'design_image', 'flow_image'
     ] = Field(default='document', description="Knowledge-base source type for these files. 'document'/'api_docs'/'meeting_notes'/'user_flow'/'test_data' take text docs; the '*_image' types take images."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Upload one or more knowledge-base files to a TestPert sprint.
@@ -434,7 +433,7 @@ async def upload_testpert_kb(
         `totalTrainingCompletionEstimationStr` on success, plus a `next_step` hint.
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -450,8 +449,8 @@ async def upload_testpert_kb(
         return _sprint_selection_required(context['team_id'], context['project_id'])
 
     # The project must be TestPert-enabled.
-    proj_resp = await get_project_details.fn(team_id=context['team_id'], project_id=context['project_id'],
-                                             response_format="json", api_key=api_key)
+    proj_resp = await get_project_details(team_id=context['team_id'], project_id=context['project_id'],
+                                          response_format="json")
     app_record = proj_resp.get('project_details') if isinstance(proj_resp, dict) and proj_resp.get('status') == 'OK' else None
     if not _is_testpert_enabled(app_record):
         return {
@@ -461,6 +460,9 @@ async def upload_testpert_kb(
             'message': (f"Project {context['project_id']} does not have TestPert enabled, "
                         f"so it has no knowledge base to upload to.")
         }
+
+    if file_paths and (rejected := local_path_rejected('file_paths')):
+        return rejected
 
     # Validate: need at least one source of content.
     if not file_paths and not source_url and not text_content and not existing_kb_ids:
@@ -481,7 +483,7 @@ async def upload_testpert_kb(
 
     # The backend links any integer id without checking it, so a wrong id would report success.
     if existing_kb_ids:
-        docs_resp = await _fetch_kb_documents(api_key, context['team_id'], context['project_id'])
+        docs_resp = await fetch_kb_documents(api_key, context['team_id'], context['project_id'])
         if docs_resp.get('status') != 'OK':
             return docs_resp
         known_ids = {str(d.get('kb_id')) for d in docs_resp['documents']}
@@ -517,7 +519,7 @@ async def upload_testpert_kb(
     try:
         # --- source_url path (MCP server fetches the file from a public URL) -------
         if source_url and not file_paths:
-            download_url = _normalise_share_url(source_url)
+            download_url = normalise_share_url(source_url)
 
             if source_url_filename:
                 # User supplied a filename — validate extension then download.
@@ -542,7 +544,7 @@ async def upload_testpert_kb(
                 download_suffix = f'.{url_ext}'
             else:
                 # No filename provided — try to infer from URL path first (cheap, no network).
-                path_name = _infer_filename_from_url_path(download_url) or _infer_filename_from_url_path(source_url)
+                path_name = infer_filename_from_url_path(download_url) or infer_filename_from_url_path(source_url)
                 if path_name:
                     inferred_ext = os.path.splitext(path_name)[1].lstrip('.').lower()
                     if inferred_ext in allowed_exts:
@@ -558,7 +560,7 @@ async def upload_testpert_kb(
                     download_suffix = '.tmp'
 
             try:
-                tmp_path, cd_name = _download_url_tmp(download_url, download_suffix)
+                tmp_path, cd_name = download_url_tmp(download_url, download_suffix)
             except Exception as e:
                 return {
                     'status': 'failed',
@@ -721,6 +723,7 @@ async def upload_testpert_kb(
 # --- Skip-enrich kickoff: requirements -> test plan (no docs, no questions) -----
 @mcp.tool(
     name = "bugasura_testpert_start_skip_testplan",
+    title = "Start TestPert (Skip Test Plan)",
     description = (
         "SKIP-ENRICH sprints ONLY. For a TestPert sprint created with skip_enrich_requirements=1, this drives "
         "the front half of the flow WITHOUT document upload and WITHOUT the deepen/missing/risk questions, using "
@@ -733,11 +736,11 @@ async def upload_testpert_kb(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def start_skip_testplan(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=45, description="Upper bound on polling while the test plan is generated (0-45, default 45). Capped at 45s to stay under MCP client timeouts; re-call to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Skip-enrich front half: SPRINT_DETAILS -> ENRICH_REQUIREMENTS -> GENERATE_TEST_PLANING -> TEST_PLANING.
@@ -747,7 +750,7 @@ async def start_skip_testplan(
     + skipEnrichRequirements=1 (which attaches the project requirements as the KB source and kicks the plan).
     Guarded to skip-enrich sprints only so the normal flow is never affected.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -871,6 +874,7 @@ async def start_skip_testplan(
 
 @mcp.tool(
     name = "bugasura_testpert_advance",
+    title = "Advance TestPert Sprint",
     description = (
         "Read the current TestPert phase OR advance the sprint to a new phase. "
         "ALWAYS call this (with to_status omitted) when the user asks for the sprint's status, "
@@ -885,7 +889,7 @@ async def start_skip_testplan(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def advance_testpert(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     to_status: Optional[Literal[
         'KNOWLEDGE_BASE', 'GENERATE_SPRINT_CONTEXT', 'REGENERATE_SPRINT_CONTEXT',
         'GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS',
@@ -899,8 +903,8 @@ async def advance_testpert(
     testpert_flow_attempt: Optional[int] = Field(default=None, description="Retry attempt counter for REGENERATE flows (0-99). Usually omit."),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response). When provided, a clickable sprint link is included once a phase is reached."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting on long phases."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Advance and/or poll a TestPert sprint's status.
@@ -916,7 +920,7 @@ async def advance_testpert(
         dict: {status, current_status, advanced_to?, reached?, in_progress?, message, next_step?}
     """
     # Validate API key.
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1032,6 +1036,7 @@ async def advance_testpert(
 
 @mcp.tool(
     name = "bugasura_testpert_get_requirement_contexts",
+    title = "Get TestPert Requirement Contexts",
     description = (
         "Fetch a TestPert sprint's requirement-analysis context for user review: the engine's "
         "deepen-requirement questions, missing requirements, and requirement risks. Use after a "
@@ -1042,10 +1047,10 @@ async def advance_testpert(
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
 async def get_testpert_requirement_contexts(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     category: Literal['all', 'deepen_questions', 'missing', 'risk'] = Field(default='all', description="Which context set to return (default: all)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Read requirement-context rows for a sprint and group them by category.
@@ -1058,7 +1063,7 @@ async def get_testpert_requirement_contexts(
         If the engine hasn't produced any rows yet, returns status 'OK' with empty
         groups and a hint to ensure the phase has completed.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1151,6 +1156,7 @@ async def get_testpert_requirement_contexts(
 
 @mcp.tool(
     name = "bugasura_testpert_add_context_question",
+    title = "Add TestPert Context Question",
     description = (
         "Add a new contextual (deepen-requirement) question to a TestPert sprint, like the "
         "'Add Question' button in the platform's Deepen Requirements tab. The sprint must be at "
@@ -1161,14 +1167,14 @@ async def get_testpert_requirement_contexts(
 )
 async def add_testpert_context_question(
     question: str = Field(description="The question text to add (the 'title' / query of the new deepen-requirement question)."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     sub_category: str = Field(default='product', description="Sub-category for the question. One of: product, business, tech, test, user (default: product)."),
     answer: Optional[str] = Field(default=None, description="Optional initial answer/response for the question (default: empty — unanswered)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Add a new deepen-requirement context question via /v1/testpertrequirementcontexts/add."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1210,22 +1216,23 @@ async def add_testpert_context_question(
 
 @mcp.tool(
     name = "bugasura_testpert_delete_context_question",
+    title = "Delete TestPert Context Question",
     description = (
         "Delete a contextual (deepen-requirement) question from a TestPert sprint, like the "
         "delete/remove action in the platform's Deepen Requirements tab. Pass the "
         "requirement_context_id from bugasura_testpert_get_requirement_contexts(category='deepen_questions'). "
         "The sprint must be at DEEPEN_REQUIREMENTS_QUESTIONS."
     ),
-    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
 )
 async def delete_testpert_context_question(
     requirement_context_id: int = Field(description="ID of the context question to delete (from bugasura_testpert_get_requirement_contexts deepen_questions_list)."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Delete a deepen-requirement context question via /v1/testpertrequirementcontexts/delete."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1251,6 +1258,7 @@ async def delete_testpert_context_question(
 
 @mcp.tool(
     name = "bugasura_testpert_update_requirement_contexts",
+    title = "Update TestPert Requirement Contexts",
     description = (
         "Write the user's review back to a TestPert sprint's requirement contexts: answers to "
         "deepen-requirement questions, and approve/reject/edit decisions on missing requirements "
@@ -1270,9 +1278,9 @@ async def update_testpert_requirement_contexts(
         "If details/title are given and is_edited is omitted, is_edited defaults to true."
     )),
     advance: bool = Field(default=True, description="If True (default) and the sprint is at MISSING_REQUIREMENTS, advance to RISKS_IN_REQUIREMENTS once every missing requirement has a decision. Undecided rows left over keep the sprint where it is (the count comes back as undecided_missing_requirements). No effect at other stages (e.g. deepen-questions or risks) — advance those manually with bugasura_testpert_advance."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Apply per-row updates to requirement contexts via /v1/testpertrequirementcontexts/update.
@@ -1283,7 +1291,7 @@ async def update_testpert_requirement_contexts(
     while the sprint is at MISSING_REQUIREMENTS, re-reads the rows and POSTs RISKS_IN_REQUIREMENTS
     (a synchronous flip — no engine dispatch, no polling) only once none are left undecided.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1423,6 +1431,7 @@ async def update_testpert_requirement_contexts(
 
 @mcp.tool(
     name = "bugasura_testpert_get_testplan",
+    title = "Get TestPert Test Plan",
     description = (
         "Fetch a TestPert sprint's AI-generated test plan — the feature/sub-feature tree, test "
         "focus areas (with their EXHAUSTIVE/SUFFICIENT/MINIMAL/NONE levels), flows, scenarios, "
@@ -1436,12 +1445,12 @@ async def update_testpert_requirement_contexts(
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
 async def get_testpert_testplan(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Read the sprint's test plan via /v1/testpert/sprint/testplan/get."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1519,6 +1528,7 @@ async def get_testpert_testplan(
 
 @mcp.tool(
     name = "bugasura_testpert_update_testplan",
+    title = "Update TestPert Test Plan",
     description = (
         "Edit a TestPert sprint's test plan, the way the web Test Plan tab does. Set per-area focus "
         "levels (each focus area -> EXHAUSTIVE/SUFFICIENT/MINIMAL/NONE) and/or edit features, flows, "
@@ -1531,7 +1541,7 @@ async def get_testpert_testplan(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def update_testpert_testplan(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     test_focus_areas: Optional[dict] = Field(default=None, description="Per-area focus levels keyed by the area name from get_testplan, e.g. {'Authentication':'EXHAUSTIVE','Reporting':'MINIMAL'}. Level is a string (or 1-item list); allowed: EXHAUSTIVE/SUFFICIENT/MINIMAL/NONE."),
     features: Optional[Any] = Field(default=None, description="Edited features structure (use the shape returned by get_testplan's testPlanDetails.features)."),
     flows: Optional[Any] = Field(default=None, description="Edited flows structure (shape from get_testplan)."),
@@ -1539,8 +1549,8 @@ async def update_testpert_testplan(
     test_models: Optional[Any] = Field(default=None, description="Test models: a list of names, or a comma-separated string."),
     sprint_test_data: Optional[Any] = Field(default=None, description="Edited sprint test data structure (shape from get_testplan)."),
     test_plan_details: Optional[dict] = Field(default=None, description="Advanced: full testPlanDetails object sent as-is; other params are merged on top of it."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Save test-plan edits via /v1/testpert/sprint/testplan/update (plan only, no status change).
@@ -1550,7 +1560,7 @@ async def update_testpert_testplan(
     (devices/team are not updatable through this endpoint). Status transitions go through
     bugasura_testpert_advance. Backend requires the user to be a team admin.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1632,6 +1642,7 @@ async def update_testpert_testplan(
 
 @mcp.tool(
     name = "bugasura_testpert_get_coverage",
+    title = "Get TestPert Coverage",
     description = (
         "Fetch a TestPert sprint's coverage mind map (feature x sub-feature tree) "
         "for display. Read-only view; to move the sprint to TEST_COVERAGE use "
@@ -1640,12 +1651,12 @@ async def update_testpert_testplan(
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
 async def get_testpert_coverage(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Get the coverage mind map via /v1/testpert/getSprintCoverageMindMap (flips to TEST_COVERAGE)."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1677,6 +1688,7 @@ async def get_testpert_coverage(
 
 @mcp.tool(
     name = "bugasura_testpert_generate_testcases",
+    title = "Generate TestPert Test Cases",
     description = (
         "Generate test cases for a TestPert sprint: set the status to GENERATE_TEST_CASES and poll "
         "until either the sprint status reaches TEST_CASES OR all sub-features are COMPLETED — "
@@ -1688,12 +1700,12 @@ async def get_testpert_coverage(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def generate_testpert_testcases(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (for the sprint link). Optional — resolved automatically from the sprint if omitted."),
     elapsed_seconds: int = Field(default=0, description="Internal: cumulative seconds already spent polling across earlier re-calls. Pass back the value the previous response's next_step gives you."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Kick off test-case generation and poll completion via sub-feature status.
@@ -1704,7 +1716,7 @@ async def generate_testpert_testcases(
     This matches the platform's own progress display and avoids the need for the
     user to manually confirm or for the MCP to force-set the status.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1832,6 +1844,7 @@ async def generate_testpert_testcases(
 
 @mcp.tool(
     name = "bugasura_testpert_regenerate_testcases",
+    title = "Regenerate TestPert Test Cases",
     description = (
         "Regenerate test cases for a specific sub-feature once the sprint has reached TEST_CASES. "
         "Mirrors the regenerate button (green refresh icon) for COMPLETED sub-features and the "
@@ -1850,17 +1863,17 @@ async def generate_testpert_testcases(
 )
 async def regenerate_testpert_testcases(
     feature_id: int = Field(description="The sub-feature's feature_id to regenerate (from bugasura_testpert_get_features — the sub-feature row id, not the parent feature id)."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     confirm_context: bool = Field(default=False, description="Set to True only after the user has selected options for ALL THREE sections (gap_analysis, test_focus_area, context_discovery). When False (default), the tool returns the three-section options form for the user to fill in — you must show these to the user, collect their choices, then re-call with confirm_context=True."),
-    gap_analysis: List[str] = Field(default=[], description="[Section 1] Selected gap analysis issues. Valid values: 'coverage_gaps', 'depth_issues', 'relevance_problems', 'technical_misalignment'. At least one required when confirm_context=True."),
+    gap_analysis: List[Literal["coverage_gaps", "depth_issues", "relevance_problems", "technical_misalignment"]] = Field(default=[], description="[Section 1] Selected gap analysis issues. Valid values: 'coverage_gaps', 'depth_issues', 'relevance_problems', 'technical_misalignment'. At least one required when confirm_context=True."),
     test_focus_area: List[str] = Field(default=[], description="[Section 2] Selected test focus area names from the sprint's test plan (e.g. 'Authentication', 'Reporting'). Use the labels returned in the context_required response. At least one required when confirm_context=True."),
     context_discovery: List[dict] = Field(default=[], description="[Section 3] Selected context discovery items as [{'key': str, 'value': str}] where key is one of 'missed_user_personas'/'business_constraints'/'integration_dependencies'/'risk_focus' and value is optional context text. At least one item required when confirm_context=True; value may be empty or omitted."),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (for the sprint link). Optional — resolved automatically if omitted."),
     is_retry: bool = Field(default=False, description="True to retry a sub-feature in ERROR status (the retry/circular-arrow button); False (default) to regenerate a COMPLETED sub-feature (the green refresh icon)."),
     elapsed_seconds: int = Field(default=0, description="Internal: cumulative seconds already spent polling across earlier re-calls. Pass back the elapsed_seconds value from the previous response to keep polling."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Regenerate or retry test cases for a specific sub-feature in a TEST_CASES-phase sprint.
@@ -1874,7 +1887,7 @@ async def regenerate_testpert_testcases(
     Re-callable: pass back elapsed_seconds from the previous response to keep polling
     across call boundaries without re-triggering the generation.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -1895,9 +1908,8 @@ async def regenerate_testpert_testcases(
     if not confirm_context:
         raw_fa = await _fetch_sprint_focus_areas(api_key, tid, pid, sprint_id)
         fa_rows = _focus_areas_view(raw_fa) if raw_fa else []
-        # Build Tab 2 options the same way the PHP controller does:
-        #   ucfirst(str_replace('_', ' ', $focusIndex))
-        # i.e. use the config KEY (not parent_category) formatted for display.
+        # Build Tab 2 options the same way the web app does: the config KEY (not
+        # parent_category) with underscores as spaces and the first letter capitalised.
         seen: set = set()
         tab2_options = []
         for row in fa_rows:
@@ -2205,6 +2217,7 @@ async def regenerate_testpert_testcases(
 # --- Enrich requirements (RISKS_IN_REQUIREMENTS -> ENRICH_REQUIREMENTS) — visible step --
 @mcp.tool(
     name = "bugasura_testpert_enrich_requirements",
+    title = "Enrich TestPert Requirements",
     description = (
         "Run the requirements-enrichment phase as a visible step: set GENERATE_ENRICH_REQUIREMENTS and "
         "poll until ENRICH_REQUIREMENTS. Use this after the requirement risks (RISKS_IN_REQUIREMENTS) "
@@ -2217,11 +2230,11 @@ async def regenerate_testpert_testcases(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def enrich_testpert_requirements(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (for the sprint link). Optional — resolved automatically if omitted."),
     max_wait_seconds: int = Field(default=45, description="Upper bound on polling while enrichment runs (0-45, default 45). Capped at 45s; re-call to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Drive the enrichment phase RISKS_IN_REQUIREMENTS -> GENERATE_ENRICH_REQUIREMENTS -> ENRICH_REQUIREMENTS.
@@ -2233,7 +2246,7 @@ async def enrich_testpert_requirements(
     Skip-enrich sprints don't use this (they reach ENRICH_REQUIREMENTS via start_skip_testplan).
     generate_coverage still bundles enrichment, so this tool is an optional, visible front-half of that.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2342,6 +2355,7 @@ async def enrich_testpert_requirements(
 # --- Move to test coverage (RISKS_IN_REQUIREMENTS -> ... -> TEST_PLANING -> TEST_COVERAGE) ---
 @mcp.tool(
     name = "bugasura_testpert_generate_coverage",
+    title = "Generate TestPert Coverage",
     description = (
         "Move a TestPert sprint to TEST_COVERAGE (required before generating test cases). TEST_COVERAGE "
         "is only valid from TEST_PLANING, so unless the sprint skips enrichment, this drives it there "
@@ -2353,18 +2367,18 @@ async def enrich_testpert_requirements(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def generate_testpert_coverage(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=45, description="Upper bound on polling for whichever phase is currently running — enrich or test plan (0-45, default 45). Capped at 45s; re-call to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Drive to TEST_PLANING (unless already there) then set TEST_COVERAGE via
     /v1/testpert/sprint/updateStatus.
 
     TEST_COVERAGE is a valid transition ONLY from TEST_PLANING in the API's status
-    switch. For the non-skip flow this means enrichment and the test plan must both
+    machine. For the non-skip flow this means enrichment and the test plan must both
     run first — each is one POST + one bounded poll per call, so a single call advances at
     most one phase; re-call to keep going. Setting TEST_COVERAGE itself is synchronous (no
     GENERATE_TEST_COVERAGE marker, no admin requirement).
@@ -2374,7 +2388,7 @@ async def generate_testpert_coverage(
     enrichment), while a failed enrichment has no API retry path at all and is reported as
     such instead of being re-posted.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2569,6 +2583,7 @@ async def generate_testpert_coverage(
 
 @mcp.tool(
     name = "bugasura_testpert_get_features",
+    title = "Get TestPert Features",
     description = (
         "List a TestPert sprint's features and sub-features as a tree (the live set the Features tab "
         "edits). Use this to show the feature/sub-feature breakdown in the test-plan phase and to get "
@@ -2578,12 +2593,12 @@ async def generate_testpert_coverage(
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
 async def get_testpert_features(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Read the feature tree via /v1/testpert/testpertfeatures/getTestpertFeatures and group it."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2644,6 +2659,7 @@ async def get_testpert_features(
 
 @mcp.tool(
     name = "bugasura_testpert_add_feature",
+    title = "Add TestPert Feature",
     description = (
         "Add a feature or sub-feature to a TestPert sprint, like the '+Add' control in the web "
         "Features tab. For a sub-feature (the common case) pass parent_feature_id and is_parent=False; "
@@ -2654,16 +2670,16 @@ async def get_testpert_features(
 )
 async def add_testpert_feature(
     feature_name: str = Field(description="Name of the feature / sub-feature to add."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     parent_feature_id: Optional[int] = Field(default=None, description="Parent feature's id — required when adding a sub-feature (is_parent=False)."),
     is_parent: bool = Field(default=False, description="True to add a top-level feature; False (default) to add a sub-feature under parent_feature_id."),
     is_api_endpoint: bool = Field(default=False, description="Mark the feature as an API endpoint (default False)."),
     requirement_id: Optional[int] = Field(default=None, description="Optional requirement id to link the sub-feature to."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Add a feature/sub-feature via /v1/testpert/testpertfeatures/addTestpertFeatures."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2703,21 +2719,22 @@ async def add_testpert_feature(
 
 @mcp.tool(
     name = "bugasura_testpert_delete_feature",
+    title = "Delete TestPert Feature",
     description = (
         "Delete a feature or sub-feature from a TestPert sprint, like the 'x' on a feature in the web "
         "Features tab. Pass the feature_id (from bugasura_testpert_get_features)."
     ),
-    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
 )
 async def delete_testpert_feature(
     feature_id: int = Field(description="Id of the feature / sub-feature to delete."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     requirement_id: Optional[Any] = Field(default=None, description="Optional requirement id (or list of ids) linked to the feature, to unlink on delete."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Delete a feature/sub-feature via /v1/testpert/testpertfeatures/deleteTestpertFeatures."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2748,6 +2765,7 @@ async def delete_testpert_feature(
 # --- Start requirement analysis (GENERATE_SPRINT_CONTEXT -> SPRINT_CONTEXT) ---
 @mcp.tool(
     name = "bugasura_testpert_generate_sprint_context",
+    title = "Generate TestPert Sprint Context",
     description = (
         "Start requirement analysis after the knowledge base is uploaded: set the status to "
         "GENERATE_SPRINT_CONTEXT and poll until it becomes SPRINT_CONTEXT (or, if some uploaded "
@@ -2762,11 +2780,11 @@ async def delete_testpert_feature(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def generate_testpert_sprint_context(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Kick off sprint-context / requirement analysis and poll to the SPRINT_CONTEXT stage.
@@ -2775,7 +2793,7 @@ async def generate_testpert_sprint_context(
     SPRINT_CONTEXT_USER_VALIDATION; if already generating it just polls; otherwise it sets
     GENERATE_SPRINT_CONTEXT (valid from KNOWLEDGE_BASE) then polls until either status.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2849,6 +2867,7 @@ async def generate_testpert_sprint_context(
 # --- KB validation (SPRINT_CONTEXT_USER_VALIDATION) -------------------------
 @mcp.tool(
     name = "bugasura_testpert_get_kb_validation",
+    title = "Get TestPert KB Validation",
     description = (
         "Read the KB-validation verdict for a sprint parked at SPRINT_CONTEXT_USER_VALIDATION: the "
         "uploaded documents the engine couldn't confidently classify, each with a reason. Call this "
@@ -2859,12 +2878,12 @@ async def generate_testpert_sprint_context(
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
 async def get_testpert_kb_validation(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """GET /v1/testpert/sprint/getContext (dataType=USER_VALIDATION) and extract the flagged files."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -2965,6 +2984,7 @@ class KbFileRole(BaseModel):
 
 @mcp.tool(
     name = "bugasura_testpert_resolve_kb_validation",
+    title = "Resolve TestPert KB Validation",
     description = (
         "Submit the user's role choices for the documents flagged by bugasura_testpert_get_kb_validation "
         "and resume sprint-context generation. Only include files the user is keeping — remove others "
@@ -2981,17 +3001,17 @@ async def resolve_testpert_kb_validation(
         "CONSTRAINTS>}. Include every file the user is keeping — any flagged file left out is dropped "
         "from the verdict. Get kb_id/reason from bugasura_testpert_get_kb_validation."
     )),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Attach roles to the currently-flagged KB files and POST REGENERATE_SPRINT_CONTEXT with
     sprintContextUserValidationData, then poll to SPRINT_CONTEXT / SPRINT_CONTEXT_USER_VALIDATION.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3098,6 +3118,7 @@ async def resolve_testpert_kb_validation(
 # --- Sprint context review (affected modules / user roles) -----------------
 @mcp.tool(
     name = "bugasura_testpert_get_sprint_context",
+    title = "Get TestPert Sprint Context",
     description = (
         "Read the sprint context the engine built at SPRINT_CONTEXT: its guessed platform, the user "
         "roles/personas it identified (if any), the affected modules it flagged, and the "
@@ -3108,12 +3129,12 @@ async def resolve_testpert_kb_validation(
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
 async def get_testpert_sprint_context(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """GET /v1/testpert/sprint/getContext (dataType=SPRINT_CONTEXT) and extract the parked verdict."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3126,6 +3147,12 @@ async def get_testpert_sprint_context(
         return _sprint_selection_required(context['team_id'], context['project_id'])
 
     tid, pid = context['team_id'], context['project_id']
+    current = _extract_sprint_status(
+        await _get_sprint_testpert_status_raw(api_key, tid, pid, sprint_id))
+    not_ready = _sprint_context_not_ready(current)
+    if not_ready:
+        return not_ready
+
     resp = await _get_sprint_context_raw(api_key, tid, pid, sprint_id, 'SPRINT_CONTEXT')
     if not (isinstance(resp, dict) and resp.get('status') == 'OK'):
         return {
@@ -3136,8 +3163,6 @@ async def get_testpert_sprint_context(
 
     details = resp.get('sprintContextDetails') or {}
     personas = details.get('user_personas') or {}
-    current = _extract_sprint_status(
-        await _get_sprint_testpert_status_raw(api_key, tid, pid, sprint_id))
     return {
         'status': 'OK',
         'sprint_id': sprint_id,
@@ -3159,6 +3184,7 @@ async def get_testpert_sprint_context(
 
 @mcp.tool(
     name = "bugasura_testpert_confirm_sprint_context",
+    title = "Confirm TestPert Sprint Context",
     description = (
         "Confirm the sprint context and advance to the requirement questions (SPRINT_CONTEXT -> "
         "GENERATE_DEEPEN_REQUIREMENTS_QUESTIONS -> DEEPEN_REQUIREMENTS_QUESTIONS). Optionally pass "
@@ -3172,11 +3198,11 @@ async def get_testpert_sprint_context(
 async def confirm_testpert_sprint_context(
     affected_modules: Optional[List[str]] = Field(default=None, description="Replace the affected-modules list with these (omit to keep the engine's list unchanged)."),
     user_roles: Optional[List[str]] = Field(default=None, description="Replace the user-roles/personas list with these (omit to keep the engine's list unchanged)."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     If affected_modules/user_roles are given, merge them into the current sprintContextDetails and
@@ -3184,7 +3210,7 @@ async def confirm_testpert_sprint_context(
     transition (the only write the API accepts for this data). Otherwise just advance. Then poll to
     DEEPEN_REQUIREMENTS_QUESTIONS.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3282,6 +3308,7 @@ async def confirm_testpert_sprint_context(
 # --- Answer the contextual (deepen) questions ------------------------------
 @mcp.tool(
     name = "bugasura_testpert_answer_context_questions",
+    title = "Answer TestPert Context Questions",
     description = (
         "Submit the user's answers to a TestPert sprint's contextual (deepen-requirement) questions. "
         "Each answer is saved per-row via /testpertrequirementcontexts/update (writes the answer to the "
@@ -3298,11 +3325,11 @@ async def answer_testpert_context_questions(
         "Use the requirement_context_id and query from bugasura_testpert_get_requirement_contexts(category='deepen_questions'). "
         "Only the questions you include are answered; the rest keep their current response."
     )),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     advance: bool = Field(default=True, description="If True (default), advance to GENERATE_MISSING_REQUIREMENTS and poll until MISSING_REQUIREMENTS. If False, just save the answers."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on polling when advance=True (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Persist contextual-question answers per-row via /v1/testpertrequirementcontexts/update.
@@ -3312,7 +3339,7 @@ async def answer_testpert_context_questions(
     sprint status; when advance=True a separate /testpert/sprint/updateStatus call moves the
     sprint to GENERATE_MISSING_REQUIREMENTS and polls until MISSING_REQUIREMENTS.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3373,8 +3400,8 @@ async def answer_testpert_context_questions(
     # the answer to the row's `details` column (isEdited=1) WITHOUT touching the status machine.
     # We deliberately do NOT use /testpertKB/sprintProblemContext/addUpdate here: that endpoint
     # force-updates the sprint status to one of CONTEXT_APPROVE/GENERATE_TEST_PLANING/
-    # TEST_PLANING_IN_PROGRESS unconditionally, none of
-    # which are legal from DEEPEN_REQUIREMENTS_QUESTIONS — so it errors regardless of payload.
+    # TEST_PLANING_IN_PROGRESS, none of which are legal from DEEPEN_REQUIREMENTS_QUESTIONS — so
+    # it errors regardless of payload.
     answered = 0
     matched = set()
     failed = []
@@ -3474,6 +3501,7 @@ async def answer_testpert_context_questions(
 
 @mcp.tool(
     name = "bugasura_testpert_list_kb",
+    title = "List TestPert KB",
     description = (
         "List the documents/sources currently in a TestPert sprint's knowledge base, with the id "
         "needed to remove any of them. Use this to show what's uploaded and to let the user delete "
@@ -3482,12 +3510,12 @@ async def answer_testpert_context_questions(
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
 async def list_testpert_kb(
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """List knowledge-base items via /v1/testpertKB/sprint/get."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3515,22 +3543,23 @@ async def list_testpert_kb(
 
 @mcp.tool(
     name = "bugasura_testpert_delete_kb",
+    title = "Delete TestPert KB Document",
     description = (
         "Remove a document/source from a TestPert sprint's knowledge base (e.g. one uploaded by "
         "mistake). Get the id from bugasura_testpert_list_kb. Do this before starting the analysis."
     ),
-    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
 )
 async def delete_testpert_kb(
     kb_id: int = Field(description="The knowledge-base item id to remove (from bugasura_testpert_list_kb)."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     kb_source: Optional[str] = Field(default=None, description="Optional source of the item (e.g. FILE_UPLOAD), as listed by list_kb."),
     kb_source_type: Optional[str] = Field(default=None, description="Optional source type (e.g. REQUIREMENTS), as listed by list_kb."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Delete a knowledge-base item via /v1/testpertKB/sprint/delete."""
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -3561,6 +3590,7 @@ async def delete_testpert_kb(
 # --- Link EXISTING project requirements to a sprint (skip-enrich source) -----
 @mcp.tool(
     name = "bugasura_testpert_link_requirements",
+    title = "Link Requirements to TestPert Sprint",
     description = (
         "Link one or more EXISTING project requirements to a sprint. In the skip-enrich flow this is "
         "how the user picks, from the project's existing requirements, the ones that drive the test "
@@ -3575,9 +3605,9 @@ async def delete_testpert_kb(
 )
 async def link_testpert_requirements(
     requirement_ids: List[int] = Field(description="Internal requirement_id values to link (the `requirement_id` field from bugasura_list_requirements — NOT the display `id`)."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)"),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Link existing project requirements to a sprint via GET /v1/requirements/sprint/link.
@@ -3587,7 +3617,7 @@ async def link_testpert_requirements(
     bugasura_list_requirements, NOT the display `id` — the endpoint uses INSERT IGNORE with no
     existence check, so a display id silently writes a dangling row the sprint read never matches.
     """
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -4261,6 +4291,34 @@ def _retry_hint_for(status_value: Optional[str]) -> str:
     return _ERROR_RETRY.get(status_value or '', '')
 
 
+def _sprint_context_not_ready(current: Optional[str]) -> Optional[dict]:
+    """Response for get_sprint_context when the engine has not built a context yet; None once it has."""
+    if current in ('GENERATE_SPRINT_CONTEXT', 'REGENERATE_SPRINT_CONTEXT', 'SPRINT_CONTEXT_IN_PROGRESS'):
+        return {
+            'status': 'OK', 'current_status': current, 'in_progress': True, 'reached': False,
+            'message': "The engine is still building the sprint context, so there is nothing to review yet.",
+            'next_step': ("Do not ask the user to confirm anything yet. Call "
+                          "bugasura_testpert_generate_sprint_context to keep waiting, then read the "
+                          "context again once it reports SPRINT_CONTEXT."),
+        }
+    if current == 'SPRINT_CONTEXT_USER_VALIDATION':
+        return {
+            'status': 'OK', 'current_status': current, 'in_progress': False, 'reached': False,
+            'message': "The engine needs the user to review some uploaded documents before it builds the context.",
+            'next_step': "Call bugasura_testpert_get_kb_validation and walk the user through it.",
+        }
+    if current and current.endswith('_ERROR') and current.startswith('SPRINT_CONTEXT'):
+        return _engine_error_response(current)
+    if current == 'KNOWLEDGE_BASE':
+        return {
+            'status': 'failed', 'current_status': current, 'error_type': 'ValidationError',
+            'error': 'Sprint context not generated yet',
+            'message': ("This sprint has no sprint context yet. Upload its documents, then start "
+                        "the analysis with bugasura_testpert_generate_sprint_context."),
+        }
+    return None
+
+
 def _engine_error_response(status_value: str, retry_hint: str = "") -> dict:
     """
     Consistent response when the engine lands on an *_ERROR status: stop polling, surface the error.
@@ -4500,7 +4558,8 @@ def _group_testpert_features(rows: Any) -> tuple:
     order = []
     subs = []
     for r in rows or []:
-        if not isinstance(r, dict):
+        # An empty result is a single {NROWS: 0, STATUS: 'OK'} row with no feature_id.
+        if not isinstance(r, dict) or not r.get('feature_id'):
             continue
         if str(r.get('is_parent_feature_id')) == '1':
             fid = r.get('feature_id')
@@ -4620,7 +4679,8 @@ def _test_cases_ready_next_step(sprint_id=None) -> str:
         f"then bugasura_testpert_regenerate_testcases(feature_id=<id>, sprint_id={sid}) for each they want to redo; "
         f"(2) call bugasura_list_test_cases(sprint_id={sid}) to show test cases, ask which one, "
         "then bugasura_update_test_case(testcase_id=<id>, sprint_id=..., assign_to_agent=True) — "
-        "functional test cases route to the Browser Agent, API test cases to the Testpert Agent automatically; "
+        "API test cases go to the API Agent; for the Browser Agent also pass platform_type='DESKTOP_WEB' "
+        "(the agents only run test cases of their platform), and edit test_data in the same call if needed; "
         "(3) call bugasura_create_test_run(report=<sprint_id>) — the tool will collect all run "
         "options from the user (name, single vs scheduled, environment, etc.) before creating."
     )

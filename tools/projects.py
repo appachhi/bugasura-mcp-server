@@ -1,35 +1,25 @@
 """Bugasura MCP tools: projects."""
-from typing import Any, List, Literal, Optional
+from typing import Literal, Optional
 
-from fastmcp import Context
 from pydantic import Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import _fetch_user_context, _get_api_key, _invalidate_user_context_cache, validate_api_key
-from client import (
-    _paginate_upstream, _paginated, _prepare_post_params, _render_markdown,
-    _respond, _validate_id, logger, make_api_request,
-)
-from helpers import (
-    _fetch_team_members, _find_user_ids_by_names_or_emails,
-    _resolve_issue_identifier_to_id, _resolve_team_identifier,
-    filter_large_fields, select_team_project_context,
-)
-
-import json
-import requests  # for except blocks referencing requests.RequestException
+from auth import fetch_user_context, get_api_key, invalidate_user_context_cache, validate_api_key
+from client import paginate_upstream, respond, logger, make_api_request
+from helpers import search_projects_by_name
 
 
 @mcp.tool(
     name = "bugasura_list_projects",
+    title = "List Projects",
     description = "List projects for a specific team with filtering and pagination. Supports platform, status, and search filters.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_projects(
-    team_id: int = Field(description="Team identifier (required, ge=1)"),
-    start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)"),
-    max_results: int = Field(default=10, description="Number of results to return (10-100, default: 10, ge=1, le=100)"),
+    team_id: int = Field(description="Team identifier (required, ge=1)", ge=1),
+    start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)", ge=0),
+    max_results: int = Field(default=10, description="Number of results to return (10-100, default: 10, ge=1, le=100)", ge=1, le=100),
     platform: Literal["ALL", "Android", "iOS", "Desktop", "API", "Multiple"] = Field(default="ALL", description="Filter by platform: 'ALL', 'Android', 'iOS', 'Desktop', 'Multiple' (case-sensitive)"),
     platform_type: Literal["ALL", "Apps", "Mobileweb", "Web", "API", "Multiple"] = Field(default="ALL", description="Filter by platform type: 'ALL', 'Apps', 'Mobileweb', 'Web', 'Multiple' (case-sensitive)"),
     status: str = Field(default="ACTIVE", description="Filter by status: 'ACTIVE', 'ARCHIVE', 'ALL' (case-insensitive)"),
@@ -145,18 +135,18 @@ async def list_projects(
         list_projects(api_key, team_id, source="API")
     """
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     # Handle case where API might return a list instead of dict
     if isinstance(validation, list):
-        return _respond({'status': 'failed', 'error': 'Unexpected API response format', 'details': str(validation)}, response_format)
+        return respond({'status': 'failed', 'error': 'Unexpected API response format', 'details': str(validation)}, response_format)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
     # Validate and normalize platform (case-sensitive)
     valid_platforms = ['ALL', 'Android', 'iOS', 'Desktop', 'Multiple', '']
     if platform not in valid_platforms:
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': f'Invalid platform value: "{platform}". Allowed values: {", ".join([v for v in valid_platforms if v != ""])}'
         }, response_format)
@@ -164,7 +154,7 @@ async def list_projects(
     # Validate and normalize platform_type (case-sensitive)
     valid_platform_types = ['ALL', 'Apps', 'Mobileweb', 'Web', 'Multiple', '']
     if platform_type not in valid_platform_types:
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': f'Invalid platform_type value: "{platform_type}". Allowed values: {", ".join([v for v in valid_platform_types if v != ""])}'
         }, response_format)
@@ -173,7 +163,7 @@ async def list_projects(
     status = status.upper()
     valid_statuses = ['ACTIVE', 'ARCHIVE', 'DELETED']
     if status not in valid_statuses:
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': f'Invalid status value. Allowed values (case-insensitive): {", ".join(valid_statuses)}'
         }, response_format)
@@ -182,7 +172,7 @@ async def list_projects(
     project_type = project_type.lower()
     valid_project_types = ['all', 'contributed', 'private', 'public']
     if project_type not in valid_project_types:
-        return _respond({
+        return respond({
             'status': 'failed',
             'error': f'Invalid project_type value. Allowed values (case-insensitive): {", ".join(valid_project_types)}'
         }, response_format)
@@ -205,11 +195,12 @@ async def list_projects(
         params['source'] = source
 
     upstream = await make_api_request('GET', '/v1/projects/list', api_key, params=params)
-    return _respond(_paginate_upstream(upstream, items_key='project_list', offset=start_at), response_format)
+    return respond(paginate_upstream(upstream, items_key='project_list', offset=start_at, max_results=max_results), response_format)
 
 
 @mcp.tool(
     name = "bugasura_get_project_details",
+    title = "Get Project Details",
     description = "Get detailed information about a specific project including workflow, tags, and settings.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
@@ -220,22 +211,23 @@ async def get_project_details(
 ) -> ToolResponse:
     """Get detailed information about a specific project."""
     # Validate API key before proceeding
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
-        return _respond(validation, response_format)
+        return respond(validation, response_format)
 
-    return _respond(await make_api_request('GET', '/v1/projects/get', api_key, params={'team_id': team_id, 'project_id': project_id}), response_format)
+    return respond(await make_api_request('GET', '/v1/projects/get', api_key, params={'team_id': team_id, 'project_id': project_id}), response_format)
 
 
 @mcp.tool(
     name = "bugasura_create_project",
+    title = "Create Project",
     description = "Create a new project in a team. Projects organize test cases, issues, and sprints. Supports interactive team selection.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_project(
-    project_name: str = Field(description="Project name (required, min_length=1)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
+    project_name: str = Field(description="Project name (required, min_length=1)", min_length=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
     platform: Literal["ALL", "Android", "iOS", "Desktop", "API", "Multiple"] = Field(default="Multiple", description="Platform: 'Android', 'iOS', 'Desktop', 'API', 'Multiple' (default: Multiple)"),
     platform_type: Literal["ALL", "Apps", "Mobileweb", "Web", "API", "Multiple"] = Field(default="Multiple", description="Platform type: 'Apps', 'Mobileweb', 'Web', 'API', 'Multiple' (default: Multiple)"),
     is_public_project: bool = Field(default=False, description="Public visibility (default: False for private)"),
@@ -272,7 +264,7 @@ async def create_project(
         - Team admins may have additional permissions
     """
     # Validate API key
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -286,7 +278,7 @@ async def create_project(
 
     # Interactive team selection if team_id not provided
     if team_id is None:
-        teams_response = await list_teams(api_key)
+        teams_response = await fetch_user_context(api_key)
         if teams_response.get('status') != 'OK':
             return teams_response
 
@@ -299,14 +291,15 @@ async def create_project(
 
         # Return selection prompt
         return {
+            'status': 'selection_required',
             'selection_required': True,
             'selection_type': 'team',
             'message': 'Please select a team for the new project',
             'options': [
                 {
                     'team_id': team['team_id'],
-                    'name': team['name'],
-                    'role': 'Admin' if team.get('is_admin') else 'Member'
+                    'name': team.get('team_name'),
+                    'role': team.get('role')
                 }
                 for team in teams
             ],
@@ -332,7 +325,7 @@ async def create_project(
 
     # Make API request
     result = await make_api_request('POST', '/v1/projects/add', api_key, data=data)
-    _invalidate_user_context_cache(api_key)
+    invalidate_user_context_cache(api_key)
 
     if result.get('status') == 'OK':
         logger.info(f"Successfully created project: {project_name} in team {team_id}")
@@ -344,13 +337,14 @@ async def create_project(
 
 @mcp.tool(
     name = "bugasura_update_project",
+    title = "Update Project",
     description = "Update project details including name, issue prefix, and visibility settings. Supports project_id or project_name. Team admin privileges may be required.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_project(
-    project_id: Optional[int] = Field(default=None, description="Project identifier (provide either project_id or search_project_name, ge=1)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (provide either project_id or search_project_name, ge=1)", ge=1),
     search_project_name: Optional[str] = Field(default=None, description="Project name to search for (provide either project_id or search_project_name)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
     new_project_name: Optional[str] = Field(default=None, description="New project name (optional)"),
     issue_prefix: Optional[str] = Field(default=None, description="New issue prefix (e.g., 'BUG', 'ISS') (optional)"),
     is_public_project: Optional[bool] = Field(default=None, description="Public visibility (optional)"),
@@ -384,7 +378,7 @@ async def update_project(
         - Supports both project_id and project_name for flexibility
     """
     # Validate API key
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -402,7 +396,7 @@ async def update_project(
     # If search_project_name provided, resolve to project_id
     if search_project_name and not project_id:
         logger.info(f"Resolving project name: {search_project_name}")
-        search_result = await find_project_by_name(api_key, search_project_name)
+        search_result = await search_projects_by_name(api_key, search_project_name)
 
         if search_result.get('status') != 'OK':
             return search_result
@@ -429,7 +423,7 @@ async def update_project(
 
     # Interactive team selection if team_id not provided
     if resolved_team_id is None:
-        teams_response = await list_teams(api_key)
+        teams_response = await fetch_user_context(api_key)
         if teams_response.get('status') != 'OK':
             return teams_response
 
@@ -442,14 +436,15 @@ async def update_project(
 
         # Return selection prompt
         return {
+            'status': 'selection_required',
             'selection_required': True,
             'selection_type': 'team',
             'message': 'Please select the team for this project',
             'options': [
                 {
                     'team_id': team['team_id'],
-                    'name': team['name'],
-                    'role': 'Admin' if team.get('is_admin') else 'Member'
+                    'name': team.get('team_name'),
+                    'role': team.get('role')
                 }
                 for team in teams
             ],
@@ -492,13 +487,14 @@ async def update_project(
 
 @mcp.tool(
     name = "bugasura_delete_project",
+    title = "Delete Project",
     description = "Delete project permanently. WARNING: This deletes all associated sprints, issues, and test cases. Supports project_id or project_name. Team admin privileges required.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_project(
-    project_id: Optional[int] = Field(default=None, description="Project identifier (provide either project_id or project_name, ge=1)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (provide either project_id or project_name, ge=1)", ge=1),
     project_name: Optional[str] = Field(default=None, description="Project name to search for (provide either project_id or project_name)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)"),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
     Delete project permanently.
@@ -531,7 +527,7 @@ async def delete_project(
         - Supports both project_id and project_name for flexibility
     """
     # Validate API key
-    api_key = _get_api_key()
+    api_key = get_api_key()
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
@@ -549,7 +545,7 @@ async def delete_project(
     # If project_name provided, resolve to project_id
     if project_name and not project_id:
         logger.info(f"Resolving project name for deletion: {project_name}")
-        search_result = await find_project_by_name(api_key, project_name)
+        search_result = await search_projects_by_name(api_key, project_name)
 
         if search_result.get('status') != 'OK':
             return search_result
@@ -576,7 +572,7 @@ async def delete_project(
 
     # Interactive team selection if team_id not provided
     if resolved_team_id is None:
-        teams_response = await list_teams(api_key)
+        teams_response = await fetch_user_context(api_key)
         if teams_response.get('status') != 'OK':
             return teams_response
 
@@ -589,14 +585,15 @@ async def delete_project(
 
         # Return selection prompt
         return {
+            'status': 'selection_required',
             'selection_required': True,
             'selection_type': 'team',
             'message': 'WARNING: Select the team for the project you want to DELETE',
             'options': [
                 {
                     'team_id': team['team_id'],
-                    'name': team['name'],
-                    'role': 'Admin' if team.get('is_admin') else 'Member'
+                    'name': team.get('team_name'),
+                    'role': team.get('role')
                 }
                 for team in teams
             ],
@@ -615,7 +612,7 @@ async def delete_project(
 
     # Make API request
     result = await make_api_request('POST', '/v1/projects/delete', api_key, data=data)
-    _invalidate_user_context_cache(api_key)
+    invalidate_user_context_cache(api_key)
 
     if result.get('status') == 'OK':
         logger.warning(f"Project {resolved_project_id} in team {resolved_team_id} deleted successfully")
