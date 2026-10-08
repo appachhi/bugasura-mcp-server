@@ -137,7 +137,7 @@ codex mcp login bugasura
 <details>
 <summary><b>Cursor</b></summary>
 
-[Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=bugasura&config=eyJ1cmwiOiJodHRwczovL21jcC5zdGFnZS5idWdhc3VyYS5pby9tY3AifQ==), or add to `~/.cursor/mcp.json`:
+[Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=bugasura&config=eyJ1cmwiOiJodHRwczovL21jcC5idWdhc3VyYS5pby9tY3AifQ==), or add to `~/.cursor/mcp.json`:
 
 ```json
 {
