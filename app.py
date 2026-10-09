@@ -1,4 +1,6 @@
 """FastMCP instance + ASGI application for the streamable-HTTP transport."""
+import asyncio
+from contextlib import asynccontextmanager
 from html import escape
 from urllib.parse import urlsplit
 
@@ -15,6 +17,7 @@ from config import (
     MCP_SERVER_ICON_SVG_URL, MCP_SERVER_ICON_URL, MCP_SERVER_NAME, OPENAI_APPS_CHALLENGE_TOKEN, logger,
 )
 from oauth import build_auth_provider
+from uploads import sweep_periodically, upload_files, upload_page
 
 
 # OAuth front door when configured (HTTP deployments); None for STDIO / local dev.
@@ -22,7 +25,7 @@ from oauth import build_auth_provider
 auth = build_auth_provider()
 
 # Reported by /health and by server/discover (serverInfo.version)
-SERVER_VERSION = "3.1.0"
+SERVER_VERSION = "3.2.0"
 
 # Returned by server/discover; how an assistant should drive the tools.
 SERVER_INSTRUCTIONS = """\
@@ -36,6 +39,8 @@ them to the user, then call the same tool again with the chosen value. Don't gue
 - Results carry a "status" field: OK, selection_required, failed (see error / error_type), or \
 api_key_required. On api_key_required, follow its "action" text: never ask the user for an API key.
 - Confirm with the user before calling delete_* tools; deletions cannot be undone.
+- Never read or encode a user's file. To upload or attach one, call bugasura_create_upload_link with \
+the matching purpose, give the user the link, then pass its upload_id to the tool.
 - Report tool results without speculating about Bugasura's internals, code or schema; do pass on \
 warnings or partial failures a result reports.
 """
@@ -137,6 +142,11 @@ async def sse_migration(request: Request):
     )
 
 
+# Upload links (uploads.py). Registered here because http_app() below fixes the route list.
+mcp.custom_route("/upload/{upload_id}", methods=["GET"])(upload_page)
+mcp.custom_route("/upload/{upload_id}", methods=["POST"])(upload_files)
+
+
 class BrowserVisitMiddleware:
     """Answer a browser tab opening /mcp with a readable 400 page instead of an empty 401."""
 
@@ -172,6 +182,7 @@ MCP client; it will open the Bugasura sign-in when it connects.</p>
 # /.well-known/oauth-authorization-server, /.well-known/oauth-protected-resource/mcp,
 # /authorize, /token, /register, /revoke, /auth/callback and /consent. Only /mcp itself
 # requires a bearer token; /health, /sse and /.well-known/openai-apps-challenge stay public.
+# /upload/{upload_id} is public too: its unguessable, single-use, expiring id is the credential.
 # Rejects a foreign Origin with 403 and an unknown Host with 421 (DNS rebinding); loopback is always allowed.
 app = mcp.http_app(
     path="/mcp",
@@ -181,3 +192,19 @@ app = mcp.http_app(
     allowed_origins=[MCP_PUBLIC_BASE_URL] if MCP_PUBLIC_BASE_URL else None,
     middleware=[ASGIMiddleware(BrowserVisitMiddleware)],
 )
+
+_mcp_lifespan = app.router.lifespan_context
+
+
+@asynccontextmanager
+async def _lifespan(starlette_app):
+    """FastMCP's own lifespan, plus the hourly sweep of expired upload links."""
+    async with _mcp_lifespan(starlette_app) as state:
+        sweeper = asyncio.create_task(sweep_periodically())
+        try:
+            yield state
+        finally:
+            sweeper.cancel()
+
+
+app.router.lifespan_context = _lifespan

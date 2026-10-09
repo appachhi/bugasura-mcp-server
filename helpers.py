@@ -1,6 +1,7 @@
 """Internal resolvers, file-upload utilities, and context helpers used by tools."""
 import ipaddress
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -12,12 +13,24 @@ from typing import Optional
 
 
 from auth import fetch_user_context
-from client import in_http_request, logger, make_api_request
+from client import UPLOAD_TIMEOUT, in_http_request, logger, make_api_request
 
 
 # WEB_BASE_URL / CDN_BASE_URL now live in config.py; re-exported here because
 # tools import them from helpers.
 from config import CDN_BASE_URL, SECRET_RESPONSE_KEYS, WEB_BASE_URL  # noqa: F401,E402
+from config import ATTACHMENT_MAX_FILE_SIZE_MB  # noqa: E402
+from auth import current_user_id  # noqa: E402
+from uploads import claim, discard, release, staged_paths  # noqa: E402
+
+# Shared Field descriptions for the attachment parameters of the issue/comment/requirement tools
+ATTACH_UPLOAD_ID_DESCRIPTION = (
+    "upload_id from bugasura_create_upload_link(purpose='attachment'), once the user has uploaded the "
+    "file(s) to its link — the way to attach a file from the user's own computer on the hosted server. "
+    "Never read or encode the file yourself.")
+ATTACH_FILE_PATHS_DESCRIPTION = (
+    "Absolute paths of files to attach on the machine running this server (local STDIO servers only; "
+    "rejected on the hosted server). Ask the user for the exact path — never guess it.")
 
 
 def filter_large_fields(data: dict) -> dict:
@@ -667,19 +680,21 @@ def normalise_share_url(url: str) -> str:
     """
     # Google Drive: https://drive.google.com/file/d/FILE_ID/view?...
     #           or: https://drive.google.com/open?id=FILE_ID
+    # confirm=t skips Drive's virus-scan page for files over ~100 MB
+    drive_download = 'https://drive.usercontent.google.com/download?id={}&export=download&confirm=t'
     parsed = urllib.parse.urlparse(url)
     if 'drive.google.com' in parsed.netloc:
         # /file/d/FILE_ID/... form
         parts = parsed.path.split('/')
         try:
             file_id = parts[parts.index('d') + 1]
-            return f'https://drive.google.com/uc?export=download&id={file_id}'
+            return drive_download.format(file_id)
         except (ValueError, IndexError):
             pass
         # ?id=FILE_ID form
         qs = urllib.parse.parse_qs(parsed.query)
         if 'id' in qs:
-            return f'https://drive.google.com/uc?export=download&id={qs["id"][0]}'
+            return drive_download.format(qs['id'][0])
     # Dropbox: replace dl=0 with dl=1 (or add dl=1)
     if 'dropbox.com' in parsed.netloc:
         qs = urllib.parse.parse_qs(parsed.query)
@@ -737,6 +752,13 @@ def download_url_tmp(url: str, suffix: str, timeout: int = 30,
                     candidate = urllib.parse.unquote(m.group(1).strip('" \''))
                     if '.' in candidate:
                         inferred_name = candidate
+            # A web page (sign-in, preview, quota error) where a file was expected must not be saved as the file.
+            # Bugasura's own CDN is exempt: it labels stored files by sniffing them, so a .txt can be text/html
+            if (resp.headers.get_content_type() == 'text/html' and not _on_bugasura_cdn(url)
+                    and not suffix.lower().endswith(('.html', '.htm'))
+                    and not (inferred_name or '').lower().endswith(('.html', '.htm'))):
+                raise ValueError("the link returned a web page instead of the file — it may be private, "
+                                 "need a sign-in, or not be a direct download link")
             written = 0
             while True:
                 chunk = resp.read(65536)
@@ -783,6 +805,12 @@ def fetch_url_bytes(url: str, max_bytes: int, timeout: int = 30) -> tuple:
     return content, False
 
 
+def _on_bugasura_cdn(url: str) -> bool:
+    """True when `url` points at the CDN that serves files stored in Bugasura."""
+    cdn_host = urllib.parse.urlparse(CDN_BASE_URL).netloc.lower() if CDN_BASE_URL else ''
+    return bool(cdn_host) and urllib.parse.urlparse(url).netloc.lower() == cdn_host
+
+
 def download_url_to_path(url: str, dest_path: str, timeout: int = 60,
                           max_bytes: Optional[int] = None) -> int:
     """Download a URL onto the local filesystem at dest_path; return the byte size.
@@ -811,6 +839,49 @@ def download_url_to_path(url: str, dest_path: str, timeout: int = 60,
     return os.path.getsize(dest_path)
 
 
+def resolve_save_destination(save_to_path: str, filename: str) -> tuple[str, Optional[str]]:
+    """Turn a caller's save_to_path into the file path to write.
+
+    A folder is an existing directory, a path ending in a separator, or a path that does
+    not exist yet and has no file extension — the file goes inside it under `filename`.
+    Anything else is the full file path, written as given. Nothing is created here: the
+    second value is the missing folder the caller creates once its own checks pass.
+    Raises: ValueError when save_to_path is not absolute.
+    """
+    raw = os.path.expanduser(save_to_path.strip())
+    if not os.path.isabs(raw):
+        raise ValueError(f"'{save_to_path}' is not an absolute path")
+    if os.path.isdir(raw):
+        return os.path.join(raw, filename), None
+    if raw.endswith(('/', os.sep)) or (not os.path.exists(raw) and not os.path.splitext(raw)[1]):
+        return os.path.join(raw, filename), raw
+    return raw, None
+
+
+def create_folder(folder: str) -> Optional[str]:
+    """Create `folder` (parents included); return the topmost folder created, for remove_created_folder."""
+    top, parent = None, os.path.abspath(folder)
+    while parent and not os.path.exists(parent):
+        top, parent = parent, os.path.dirname(parent)
+    os.makedirs(folder, exist_ok=True)
+    return top
+
+
+def remove_created_folder(folder: str, top: Optional[str]) -> None:
+    """Remove the empty folders create_folder made, from `folder` up to `top`."""
+    if not top:
+        return
+    current = os.path.abspath(folder)
+    while True:
+        try:
+            os.rmdir(current)
+        except OSError:
+            return
+        if current == top:
+            return
+        current = os.path.dirname(current)
+
+
 def local_path_rejected(param: str) -> Optional[dict]:
     """A `failed` payload when `param` (a server-side file path) is used over HTTP, else None.
 
@@ -824,6 +895,161 @@ def local_path_rejected(param: str) -> Optional[dict]:
         'error': f'{param} is not available on this hosted Bugasura MCP server.',
         'error_type': 'ValidationError',
         'message': (f"{param} refers to the server's own filesystem, which a hosted server does not "
-                    "expose. Ask the user for a shareable https link (Google Drive, Dropbox, or any "
-                    "public download URL) and pass it as source_url instead."),
+                    "expose. Create an upload link with bugasura_create_upload_link for the user's "
+                    "file and pass its upload_id, or, where the tool takes one, a shareable https "
+                    "link (Google Drive, Dropbox, or any public download URL) as source_url."),
     }
+
+
+def close_upload_files(files: list) -> None:
+    """Close the file handles in multipart fields built for an upload."""
+    for _field, (_name, file_handle, _content_type) in files:
+        file_handle.close()
+
+
+# Comment kind -> (comments endpoint prefix, item id param) for /v1/{testcase,requirement}comments/*
+_PROJECT_COMMENT_KINDS = {
+    'testcase': ('/v1/testcasecomments', 'testCaseId'),
+    'requirement': ('/v1/requirementcomments', 'requirementId'),
+}
+
+
+def attachment_names_csv(names: Optional[str]) -> Optional[str]:
+    """A comma-separated filename list without the spaces the API would treat as part of a name."""
+    if names is None:
+        return None
+    return ','.join(name.strip() for name in names.split(',') if name.strip())
+
+
+async def project_comment_attachment_names(api_key: str, kind: str, team_id: int, project_id: int,
+                                           item_id: int, comment_id: int,
+                                           report_id: Optional[int] = None) -> Optional[str]:
+    """
+    A test case / requirement comment's attachment filenames as the update endpoint's CSV.
+
+    Their update endpoint treats a missing attachment list as "keep none" and deletes the files,
+    so an update that was not given one must resend this. None when the comment is unreadable.
+    A test case comment posted in a sprint needs its report_id: without one the API only looks
+    at comments made outside any sprint.
+    """
+    endpoint, id_param = _PROJECT_COMMENT_KINDS[kind]
+    params = {'teamId': team_id, 'team_id': team_id, 'appId': project_id, 'app_id': project_id,
+              id_param: item_id, 'commentId': comment_id}
+    if report_id is not None:
+        params.update(reportId=report_id, report_id=report_id)
+    response = await make_api_request('GET', f'{endpoint}/get', api_key, params=params)
+    if response.get('status') != 'OK':
+        return None
+    details = response.get('commentDetails')
+    rows = details if isinstance(details, list) else [details] if isinstance(details, dict) else []
+    row = next((r for r in rows if str(r.get('comment_id')) == str(comment_id)), None)
+    if row is None:
+        return None
+    return attachment_names_csv(row.get('comment_attachments') or '')
+
+
+async def send_with_attachments(method: str, endpoint: str, api_key: str, opened: dict,
+                                upload_id: Optional[str], **kwargs) -> dict:
+    """
+    Make the API call with the files from `open_attachments` (streamed), then close them.
+
+    On success the response gains `attached_files` and the upload link's staged files are
+    deleted; on failure they are kept so the call can be retried with the same upload_id.
+    """
+    files = opened.get('files') or []
+    if files:
+        kwargs.update(files=files, timeout=UPLOAD_TIMEOUT)
+    if files and upload_id and (busy := claim(upload_id)):
+        close_upload_files(files)
+        return busy
+    succeeded = False
+    try:
+        response = await make_api_request(method, endpoint, api_key, **kwargs)
+        succeeded = files and isinstance(response, dict) and response.get('status') == 'OK'
+    finally:
+        close_upload_files(files)
+        if files and upload_id:
+            discard(upload_id) if succeeded else release(upload_id)
+    if succeeded:
+        _report_skipped_attachments(response, opened['filenames'])
+    return response
+
+
+def _report_skipped_attachments(response: dict, filenames: list) -> None:
+    """Set `attached_files`, leaving out files the API reported skipping (size or count limits).
+
+    The API still answers OK when it skips files: issues list the reasons in `errorMessage`,
+    requirements append them to `message`.
+    """
+    errors = response.get('errorMessage') or []
+    errors = [str(e) for e in (errors if isinstance(errors, list) else [errors]) if e]
+    message = str(response.get('message') or '')
+    if 'error while uploading' in message.lower():
+        errors.append(message)
+    skipped = [name for name in filenames if any(name in error for error in errors)]
+    response['attached_files'] = [name for name in filenames if name not in skipped]
+    if errors:
+        response['not_attached'] = skipped
+        response['attachment_errors'] = errors
+        response['warning'] = ("Bugasura did not store every file: " + "; ".join(errors) + ". Tell the user which "
+                               "files were not attached; the plan's attachment size limit may be lower than the "
+                               "MCP's. The upload link is used up, so a new one is needed to try those files again.")
+
+
+def open_attachments(file_paths: Optional[list], upload_id: Optional[str]) -> dict:
+    """
+    Open the files to attach: an upload link's staged files, or local paths (STDIO only).
+
+    Each file becomes its own multipart field (file0, file1, …), the shape every attachment
+    endpoint accepts; the handles are streamed by httpx. Neither source given -> no files.
+    The caller closes them with `close_upload_files` and discards `upload_id` on success.
+
+    Returns:
+        dict: {'status': 'OK', 'files': [(field, (filename, file_handle, content_type))],
+               'filenames': [str]} or a failure envelope.
+    """
+    if file_paths and upload_id:
+        return {'status': 'failed', 'error': 'Multiple file sources provided', 'error_type': 'ValidationError',
+                'message': 'Provide either upload_id or file_paths, not both.'}
+    if file_paths and (rejected := local_path_rejected('file_paths')):
+        return rejected
+    paths = list(file_paths or [])
+    if upload_id:
+        staged = staged_paths(upload_id, current_user_id(), 'attachment')
+        if staged.get('status') != 'OK':
+            return staged
+        paths = staged['paths']
+
+    files, filenames = [], []
+    succeeded = False
+    try:
+        for index, path in enumerate(paths):
+            name = os.path.basename(path)
+            if not os.path.isfile(path):
+                if upload_id:
+                    return {'status': 'failed', 'error': 'Uploaded file unavailable', 'error_type': 'ValidationError',
+                            'message': ("The uploaded file is no longer available. Create a new link with "
+                                        "bugasura_create_upload_link(purpose='attachment') and ask the user to "
+                                        "upload it again.")}
+                return {'status': 'failed', 'error': f'File not found: {path}', 'error_type': 'ValidationError',
+                        'message': f"Could not find a readable file at '{path}'. Ask the user for the exact absolute path."}
+            if not os.path.splitext(name)[1]:
+                return {'status': 'failed', 'error': 'Missing file extension', 'error_type': 'ValidationError',
+                        'message': f"'{name}' has no file extension; Bugasura needs one to store an attachment."}
+            size = os.path.getsize(path)
+            if size > ATTACHMENT_MAX_FILE_SIZE_MB * 1024 * 1024:
+                return {'status': 'failed', 'error': 'File too large', 'error_type': 'ValidationError',
+                        'message': (f"'{name}' is {size / (1024 * 1024):.1f}MB. Attachments are limited to "
+                                    f"{ATTACHMENT_MAX_FILE_SIZE_MB}MB each.")}
+            content_type = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+            files.append((f"file{index}", (name, open(path, 'rb'), content_type)))
+            filenames.append(name)
+        succeeded = True
+        return {'status': 'OK', 'files': files, 'filenames': filenames}
+    except OSError as e:
+        logger.error(f"open_attachments: could not open '{path}': {e}")
+        return {'status': 'failed', 'error': 'Could not read file', 'error_type': 'IOError',
+                'message': f"Could not read '{os.path.basename(path)}'."}
+    finally:
+        if not succeeded:
+            close_upload_files(files)

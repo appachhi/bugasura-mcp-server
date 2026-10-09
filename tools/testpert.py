@@ -20,9 +20,14 @@ from pydantic import BaseModel, Field
 from output_types import ToolResponse
 from app import mcp
 from auth import get_api_key, validate_api_key
-from client import logger, make_api_request
+from auth import current_user_id
+from client import UPLOAD_TIMEOUT, in_http_request, logger, make_api_request
+from config import (
+    KB_MAX_FILE_SIZE_MB, TESTPERT_KB_DOC_EXTS, TESTPERT_KB_IMG_EXTS, TESTPERT_KB_MAX_IMAGE_SIZE_MB,
+)
+from uploads import claim, discard, release, staged_paths
 from helpers import (
-    download_url_tmp, infer_filename_from_url_path, local_path_rejected, normalise_share_url,
+    close_upload_files, download_url_tmp, infer_filename_from_url_path, local_path_rejected, normalise_share_url,
     select_team_project_context, WEB_BASE_URL,
 )
 from tools.projects import get_project_details
@@ -150,8 +155,8 @@ _REACHED = {
 }
 
 # --- Knowledge base file types ------------------------------------------------
-_KB_DOC_EXTS = {'txt', 'pdf', 'doc', 'docx', 'md', 'json'}
-_KB_IMG_EXTS = {'png', 'jpg', 'jpeg', 'webp', 'gif'}
+_KB_DOC_EXTS = TESTPERT_KB_DOC_EXTS
+_KB_IMG_EXTS = TESTPERT_KB_IMG_EXTS
 # Extensions that are inherently plain-text: text_content can be uploaded with
 # these extensions intact. All other doc extensions are binary formats where
 # only extracted text is available from a conversation, so they fall back to .txt.
@@ -334,9 +339,7 @@ async def create_testpert_sprint(
         "project's Knowledge Base. "
         "Do NOT encode, read, or process any attached file before calling this tool. "
         "This tool returns the exact instructions to show the user so they can provide the file "
-        "in a way that works. Only call the matching upload tool — bugasura_testpert_upload_kb for a "
-        "sprint, bugasura_upload_knowledge_base_document for the project knowledge base — after the "
-        "user has responded to these instructions with a shareable link or a file path."
+        "in a way that works on this server (an upload link, a share link, or a local path)."
     ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 )
@@ -346,30 +349,47 @@ async def prepare_kb_upload(
 ) -> ToolResponse:
     """Return the instructions Claude must show the user before any file upload."""
     sprint_hint = f" to sprint {sprint_id}" if sprint_id else ""
+    sprint_step = (
+        "For a TestPert sprint, follow up with bugasura_testpert_upload_kb(existing_kb_ids=<the "
+        "returned kb_ids>, sprint_id=...) to link it — don't upload straight into the sprint. "
+    )
+    if not in_http_request():
+        return {
+            'status': 'OK',
+            'action': 'ask_user_for_path',
+            'message_to_user': (
+                f"To upload your file{sprint_hint}, tell me its full path on this computer "
+                f"(for example /Users/me/Documents/PRD.pdf), or paste a Google Drive / Dropbox link "
+                f"set to 'Anyone with the link'."
+            ),
+            'next_step': (
+                "Show message_to_user to the user. Pass the path they give as file_paths=[...] (or a "
+                "link as source_url) to bugasura_upload_knowledge_base_document. " + sprint_step +
+                "Never read or encode the file yourself."
+            ),
+        }
+    image_note = (
+        " Images are not Knowledge Base documents: for an image kb_type create the link with "
+        "bugasura_create_upload_link(purpose='testpert_kb') instead, and pass its upload_id to "
+        "bugasura_testpert_upload_kb(upload_id=..., kb_type=...) rather than the KB tool."
+        if kb_type and kb_type.endswith('_image') else ""
+    )
     return {
         'status': 'OK',
-        'action': 'ask_user_for_link',
+        'action': 'create_upload_link',
         'message_to_user': (
-            f"To upload your file{sprint_hint}, please share a shareable link:\n\n"
-            f"**Google Drive:** right-click the file → Share → make sure it is set to "
-            f"**'Anyone with the link'** (this is required — private links can't be downloaded) "
-            f"→ Copy link\n"
-            f"**Dropbox:** click Share → Copy link\n"
-            f"**Other:** any public direct download URL\n\n"
-            f"Paste the link here and I'll upload it directly — no encoding needed. "
-            f"The filename will be detected automatically where possible."
+            f"To upload your file{sprint_hint}, I'll give you a secure upload link — open it and "
+            f"drop the file in. If the file is already in Google Drive or Dropbox, you can paste a "
+            f"share link set to 'Anyone with the link' instead."
         ),
         'next_step': (
-            "Show message_to_user to the user verbatim. Wait for them to paste a link. "
-            "Then call bugasura_upload_knowledge_base_document with source_url=<link> (and folder_name "
-            "when they named a folder) to add it to the project's Knowledge Base. For a TestPert "
-            "sprint, follow up with bugasura_testpert_upload_kb(existing_kb_ids=<the returned "
-            "kb_ids>, sprint_id=...) to link it — don't upload straight into the sprint. "
-            "source_url_filename is optional — omit it and the filename will be "
-            "detected from the URL or response headers. Only pass source_url_filename if the "
-            "user explicitly provides a filename or if detection fails. "
-            "Do not run any Script, Analysis, or Bash tool at any point in this flow."
-        )
+            "Show message_to_user, then call bugasura_create_upload_link and give the user its "
+            "upload_url. When they say the upload is done, call bugasura_upload_knowledge_base_document "
+            "with upload_id=<its upload_id> (and folder_name when they named a folder). If they paste a "
+            "share link instead, pass it as source_url to the same tool. " + sprint_step +
+            "In a terminal client with shell access you may upload a file the user named with "
+            "`curl -sS -F file=@<path> <upload_url>`; never read or encode the file yourself." + image_note
+        ),
     }
 
 
@@ -382,10 +402,12 @@ async def prepare_kb_upload(
         "bugasura_list_knowledge_base_documents) — this is the normal, working path. "
         "If the material isn't in the project's Knowledge Base yet, add it there FIRST with "
         "bugasura_upload_knowledge_base_document (use bugasura_prepare_kb_upload to get the "
-        "upload instructions to show the user), THEN come back and link its id here — direct "
-        "fresh uploads into a sprint (source_url / file_paths / text_content below) are legacy "
-        "paths that are not reliable in the current flow, so don't lead with them. "
-        "Documents: .txt/.pdf/.doc/.docx/.md/.json — Images: .png/.jpg/.jpeg/.webp/.gif"
+        "upload instructions to show the user), THEN come back and link its id here. "
+        "Images (wireframes, designs, diagrams, screenshots) can only be added here: on the hosted "
+        "server get an upload link with bugasura_create_upload_link(purpose='testpert_kb') and pass "
+        "its upload_id with the matching *_image kb_type. Other direct uploads into a sprint "
+        "(source_url / file_paths / text_content) are legacy paths, so don't lead with them. "
+        "Documents: .txt/.pdf/.doc/.docx/.md/.json (100 MB) — Images: .png/.jpg/.jpeg/.webp/.gif (20 MB)"
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
@@ -395,6 +417,7 @@ async def upload_testpert_kb(
     file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server). Ask the user for the exact path — never construct or guess it."),
     text_content: Optional[str] = Field(default=None, description="Plain text the user pasted directly into the chat. Only for text kb_types. Not for PDFs, DOCX, or images — use source_url for those."),
     text_content_filename: Optional[str] = Field(default=None, description="Filename for the text_content upload (e.g. 'notes.md'). Text-native extensions (.md, .json, .txt) are preserved as-is."),
+    upload_id: Optional[str] = Field(default=None, description="upload_id returned by bugasura_create_upload_link(purpose='testpert_kb'), once the user has uploaded the file(s) to its link. Every file must suit kb_type."),
     existing_kb_ids: List[int] = Field(default=[], description="IDs of documents already in the project's Knowledge Base (from bugasura_list_knowledge_base_documents) to link to this sprint instead of re-uploading them."),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). If omitted, you'll be prompted to pick a sprint (ge=1).", ge=1),
     kb_type: Literal[
@@ -465,7 +488,7 @@ async def upload_testpert_kb(
         return rejected
 
     # Validate: need at least one source of content.
-    if not file_paths and not source_url and not text_content and not existing_kb_ids:
+    if not file_paths and not source_url and not text_content and not upload_id and not existing_kb_ids:
         return {
             'status': 'failed',
             'error': 'No files provided',
@@ -501,20 +524,28 @@ async def upload_testpert_kb(
     field_prefix, allowed_exts = _KB_TYPE_FIELDS[kb_type]
 
     # Reject ambiguous calls that supply more than one inline content source.
-    inline_sources = sum([bool(source_url), bool(text_content)])
-    if inline_sources > 1 and not file_paths:
+    inline_sources = sum([bool(source_url), bool(text_content), bool(upload_id)])
+    if inline_sources > 1 or (upload_id and file_paths):
         return {
             'status': 'failed',
             'error': 'Multiple inline content sources provided',
             'error_type': 'ValidationError',
-            'message': 'Provide only one of source_url or text_content per call. To upload multiple files, make separate calls.'
+            'message': 'Provide only one of upload_id, source_url or text_content per call. To upload multiple files, make separate calls.'
         }
+
+    if upload_id:
+        staged = staged_paths(upload_id, current_user_id(), 'testpert_kb')
+        if staged.get('status') != 'OK':
+            return staged
+        file_paths = staged['paths']
 
     # _tmp_display maps each temp-file path -> its sanitised display name (original filename).
     # Every path registered here is unlinked in the finally block regardless of how the
     # function exits. To add a new inline content path: create the temp file via the helpers,
     # register it here, set file_paths — display-name lookup and cleanup are then automatic.
     _tmp_display: dict = {}
+    files = []
+    succeeded = False
 
     try:
         # --- source_url path (MCP server fetches the file from a public URL) -------
@@ -631,16 +662,17 @@ async def upload_testpert_kb(
             try:
                 tmp_path = _write_text_tmp(text_content, f'.{use_ext}')
             except OSError as e:
+                logger.error(f"upload_kb: could not write text_content to a temp file: {e}")
                 return {
                     'status': 'failed',
                     'error': 'Could not write temp file for text_content',
                     'error_type': 'IOError',
-                    'message': str(e)
+                    'message': "The server could not store the text. Try again shortly."
                 }
             _tmp_display[tmp_path] = use_name
             file_paths = [tmp_path]
 
-        files = []
+        max_mb = TESTPERT_KB_MAX_IMAGE_SIZE_MB if allowed_exts is _KB_IMG_EXTS else KB_MAX_FILE_SIZE_MB
         for idx, path in enumerate(file_paths):
             if not os.path.isfile(path):
                 return {
@@ -666,23 +698,37 @@ async def upload_testpert_kb(
                                     f"kb_type='{kb_type}' does not accept. Allowed: "
                                     f"{', '.join('.' + e for e in sorted(allowed_exts))}.")
                     }
-            try:
-                with open(path, 'rb') as fh:
-                    content = fh.read()
-            except OSError as e:
-                return {
-                    'status': 'failed',
-                    'error': f'Could not read file: {path}',
-                    'error_type': 'IOError',
-                    'message': str(e)
-                }
             # Temp paths use their registered display name; real disk paths use their actual basename.
             display_name = _tmp_display.get(path) or os.path.basename(path)
+            file_size = os.path.getsize(path)
+            if file_size > max_mb * 1024 * 1024:
+                return {
+                    'status': 'failed',
+                    'error': 'File too large',
+                    'error_type': 'ValidationError',
+                    'message': (f"'{display_name}' is {file_size / (1024 * 1024):.1f}MB. kb_type='{kb_type}' "
+                                f"accepts files up to {max_mb}MB.")
+                }
+            # Opened, not read: httpx streams it to the API
+            try:
+                file_handle = open(path, 'rb')
+            except OSError as e:
+                logger.error(f"Could not open '{path}' for upload: {e}")
+                return {
+                    'status': 'failed',
+                    'error': 'Could not read file',
+                    'error_type': 'IOError',
+                    'message': f"Could not read '{display_name}'. Check the file and try again."
+                }
             content_type = mimetypes.guess_type(display_name)[0] or 'application/octet-stream'
             # One field per file: kbFilesUploaded_0, kbFilesUploaded_1, ...
-            files.append((f"{field_prefix}_{idx}", (display_name, content, content_type)))
+            files.append((f"{field_prefix}_{idx}", (display_name, file_handle, content_type)))
+        succeeded = True
 
     finally:
+        if not succeeded:
+            close_upload_files(files)
+        # Unlinking a temp file is safe while its handle is open; the data stays readable
         for p in list(_tmp_display):
             try:
                 if os.path.exists(p):
@@ -706,10 +752,21 @@ async def upload_testpert_kb(
     logger.info(f"Uploading {len(files)} TestPert KB file(s) [{kb_type}] and linking "
                 f"{len(existing_kb_ids)} existing doc(s) to sprint_id={sprint_id}, "
                 f"project_id={context['project_id']}")
-    result = await make_api_request('POST', '/v1/testpertKB/sprint/add', api_key,
-                                    data=data, files=files)
+    if upload_id and (busy := claim(upload_id)):
+        close_upload_files(files)
+        return busy
+    try:
+        result = await make_api_request('POST', '/v1/testpertKB/sprint/add', api_key,
+                                        data=data, files=files,
+                                        **({'timeout': UPLOAD_TIMEOUT} if files else {}))
+    finally:
+        close_upload_files(files)
 
+    if upload_id and not (isinstance(result, dict) and result.get('status') == 'OK'):
+        release(upload_id)
     if isinstance(result, dict) and result.get('status') == 'OK':
+        if upload_id:
+            discard(upload_id)
         result['message'] = "Added your document(s) to the knowledge base."
         result['next_step'] = (
             "Ask the user (plainly) if they want to add more documents or start the analysis. To start, "

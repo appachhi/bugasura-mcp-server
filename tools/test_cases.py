@@ -1,16 +1,23 @@
 """Bugasura MCP tools: test_cases."""
 import html, json
-from typing import Any, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from fastmcp import Context
 from pydantic import Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import get_api_key, validate_api_key
+from auth import fetch_user_context, get_api_key, validate_api_key
 from client import paginate_upstream, respond, logger, make_api_request
-from config import BROWSER_AGENT_PLATFORM_TYPES, MOBILE_AGENT_PLATFORM_TYPES, TestCasePlatformType
-from helpers import find_user_ids_by_names_or_emails, filter_large_fields, select_team_project_context
+from config import (
+    BROWSER_AGENT_PLATFORM_TYPES, MOBILE_AGENT_PLATFORM_TYPES, TestCaseExecutionStatus, TestCasePlatformType,
+    TestCaseResultStatus, TestCaseStatus,
+)
+from helpers import (
+    ATTACH_FILE_PATHS_DESCRIPTION, ATTACH_UPLOAD_ID_DESCRIPTION, find_user_ids_by_names_or_emails,
+    attachment_names_csv, filter_large_fields, open_attachments, project_comment_attachment_names,
+    select_team_project_context, send_with_attachments,
+)
 
 
 @mcp.tool(
@@ -19,9 +26,11 @@ from helpers import find_user_ids_by_names_or_emails, filter_large_fields, selec
     description = (
         "List test cases for a project with pagination. When sprint_id is provided, returns full test "
         "case details for that sprint (grouped by sub-feature): scenario, steps, severity, priority, "
-        "conditions, test data, and execution status. "
-        "Add test_run_execution_run_id to scope to a specific run — at run level, pass_count and "
-        "fail_count per test case are also included (scoped to that run only). "
+        "conditions, test data, execution status, and test_case_status (PASS, FAIL, or PENDING if not run yet). "
+        "Filter by test_case_status to answer e.g. 'which test cases failed in this sprint'. "
+        "Add test_run_execution_run_id to scope to a specific run: test_case_status is then that run's, and "
+        "pass_count and fail_count per test case are also included (scoped to that run only). Without it, a sprint "
+        "with several runs reports the status of any one of them, so pass the run for run results. "
         "Without sprint_id, returns all project-level test cases as brief summaries. "
         "IMPORTANT: always display scenario text exactly as returned — never shorten, rephrase, or summarize it. "
         "Show test_case_number (e.g. TES123, formed from project prefix + id) as the test case identifier, not the raw numeric test_case_id. "
@@ -35,14 +44,16 @@ async def list_test_cases(
     sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id). When provided, returns full test case details for that sprint, grouped by sub-feature."),
     test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID (testRunsExecutionRunId). When provided alongside sprint_id, filters test cases to that specific run. Obtain from bugasura_list_test_runs."),
     sub_feature_name: Optional[str] = Field(default=None, description="Filter sprint test cases by sub-feature name (case-insensitive substring). Only used with sprint_id."),
+    test_case_status: Optional[TestCaseStatus] = Field(default=None, description="Only return test cases with this status: PASS, FAIL, or PENDING (not run yet). Requires sprint_id; add test_run_execution_run_id to filter on that run's status (recommended when the sprint has several runs)."),
     start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)", ge=0),
     max_results: int = Field(default=20, description="Number of results to return (default: 20, ge=1, le=100)", ge=1, le=100),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
     ctx: Optional[Context] = None,
 ) -> ToolResponse:
     """List test cases. With sprint_id: fetches via /testpert/sprintTestCase/get (full details,
-    grouped by sub-feature, includes pass_count/fail_count).
-    Add test_run_execution_run_id to scope to a specific run within the sprint.
+    grouped by sub-feature, includes test_case_status and, per run, pass_count/fail_count).
+    Add test_run_execution_run_id to scope to a specific run within the sprint; test_case_status filters
+    on the sprint (or run) status, so it needs sprint_id.
     Without sprint_id: fetches all project test cases via /v1/testcases/list (summaries).
     """
     api_key = get_api_key()
@@ -55,6 +66,15 @@ async def list_test_cases(
         return respond(context, response_format)
 
     tid, pid = context['team_id'], context['project_id']
+
+    if test_case_status and not sprint_id:
+        return respond({
+            'status': 'failed',
+            'error': 'test_case_status filter needs sprint_id',
+            'error_type': 'ValidationError',
+            'message': "Pass/fail status is tracked per sprint and run. Pass sprint_id (from bugasura_list_sprints), "
+                       "and test_run_execution_run_id for a specific run.",
+        }, response_format)
 
     # --- Sprint-scoped path: full details via testpert endpoint ---
     if sprint_id:
@@ -82,6 +102,9 @@ async def list_test_cases(
                 if needle in str(tc.get('sub_feature_name') or '').lower()
                 or needle in str(tc.get('feature_name') or '').lower()
             ]
+
+        if test_case_status:
+            all_cases = [tc for tc in all_cases if (tc.get('test_case_status') or 'PENDING') == test_case_status]
 
         total = len(all_cases)
         page = all_cases[start_at: start_at + max_results]
@@ -113,6 +136,7 @@ async def list_test_cases(
                 'steps': [s.get('action') for s in steps_raw if isinstance(s, dict) and s.get('action')],
                 'acceptance_criteria': tc.get('acceptance_criteria') or '',
                 'execution_status': tc.get('execution_status') or '',
+                'test_case_status': tc.get('test_case_status') or 'PENDING',
             }
             # pass/fail counts are only scoped correctly at run level; at sprint level the
             # backend join has no execution_run_id filter and aggregates across all runs.
@@ -131,6 +155,8 @@ async def list_test_cases(
         }
         if test_run_execution_run_id:
             result['test_run_execution_run_id'] = test_run_execution_run_id
+        if test_case_status:
+            result['test_case_status'] = test_case_status
         if total > start_at + max_results:
             result['next_offset'] = start_at + max_results
             result['message'] = (f"Showing {start_at + 1}–{start_at + len(page)} of {total}. "
@@ -323,7 +349,7 @@ async def create_test_case(
 @mcp.tool(
     name = "bugasura_get_test_case",
     title = "Get Test Case",
-    description = "Get detailed test case information by numeric ID. Returns full test case details including steps and execution history. Interactive team/project selection available.",
+    description = "Get detailed test case information by numeric ID. Returns full test case details including steps and execution history. With sprint_id it also returns the test case's status (test_case_status) in that sprint; add test_run_execution_run_id for its status in one run. For pass/fail counts use bugasura_list_test_cases with test_run_execution_run_id. Interactive team/project selection available.",
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_test_case(
@@ -331,6 +357,7 @@ async def get_test_case(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)", ge=1),
+    test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID, to get the test case's status in that run. Needs sprint_id. Get from bugasura_list_test_runs.", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -344,6 +371,7 @@ async def get_test_case(
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
         sprint_id: Optional sprint ID for execution context
+        test_run_execution_run_id: Optional run within the sprint, for the run-level test_case_status
 
     Returns:
         dict: Complete test case details with execution history if sprint_id provided
@@ -361,14 +389,23 @@ async def get_test_case(
     if 'status' in context and context['status'] == 'selection_required':
         return respond(context, response_format)
 
-    response = await _fetch_test_case(api_key, context['team_id'], context['project_id'], testcase_id, sprint_id)
+    if test_run_execution_run_id and not sprint_id:
+        return respond({
+            'status': 'failed',
+            'error': 'test_run_execution_run_id needs sprint_id',
+            'error_type': 'ValidationError',
+            'message': "Pass the sprint_id the run belongs to (from bugasura_list_sprints) together with test_run_execution_run_id.",
+        }, response_format)
+
+    response = await _fetch_test_case(api_key, context['team_id'], context['project_id'], testcase_id, sprint_id,
+                                      test_run_execution_run_id)
     return respond(response, response_format)
 
 
 @mcp.tool(
     name = "bugasura_update_test_case",
     title = "Update Test Case",
-    description = "Update test case details (partial updates supported). Can update any field including scenario, feature tags, testing type, severity, priority, conditions, test steps, assignees, status, and sprint associations. To assign a sprint-level test case to an agent for automated execution, set assign_to_agent=True along with sprint_id. API test cases go to the API Agent; functional test cases go by platform_type: DESKTOP_WEB to the Browser Agent, the mobile types to the Mobile Agent. A functional test case with no platform_type cannot be assigned, so pass platform_type in the same call (e.g. platform_type='DESKTOP_WEB' for the Browser Agent). If the agent cannot be assigned the call fails, and test_case_updated says whether the other changes were saved. Interactive selection available.",
+    description = "Update test case details (partial updates supported). Can update any field including scenario, feature tags, testing type, severity, priority, conditions, test steps, assignees, status, and sprint associations. execution_status and test_case_status apply to the project test case, or with sprint_id to the test case in that sprint, or with sprint_id and test_run_execution_run_id to the test case in that test run (e.g. to mark it COMPLETED in a run). To assign a sprint-level test case to an agent for automated execution, set assign_to_agent=True along with sprint_id. API test cases go to the API Agent; functional test cases go by platform_type: DESKTOP_WEB to the Browser Agent, the mobile types to the Mobile Agent. A functional test case with no platform_type cannot be assigned, so pass platform_type in the same call (e.g. platform_type='DESKTOP_WEB' for the Browser Agent). If the agent cannot be assigned the call fails, and test_case_updated says whether the other changes were saved. Interactive selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_test_case(
@@ -387,13 +424,13 @@ async def update_test_case(
     platform_type: Optional[TestCasePlatformType] = Field(default=None, description="Platform the test case runs on (optional). Agents are platform bound: the Browser Agent runs only DESKTOP_WEB test cases, the Mobile Agent only ANDROID / ANDROID_MOBILE_WEB / IOS / IOS_MOBILE_WEB."),
     acceptance_criteria: Optional[str] = Field(default=None, description="New acceptance criteria (optional)"),
     test_steps: Optional[str] = Field(default=None, description="Replaces all test steps of a functional test case: one step per line or a JSON list of steps; an empty string clears them (optional)"),
-    execution_status: Optional[str] = Field(default=None, description="New execution status: 'PASS', 'FAIL', 'BLOCKED', 'NOT EXECUTED' (optional)"),
-    test_case_status: Optional[str] = Field(default=None, description="New test case status (optional)"),
+    execution_status: Optional[TestCaseExecutionStatus] = Field(default=None, description="Progress of the test case (optional): NEW, IN_PROGRESS, BLOCKED, CANCELLED or COMPLETED. Not the pass/fail result, use test_case_status for that. Set in the sprint with sprint_id, or in a test run with sprint_id and test_run_execution_run_id; otherwise on the project test case. COMPLETED needs a PASS or FAIL result reported first, in that run when one is given."),
+    test_case_status: Optional[TestCaseResultStatus] = Field(default=None, description="Result of the test case (optional): PASS or FAIL. Only sets the status, no result is recorded; to report a run of the test case use bugasura_report_test_case_result. Scoped by sprint_id / test_run_execution_run_id like execution_status."),
     assignees: Optional[str] = Field(default=None, description="New assignees, comma-separated names/emails/IDs (optional)"),
     folder_id: Optional[int] = Field(default=None, description="New folder ID for organization (optional, ge=1)", ge=1),
     sprint_ids: Optional[str] = Field(default=None, description="Comma-separated sprint IDs to tag the test case with (optional). This only sets the sprint tag; it does not add the test case to the sprint's test case list. Use bugasura_link_test_cases_to_sprint for that."),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (report_id) for sprint-level operations such as agent assignment (optional, ge=1)", ge=1),
-    test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID (testRunsExecutionRunId). When provided with assign_to_agent=True, scopes the agent assignment to that specific test run execution."),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (report_id) for sprint-level operations: agent assignment, or setting execution_status / test_case_status in the sprint (optional, ge=1)", ge=1),
+    test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID (testRunsExecutionRunId), with sprint_id. Scopes execution_status / test_case_status and agent assignment to that test run. Get from bugasura_list_test_runs.", ge=1),
     assign_to_agent: bool = Field(default=False, description="When True (and sprint_id is provided), assigns this test case to an agent for automated execution within that sprint. API test cases go to the API Agent; functional ones to the Browser Agent (platform_type DESKTOP_WEB) or the Mobile Agent (mobile platform types). The project must have that agent enabled."),
 ) -> ToolResponse:
     """
@@ -428,12 +465,13 @@ async def update_test_case(
         platform_type: DESKTOP_WEB, ANDROID, ANDROID_MOBILE_WEB, IOS, IOS_MOBILE_WEB or MULTI_PLATFORM (optional)
         acceptance_criteria: Expected results (optional)
         test_steps: Replaces all steps of a functional test case, one per line or a JSON list (optional)
-        execution_status: Execution status - NEW/IN_PROGRESS/ERROR/CANCELLED/COMPLETED/BLOCKED (optional)
-        test_case_status: Test case status - PENDING/PASS/FAIL (optional)
+        execution_status: Progress - NEW/IN_PROGRESS/BLOCKED/CANCELLED/COMPLETED (optional)
+        test_case_status: Result - PASS/FAIL (optional)
         assignees: Comma-separated names, emails, or user IDs (optional)
         folder_id: Folder ID for organization (optional)
         sprint_ids: Comma-separated sprint IDs (optional)
-        sprint_id: Sprint identifier for agent assignment context (optional)
+        sprint_id: Sprint identifier for agent assignment or sprint-level status (optional)
+        test_run_execution_run_id: Test run for run-level status or agent assignment, with sprint_id (optional)
         assign_to_agent: True to assign this sprint test case to an agent (optional)
 
     Returns:
@@ -459,6 +497,9 @@ async def update_test_case(
 
         # Assign a sprint test case to the Browser Agent (it runs only Desktop Web test cases)
         update_test_case(api_key, team_id, project_id, testcase_id, sprint_id=42, platform_type="DESKTOP_WEB", assign_to_agent=True)
+
+        # Mark the test case COMPLETED in test run 9 of sprint 42
+        update_test_case(api_key, team_id, project_id, testcase_id, sprint_id=42, test_run_execution_run_id=9, execution_status="COMPLETED")
     """
     # Validate API key before proceeding
     api_key = get_api_key()
@@ -479,6 +520,23 @@ async def update_test_case(
     # Extract validated team_id and project_id
     team_id = context['team_id']
     project_id = context['project_id']
+
+    # /v1/testcases/update never reaches a run's row, so sprint and run statuses go to /testpert/sprintTestCase/update.
+    status_given = execution_status is not None or test_case_status is not None
+    if status_given and test_run_execution_run_id and sprint_id is None:
+        return {'status': 'failed', 'error': 'sprint_id is required with test_run_execution_run_id',
+                'error_type': 'ValidationError',
+                'message': 'Nothing was saved. Pass the sprint_id the test run belongs to (bugasura_list_test_runs).'}
+    if execution_status is not None and sprint_id is not None and assign_to_agent:
+        return {'status': 'failed', 'error': 'execution_status cannot be combined with assign_to_agent',
+                'error_type': 'ValidationError',
+                'message': 'Nothing was saved. Assigning to an agent resets the execution status to NEW; set execution_status in a separate call.'}
+    status_in_sprint = status_given and sprint_id is not None
+    field_args = (feature_name, sub_feature_name, scenario, testing_type, severity, priority, test_conditions, test_idea,
+                  test_data, platform_type, acceptance_criteria, test_steps, assignees, folder_id, sprint_ids)
+    if status_in_sprint and not assign_to_agent and all(arg is None for arg in field_args):
+        return await _update_sprint_test_case_status(api_key, team_id, project_id, testcase_id, sprint_id,
+                                                     test_run_execution_run_id, execution_status, test_case_status)
 
     # Step 1: Fetch existing test case details
     logger.info(f"Fetching existing test case details for testcase_id={testcase_id}")
@@ -651,11 +709,11 @@ async def update_test_case(
         payload["testCaseDetails"] = json.dumps([tc_details])
         logger.info(f"Prepared testCaseDetails with {len(tc_details)} fields")
 
-    # Add status fields if provided
-    if execution_status is not None:
+    # Add status fields if provided; sprint and run statuses are set after the field update.
+    if execution_status is not None and not status_in_sprint:
         payload["executionStatus"] = execution_status
         logger.debug(f"Set executionStatus to {execution_status}")
-    if test_case_status is not None:
+    if test_case_status is not None and not status_in_sprint:
         payload["testCaseStatus"] = test_case_status
         logger.debug(f"Set testCaseStatus to {test_case_status}")
     if folder_id is not None:
@@ -673,6 +731,15 @@ async def update_test_case(
         if assignment['status'] != 'OK':
             return assignment
         result['agent_assignment'] = assignment
+
+    if status_in_sprint and isinstance(result, dict) and result.get('status') == 'OK':
+        status_update = await _update_sprint_test_case_status(api_key, team_id, project_id, testcase_id, sprint_id,
+                                                              test_run_execution_run_id, execution_status, test_case_status)
+        if status_update['status'] != 'OK':
+            status_update['test_case_updated'] = True
+            status_update['message'] = 'The other test case changes were saved. ' + status_update['message']
+            return status_update
+        result['status_update'] = status_update
 
     return result
 
@@ -925,6 +992,176 @@ async def unlink_test_cases_from_sprint(
 
 
 @mcp.tool(
+    name = "bugasura_report_test_case_result",
+    title = "Report Test Case Result",
+    description = (
+        "Report that a sprint test case PASSED or FAILED, the same as the Pass / Fail buttons in Bugasura. "
+        "Use this, not bugasura_create_issue, to record a pass: an issue is always a failure. "
+        "The result is counted in the sprint's pass/fail stats, adds a 'reported Pass/Fail' comment on the test case, "
+        "and sets the test case's status (it stays FAIL once it has failed, even if a later result passes). "
+        "Pass test_run_execution_run_id when the test was executed in a test run: without it the API also counts "
+        "FAILs from other sprints and runs, so a PASS on a test case that ever failed stays FAIL. "
+        "FAIL also creates an issue linked to the test case, so it needs a summary. "
+        "Reporting moves the execution status from NEW to IN_PROGRESS only. Set mark_completed=True only when the user "
+        "explicitly asks to mark the test case completed. "
+        "The test case must already be in the sprint (bugasura_link_test_cases_to_sprint). "
+        "Interactive team/project selection available."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+)
+async def report_test_case_result(
+    testcase_id: int = Field(description="Test case ID (test_case_id from bugasura_list_test_cases with sprint_id)", ge=1),
+    sprint_id: int = Field(description="Sprint ID (report_id) the test case was run in. Get from bugasura_list_sprints.", ge=1),
+    result: TestCaseResultStatus = Field(description="PASS or FAIL"),
+    summary: str = Field(default="", description="Issue title. Required for FAIL, ignored for PASS.", max_length=500),
+    description: str = Field(default="", description="Issue details for FAIL, e.g. steps, expected vs. actual (optional, supports HTML). Ignored for PASS."),
+    severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"] = Field(default="MEDIUM", description="Issue severity for FAIL (default MEDIUM). Ignored for PASS."),
+    issue_status: str = Field(default="", description="Issue workflow status for FAIL, must match the project workflow (optional, defaults to the first status). Ignored for PASS."),
+    test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID, to record the result in that run (optional). Get from bugasura_list_test_runs.", ge=1),
+    device_name: str = Field(default="", description="Device tested on (optional)"),
+    os_name: str = Field(default="", description="Operating system (optional)", max_length=50),
+    os_version: str = Field(default="", description="OS version (optional)", max_length=50),
+    browser_name: str = Field(default="", description="Browser name (optional)", max_length=50),
+    browser_version: str = Field(default="", description="Browser version (optional)", max_length=50),
+    network_name: str = Field(default="", description="Network condition (optional)", max_length=25),
+    resolution: str = Field(default="", description="Screen resolution like '1920x1080', web projects only (optional)", max_length=25),
+    mark_completed: bool = Field(default=False, description="Also set the execution status to COMPLETED, in the test run when test_run_execution_run_id is given, otherwise in the sprint. Leave False unless the user explicitly asks to mark the test case completed; by default reporting moves NEW to IN_PROGRESS only."),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+) -> ToolResponse:
+    """
+    Report a PASS or FAIL for a sprint test case via /testresults/issueDetails/add.
+
+    That is the web app's report endpoint: unlike /v1/issues/add (always FAIL, no test case link) it takes the
+    result status and project_test_case_ids, and the backend then links the result to the test case (and run),
+    updates the sprint test case status and execution status, and comments on the test case.
+    """
+    api_key = get_api_key()
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_report_test_case_result',
+                                                f', testcase_id={testcase_id}, sprint_id={sprint_id}, result="{result}"')
+    if 'status' in context and context['status'] == 'selection_required':
+        return context
+    team_id = context['team_id']
+    project_id = context['project_id']
+
+    is_pass = result == 'PASS'
+    summary = summary.strip()
+    if not is_pass and not summary:
+        return {
+            'status': 'failed',
+            'error': 'summary is required for a FAIL result',
+            'error_type': 'ValidationError',
+            'message': "A FAIL creates an issue, so pass summary (and ideally description) saying what went wrong.",
+        }
+
+    # One read checks the test case is in the sprint and gives the sprint's testrun_id and platform type.
+    tc_params = {'teamId': team_id, 'appId': project_id, 'sprintId': sprint_id, 'testCaseId': testcase_id}
+    if test_run_execution_run_id:
+        tc_params['testRunsExecutionRunId'] = test_run_execution_run_id
+    tc_resp = await make_api_request('GET', '/testpert/sprintTestCase/get', api_key, params=tc_params)
+    if not (isinstance(tc_resp, dict) and tc_resp.get('status') == 'OK'):
+        logger.error(f"report_test_case_result: sprint test case read failed for sprint {sprint_id}: "
+                     f"{tc_resp.get('message') if isinstance(tc_resp, dict) else tc_resp}")
+        return {'status': 'failed', 'error': 'Could not read the sprint test case', 'error_type': 'APIError',
+                'message': (tc_resp.get('message') if isinstance(tc_resp, dict) else None)
+                           or f"Check that sprint {sprint_id} belongs to project {project_id}."}
+
+    tc_detail = next((t for t in tc_resp.get('testCaseDetails') or []
+                      if str(t.get('test_case_id', '')) == str(testcase_id)), None)
+    if tc_detail is None:
+        return {'status': 'failed', 'error': 'Test case is not in this sprint', 'error_type': 'NotFound',
+                'message': f"Test case {testcase_id} is not in sprint {sprint_id}. "
+                           "Add it with bugasura_link_test_cases_to_sprint, then report the result."}
+
+    sprint_row = next((r for r in tc_resp.get('projectReportList') or []
+                       if str(r.get('report_id', '')) == str(sprint_id)), None)
+    if not sprint_row or not sprint_row.get('testrun_id'):
+        return {'status': 'failed', 'error': 'Sprint not found', 'error_type': 'NotFound',
+                'message': f"Sprint {sprint_id} was not found in project {project_id}. Use bugasura_list_sprints to find it."}
+
+    # The backend requires every environment field; 'None' is its own placeholder (as in /v1/issues/add).
+    platform_type = sprint_row.get('platformType') or await _project_platform_type(api_key, team_id, project_id)
+    condition = 'None'
+    if platform_type in ('Web', 'Multiple'):
+        condition = 'None x None'
+        width, _, height = resolution.lower().replace('*', 'x').partition('x')
+        if width.strip().isdigit() and height.strip().isdigit():
+            condition = f"{width.strip()} x {height.strip()}"
+    os_name = os_name or 'None'
+    issue_details = {
+        'testrun_id': str(sprint_row['testrun_id']),
+        'report_id': str(sprint_id),
+        'app_id': str(project_id),
+        'project_test_case_id': str(testcase_id),
+        'project_test_case_ids': str(testcase_id),
+        'testruns_execution_run_id': str(test_run_execution_run_id or ''),
+        'status': result,
+        'device_name': os_name if platform_type == 'Web' else (device_name or 'None'),
+        'os_name': os_name,
+        'os_version': os_version or 'None',
+        'network_name': network_name or 'None',
+        'browser_name': (browser_name or 'None') if platform_type in ('Web', 'Mobileweb', 'Multiple') else 'None',
+        'browser_version': (browser_version or 'None') if platform_type in ('Web', 'Mobileweb', 'Multiple') else 'None',
+        'condition_name': condition,
+        'failure_reason': '' if is_pass else summary,
+        'bug_description': '' if is_pass else description,
+        'bug_severity': '' if is_pass else severity,
+        'bug_status': '' if is_pass else issue_status,
+        'failure_type': '' if is_pass else 'BUG',
+    }
+
+    logger.info(f"report_test_case_result: {result} for test case {testcase_id} in sprint {sprint_id}"
+                f"{f' run {test_run_execution_run_id}' if test_run_execution_run_id else ''}")
+    response = await make_api_request('POST', '/testresults/issueDetails/add', api_key, data={
+        'teamId': team_id,
+        'issueDetails': json.dumps(issue_details),
+        'isTeamMember': 1,
+        'source': 'API',
+    })
+    if not (isinstance(response, dict) and response.get('status') == 'OK'):
+        logger.error(f"report_test_case_result: report failed for test case {testcase_id}: "
+                     f"{response.get('message') if isinstance(response, dict) else response}")
+        return {'status': 'failed', 'error': f"Could not report {result} for test case {testcase_id}",
+                'error_type': 'APIError',
+                'message': (response.get('message') if isinstance(response, dict) else None) or 'The API rejected the result.'}
+
+    ids = response.get('testResultIds') or {}
+    out = {
+        'status': 'OK',
+        'message': f"Reported {result} for test case {testcase_id} in sprint {sprint_id}",
+        'testcase_id': testcase_id,
+        'sprint_id': sprint_id,
+        'result': result,
+        'result_id': ids.get('testresults_id'),
+    }
+    if test_run_execution_run_id:
+        out['test_run_execution_run_id'] = test_run_execution_run_id
+    if not is_pass:
+        out['issue_key'] = ids.get('testresults_id')
+        out['issue_id'] = ids.get('issue_id')
+    elif int(tc_detail.get('total_fail_count') or 0) > 0:
+        # The API keeps the status FAIL when the fail count it read is non-zero; without a run that count spans all sprints.
+        where = 'in this run' if test_run_execution_run_id else 'in an earlier sprint or run (no run was given, so the API counts them all)'
+        out['note'] = f"This test case already has a FAIL {where}, so its status stays FAIL; the pass is still counted."
+
+    if mark_completed:
+        completion = await _update_sprint_test_case_status(api_key, team_id, project_id, testcase_id, sprint_id,
+                                                           test_run_execution_run_id, execution_status='COMPLETED')
+        if completion['status'] != 'OK':
+            # The result is already recorded; a retry of this call would report it twice.
+            return {**completion, 'result_recorded': True, 'result_id': out['result_id'],
+                    'message': f"The {result} was recorded, so do not report it again. Mark the test case COMPLETED with "
+                               "bugasura_update_test_case (execution_status='COMPLETED', same sprint_id and "
+                               f"test_run_execution_run_id). {completion['message']}"}
+        out['execution_status'] = completion['execution_status']
+    return out
+
+
+@mcp.tool(
     name = "bugasura_list_test_case_comments",
     title = "List Test Case Comments",
     description = "List comments for a specific test case with test case details. Returns test case information and all associated comments. Interactive team/project/test case selection available.",
@@ -1040,7 +1277,7 @@ async def list_test_case_comments(
 @mcp.tool(
     name = "bugasura_add_test_case_comment",
     title = "Add Test Case Comment",
-    description = "Add a comment to a specific test case. Supports inline images, file attachments, and threaded replies. Interactive team/project/test case selection available.",
+    description = "Add a comment to a specific test case. Supports inline images, threaded replies and file attachments (pass upload_id from bugasura_create_upload_link(purpose='attachment')) — the only way to attach a file to a test case. Interactive team/project/test case selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def add_test_case_comment(
@@ -1050,6 +1287,8 @@ async def add_test_case_comment(
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)", ge=1),
     parent_comment_id: Optional[int] = Field(default=None, description="Parent comment ID for threaded replies (optional)"),
+    upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION),
+    file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
 ) -> ToolResponse:
     """
     Add a comment to a specific test case in Bugasura.
@@ -1062,6 +1301,7 @@ async def add_test_case_comment(
         test_case_id: Test case identifier (optional - will prompt if not provided)
         report_id: Report identifier for test run context (optional)
         parent_comment_id: Parent comment ID for threaded replies (optional)
+        upload_id / file_paths: Files attached to the comment (sent in the same request)
     Returns:
         dict: API response with added comment details
         OR a selection prompt if team_id/project_id/test_case_id not provided
@@ -1156,9 +1396,13 @@ async def add_test_case_comment(
     if parent_comment_id is not None:
         payload['parentCommentId'] = parent_comment_id
 
+    opened = open_attachments(file_paths, upload_id)
+    if opened.get('status') != 'OK':
+        return opened
+
     logger.info(f"add_test_case_comment: Adding comment to test_case_id={test_case_id} in team={team_id}, project={project_id}")
 
-    response = await make_api_request('POST', '/v1/testcasecomments/add', api_key, data=payload)
+    response = await send_with_attachments('POST', '/v1/testcasecomments/add', api_key, opened, upload_id, data=payload)
 
     if response.get('status') == 'OK':
         logger.info(f"add_test_case_comment: Successfully added comment to test case {test_case_id}")
@@ -1324,8 +1568,8 @@ async def get_test_case_comment(
 @mcp.tool(
     name = "bugasura_update_test_case_comment",
     title = "Update Test Case Comment",
-    description = "Update a test case comment. Can update comment content and attachments. Only the comment owner can update their comment. Interactive team/project/test case/comment selection available.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
+    description = "Update a test case comment. Can update comment content, keep a subset of its attachments (comment_attachments) and add new files (upload_id from bugasura_create_upload_link(purpose='attachment')). Existing attachments are kept unless comment_attachments says otherwise. Only the comment owner can update their comment. Interactive team/project/test case/comment selection available.",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False,  "openWorldHint": True}
 )
 async def update_test_case_comment(
     comment: str = Field(description="Updated comment content (supports HTML formatting, required, min_length=1)", min_length=1),
@@ -1334,7 +1578,9 @@ async def update_test_case_comment(
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
     comment_id: Optional[int] = Field(default=None, description="Comment identifier to update (optional - will prompt if not provided, ge=1)", ge=1),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)", ge=1),
-    comment_attachments: Optional[str] = Field(default=None, description="Comma-separated list of attachment filenames to keep (optional)"),
+    comment_attachments: Optional[str] = Field(default=None, description="Comma-separated list of the existing attachment filenames to keep (optional). Omit to keep them all; '' removes them all."),
+    upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION + " The files are added to the comment's attachments."),
+    file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
 ) -> ToolResponse:
     """
     Update a test case comment in Bugasura.
@@ -1347,7 +1593,8 @@ async def update_test_case_comment(
         test_case_id: Test case identifier (optional - will prompt if not provided)
         comment_id: Comment identifier to update (optional - will prompt if not provided)
         report_id: Report identifier for test run context (optional)
-        comment_attachments: Comma-separated attachment filenames to retain (optional)
+        comment_attachments: Comma-separated attachment filenames to retain (optional; omitted keeps all)
+        upload_id / file_paths: New files to add to the comment
     Returns:
         dict: API response with updated comment details
         OR a selection prompt if required parameters not provided
@@ -1492,13 +1739,31 @@ async def update_test_case_comment(
         payload['reportId'] = report_id
         payload['report_id'] = report_id
 
-    if comment_attachments is not None:
-        payload['commentsAttachments'] = comment_attachments
-        payload['commentAttachments'] = comment_attachments
+    # The API treats a missing attachment list as "keep none" and deletes the files, so the
+    # current list is read back and resent when the caller did not give one
+    comment_attachments = attachment_names_csv(comment_attachments)
+    if comment_attachments is None:
+        comment_attachments = await project_comment_attachment_names(api_key, 'testcase', team_id, project_id,
+                                                                     test_case_id, comment_id, report_id)
+        if comment_attachments is None:
+            return {
+                'status': 'failed',
+                'error': 'Could not read the comment',
+                'error_type': 'APIError',
+                'message': ("The comment's current attachments could not be read, so it was not updated "
+                            "(updating without them would delete them). Retry, or pass comment_attachments "
+                            "with the filenames to keep."),
+            }
+    payload['commentsAttachments'] = comment_attachments
+    payload['commentAttachments'] = comment_attachments
+
+    opened = open_attachments(file_paths, upload_id)
+    if opened.get('status') != 'OK':
+        return opened
 
     logger.info(f"update_test_case_comment: Updating comment_id={comment_id} for test_case_id={test_case_id} in team={team_id}, project={project_id}")
 
-    response = await make_api_request('POST', '/v1/testcasecomments/update', api_key, data=payload)
+    response = await send_with_attachments('POST', '/v1/testcasecomments/update', api_key, opened, upload_id, data=payload)
 
     if response.get('status') == 'OK':
         logger.info(f"update_test_case_comment: Successfully updated comment {comment_id} for test case {test_case_id}")
@@ -1723,13 +1988,32 @@ async def delete_test_case_comment(
 # Helpers
 # ---------------------------------------------------------------------------
 
+async def _project_platform_type(api_key: str, team_id: int, project_id: int) -> str:
+    """The project's platform type (Web / Mobileweb / Multiple / Apps) from the cached user context."""
+    context = await fetch_user_context(api_key)
+    for team in context.get('teams') or []:
+        if str(team.get('team_id')) == str(team_id):
+            for project in team.get('projects') or []:
+                if str(project.get('project_id')) == str(project_id):
+                    return project.get('platform_type') or ''
+    return ''
+
+
 async def _fetch_test_case(api_key: str, team_id: int, project_id: int, testcase_id: int,
-                           sprint_id: Optional[int] = None) -> dict:
+                           sprint_id: Optional[int] = None, test_run_execution_run_id: Optional[int] = None) -> dict:
     """GET /v1/testcases/get; the endpoint names the project app_id and the sprint report_id."""
     params = {'team_id': team_id, 'app_id': project_id, 'testcase_id': testcase_id}
     if sprint_id is not None:
         params['report_id'] = sprint_id
-    return await make_api_request('GET', '/v1/testcases/get', api_key, params=params)
+    if test_run_execution_run_id:
+        params['testRunsExecutionRunId'] = test_run_execution_run_id
+    response = await make_api_request('GET', '/v1/testcases/get', api_key, params=params)
+    # The endpoint's pass/fail counts span every sprint and run and are multiplied by its tag joins, so drop them.
+    for row in (response.get('testCaseDetails') or []) if isinstance(response, dict) else []:
+        if isinstance(row, dict):
+            row.pop('total_pass_count', None)
+            row.pop('total_fail_count', None)
+    return response
 
 
 def _is_json_test_data(test_data: str) -> bool:
@@ -1825,6 +2109,46 @@ async def _assign_to_agent(api_key, team_id, project_id, testcase_id, sprint_id,
     scope = ('this test run' if test_run_execution_run_id else
              'test runs created from now on; pass test_run_execution_run_id to assign it in an existing run')
     return {'status': 'OK', 'agent': label, 'message': f'Assigned to the {label} for {scope}.'}
+
+
+async def _update_sprint_test_case_status(api_key, team_id, project_id, testcase_id, sprint_id, test_run_execution_run_id,
+                                          execution_status=None, test_case_status=None) -> dict:
+    """Set the status of a test case in a sprint, or in one of its runs, as the web app's status dropdown does."""
+    scope = f"test run {test_run_execution_run_id}" if test_run_execution_run_id else f"sprint {sprint_id}"
+    payload = {'teamId': team_id, 'appId': project_id, 'sprintId': sprint_id, 'testCaseId': testcase_id}
+    if execution_status is not None:
+        payload['executionStatus'] = execution_status
+    if test_case_status is not None:
+        payload['testCaseStatus'] = test_case_status
+    if test_run_execution_run_id:
+        payload['testRunsExecutionRunId'] = test_run_execution_run_id
+    logger.info(f"Setting the status of testcase_id={testcase_id} in {scope}: "
+                f"execution_status={execution_status}, test_case_status={test_case_status}")
+    response = await make_api_request('POST', '/testpert/sprintTestCase/update', api_key, data=payload)
+    if not (isinstance(response, dict) and response.get('status') == 'OK'):
+        logger.error(f"_update_sprint_test_case_status: update failed for testcase_id={testcase_id} in {scope}: "
+                     f"{response.get('message') if isinstance(response, dict) else response}")
+        hint = f"Check that test case {testcase_id} is in {scope}."
+        if execution_status == 'COMPLETED':
+            # The API counts only the results reported in that run (or sprint) for this check.
+            hint += (f" COMPLETED needs a PASS or FAIL reported in {scope} first: bugasura_report_test_case_result "
+                     "with the same sprint_id and test_run_execution_run_id.")
+        upstream = (response.get('message') if isinstance(response, dict) else '') or ''
+        return {'status': 'failed', 'error': f"Could not update the status of test case {testcase_id} in {scope}",
+                'error_type': 'APIError', 'message': f"{upstream} {hint}".strip()}
+
+    details = response.get('testCaseDetails')
+    row = (details[0] if isinstance(details, list) and details else details) if details else {}
+    row = row if isinstance(row, dict) else {}
+    out = {'status': 'OK', 'message': f"Updated the status of test case {testcase_id} in {scope}",
+           'testcase_id': testcase_id, 'sprint_id': sprint_id}
+    if test_run_execution_run_id:
+        out['test_run_execution_run_id'] = test_run_execution_run_id
+    if execution_status is not None:
+        out['execution_status'] = row.get('execution_status') or execution_status
+    if test_case_status is not None:
+        out['test_case_status'] = row.get('test_case_status') or test_case_status
+    return out
 
 
 def _normalise_steps(steps):

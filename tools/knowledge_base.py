@@ -73,10 +73,15 @@ from pydantic import Field
 
 from output_types import ToolResponse
 from app import mcp
-from auth import get_api_key, validate_api_key
-from client import get_http_client, paginated, respond, logger, make_api_request
+from auth import current_user_id, get_api_key, validate_api_key
+from client import UPLOAD_TIMEOUT, get_http_client, in_http_request, paginated, respond, logger, make_api_request
+from config import (
+    KB_DOC_EXTS, KB_DOC_IMPORT_MAX_FILE_SIZE_MB, KB_DOC_IMPORT_TYPES, KB_MAX_FILE_SIZE_MB,
+    UPLOAD_CONSUMER_TOOLS, UploadPurpose,
+)
+from uploads import claim, create_ticket, discard, release, staged_paths
 from helpers import (
-    download_url_to_path, download_url_tmp, fetch_url_bytes,
+    close_upload_files, download_url_to_path, download_url_tmp, fetch_url_bytes,
     infer_filename_from_url_path, local_path_rejected, normalise_share_url,
     redact_secrets, select_team_project_context, CDN_BASE_URL, WEB_BASE_URL,
 )
@@ -110,10 +115,6 @@ _KB_MAX_PAGE_CONTENT_BYTES = 200 * 1024
 # separate markdown blocks instead of running together into one paragraph.
 _KB_PAGE_CONTENT_JOINER = '\n\n'
 
-# Extensions the Knowledge Base accepts on an upload (matches the web app's file picker).
-_KB_DOC_EXTS = {'txt', 'pdf', 'doc', 'docx', 'md'}
-# Per-file cap enforced upstream by config.application.maxTestpertFileSize (MB).
-_KB_MAX_FILE_SIZE_MB = 100
 # Multipart field prefix. The web app posts choose_file[]; the API iterates $_FILES
 # and ignores the field names, so one indexed field per file is what reaches it.
 _KB_UPLOAD_FIELD_PREFIX = 'choose_file'
@@ -135,10 +136,6 @@ _KB_FIGMA_SOURCE_TYPE = 'DESIGN'
 # Figma path segments that precede the file key (https://www.figma.com/design/<key>/...).
 _KB_FIGMA_URL_KINDS = ('design', 'file', 'proto', 'board', 'slides')
 _KB_FIGMA_API_BASE = 'https://api.figma.com/v1'
-# Extension -> the API's importType for the KB document editor's Import menu.
-_KB_DOC_IMPORT_TYPES = {'md': 'md_file', 'csv': 'csv_file', 'xlsx': 'excel_file', 'xls': 'excel_file'}
-# Per-file cap the importDocPages endpoint enforces (MB).
-_KB_DOC_IMPORT_MAX_FILE_SIZE_MB = 10
 # Stages that mean a page import is already running on a document; the API refuses a
 # second one, so the tools report it before spending a request.
 _KB_DOC_IMPORTING_STAGES = ('IMPORT_PAGES', 'IMPORTING_PAGES')
@@ -2933,6 +2930,84 @@ async def delete_knowledge_base_page(
 
 
 @mcp.tool(
+    name="bugasura_create_upload_link",
+    title="Create Upload Link",
+    description=(
+        "Create a short-lived, single-use link the user opens to upload a file from their own "
+        "computer to this hosted Bugasura server — the way to get a local file (PDF, DOCX, "
+        "Markdown, spreadsheet) into the Knowledge Base without a public share link. "
+        "purpose='knowledge_base' (default) stages documents for bugasura_upload_knowledge_base_document; "
+        "purpose='document_import' stages one .md/.csv/.xlsx/.xls file for "
+        "bugasura_import_file_to_knowledge_base_document; purpose='testpert_kb' stages documents or "
+        "images for bugasura_testpert_upload_kb (images go to a sprint only this way); purpose='test_data' "
+        "stages test data files (csv, json, images, documents, app builds) for bugasura_upload_test_data_files. "
+        "Show the user upload_url; once they say the upload is done, call that tool with upload_id. "
+        "In a terminal client with shell access you may upload a file the user named yourself with "
+        "`curl -sS -F file=@<path> <upload_url>` — the bytes go through the shell, never through you. "
+        "Never read or encode the file yourself."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
+)
+async def create_upload_link(
+    purpose: UploadPurpose = Field(default='knowledge_base', description="What the file is for: 'knowledge_base' to add documents to the Knowledge Base (bugasura_upload_knowledge_base_document), 'document_import' to import one Markdown/CSV/Excel file into an existing page document (bugasura_import_file_to_knowledge_base_document), 'testpert_kb' for documents or images added straight to a TestPert sprint (bugasura_testpert_upload_kb), 'test_data' for a project's test data files (bugasura_upload_test_data_files)."),
+) -> ToolResponse:
+    """
+    Open an upload link bound to the signed-in user (uploads.create_ticket).
+
+    The link (`/upload/<upload_id>` on this server) takes one upload, through its browser
+    page or a multipart POST, within 30 minutes; the staged file then waits up to an hour
+    for the consuming tool, which sends it to the Bugasura API and deletes it.
+    Streamable-HTTP only: under STDIO the server reads local paths directly.
+
+    Returns:
+        dict: {
+            'status': 'OK',
+            'upload_id': str,
+            'upload_url': str,
+            'expires_at': str,            # ISO 8601 UTC
+            'allowed_extensions': [str],
+            'max_file_size_mb': int,
+            'max_files': int,
+            'message_to_user': str,
+            'next_step': str
+        }
+        OR a failure envelope.
+    """
+    api_key = get_api_key()
+    validation = await validate_api_key(api_key)
+    if not validation['valid']:
+        return validation
+
+    path_arg = 'file_path' if purpose == 'document_import' else 'file_paths'
+    if not in_http_request():
+        return _fail('Upload links need the hosted server',
+                     f"This local server reads files directly: ask the user for the file's exact "
+                     f"absolute path and pass it as {path_arg}.")
+
+    ticket = await asyncio.to_thread(create_ticket, current_user_id(), purpose)
+    if ticket.get('status') != 'OK':
+        return ticket
+
+    tool = UPLOAD_CONSUMER_TOOLS[purpose]
+    files_phrase = 'your file' if ticket['max_files'] == 1 else 'your file(s)'
+    ticket['message_to_user'] = (
+        f"Open this link and upload {files_phrase} "
+        f"({', '.join(ticket['allowed_extensions'])}, up to {ticket['max_file_size_mb']} MB):\n\n"
+        f"{ticket['upload_url']}\n\n"
+        f"The link works once and expires in {ticket['expires_in_minutes']} minutes. "
+        f"Tell me when the upload is done."
+    )
+    ticket['next_step'] = (
+        f"Show message_to_user to the user. When they say the upload is done, call {tool} with "
+        f"upload_id='{ticket['upload_id']}' (plus the folder/document they want). If the user is in a "
+        f"terminal and named a local file, you may instead run "
+        f"`curl -sS -F file=@<path> {ticket['upload_url']}` and then call {tool}. "
+        f"Never read or encode the file yourself."
+    )
+    return ticket
+
+
+@mcp.tool(
     name="bugasura_upload_knowledge_base_document",
     title="Upload Knowledge Base Document",
     description=(
@@ -2941,11 +3016,13 @@ async def delete_knowledge_base_page(
         "it is created when the project does not have one by that name yet; omit folder_name and the "
         "project's first knowledge base folder is used, or a 'Knowledge Base' folder is created when "
         "the project has none. "
-        "TWO WAYS TO PROVIDE THE FILE — pick ONE per call: "
-        "(1) file_paths — absolute paths on the machine running this server (terminal/CLI use); ask the "
-        "user for the exact path, never guess or construct it. "
+        "THREE WAYS TO PROVIDE THE FILE — pick ONE per call: "
+        "(1) upload_id — from bugasura_create_upload_link, after the user uploaded the file to that link "
+        "(the normal way on the hosted server, for a file on the user's own computer). "
         "(2) source_url — the Google Drive / Dropbox / public download link the user shared; the server "
         "fetches the file itself. "
+        "(3) file_paths — absolute paths on the machine running this server (local STDIO servers only); "
+        "ask the user for the exact path, never guess or construct it. "
         "Never read, encode, or convert the file yourself. "
         "This is the project-wide knowledge base — to add documents to a TestPert sprint's own knowledge "
         "base use bugasura_testpert_upload_kb instead."
@@ -2956,6 +3033,7 @@ async def upload_knowledge_base_document(
     file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server). Ask the user for the exact path — never construct or guess it. Multiple files are uploaded into the same folder."),
     source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. IMPORTANT: a Google Drive link must be set to 'Anyone with the link'."),
     source_url_filename: Optional[str] = Field(default=None, description="Original filename with extension (e.g. 'PRD.pdf'). Optional — inferred from the URL path or the Content-Disposition header when omitted. Only pass it if auto-detection fails or the user names the file."),
+    upload_id: Optional[str] = Field(default=None, description="upload_id returned by bugasura_create_upload_link, once the user has uploaded the file(s) to its link. Every file uploaded there is added."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to add the document to. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
@@ -2973,6 +3051,7 @@ async def upload_knowledge_base_document(
         file_paths: Absolute local paths to upload (the MCP server must be able to read them)
         source_url: Public/share link the server downloads the file from
         source_url_filename: Original filename for source_url when it cannot be detected
+        upload_id: Files staged through an upload link (bugasura_create_upload_link)
         folder_name: Folder to file the document in (created when it does not exist)
         folder_id: Explicit folder identifier (takes precedence over folder_name)
         team_id / project_id: Resolved interactively if omitted
@@ -3000,6 +3079,9 @@ async def upload_knowledge_base_document(
 
         # From a share link
         upload_knowledge_base_document(source_url="https://drive.google.com/file/d/abc123/view")
+
+        # From an upload link the user has used
+        upload_knowledge_base_document(upload_id="Qm9...", folder_name="Product Specs")
     """
     context = await _connector_context(team_id, project_id,
                                        'bugasura_upload_knowledge_base_document',
@@ -3012,52 +3094,58 @@ async def upload_knowledge_base_document(
         return rejected
 
     # Need exactly one content source.
-    if not file_paths and not source_url:
-        return {
-            'status': 'failed',
-            'error': 'No file provided',
-            'error_type': 'ValidationError',
-            'message': (
-                'Ask the user how they want to provide the document. In the terminal, ask for the exact '
-                'absolute file path and pass file_paths=[...]. Elsewhere, ask them to share a Google Drive '
-                'or Dropbox link ("Anyone with the link") and pass source_url=<link>. '
-                'Never read or encode the file yourself.'
-            )
-        }
-    if file_paths and source_url:
+    sources = sum(bool(source) for source in (file_paths, source_url, upload_id))
+    if not sources:
+        return _no_file_failure('the document', 'bugasura_create_upload_link()', 'file_paths=[...]')
+    if sources > 1:
         return {
             'status': 'failed',
             'error': 'Multiple content sources provided',
             'error_type': 'ValidationError',
-            'message': 'Provide either file_paths or source_url per call, not both.'
+            'message': 'Provide only one of upload_id, source_url or file_paths per call.'
         }
+
+    if upload_id:
+        staged = staged_paths(upload_id, current_user_id(), 'knowledge_base')
+        if staged.get('status') != 'OK':
+            return staged
+        file_paths = staged['paths']
 
     # Read the documents first, so a bad path or unsupported file never creates a folder.
     collected = await asyncio.to_thread(
-        _collect_upload_files, file_paths, source_url, source_url_filename)
+        _collect_upload_files, file_paths, None if upload_id else source_url, source_url_filename)
     if collected.get('status') != 'OK':
         return collected
     files = collected['files']
     filenames = collected['filenames']
 
-    # Resolve (or create) the destination folder — folderId is required upstream.
-    folder = await _resolve_kb_folder(api_key, team_id, project_id, folder_id, folder_name)
-    if folder.get('status') != 'OK':
-        return folder
+    try:
+        # Resolve (or create) the destination folder — folderId is required upstream.
+        folder = await _resolve_kb_folder(api_key, team_id, project_id, folder_id, folder_name)
+        if folder.get('status') != 'OK':
+            return folder
 
-    logger.info(f"upload_knowledge_base_document: Uploading {len(files)} document(s) to "
-                f"folder_id={folder['folder_id']} ('{folder['folder_name']}'), project_id={project_id}")
+        logger.info(f"upload_knowledge_base_document: Uploading {len(files)} document(s) to "
+                    f"folder_id={folder['folder_id']} ('{folder['folder_name']}'), project_id={project_id}")
 
-    response = await make_api_request('POST', '/v1/knowledgebase/add', api_key, data={
-        'appId': str(project_id),
-        'teamId': str(team_id),
-        'folderId': str(folder['folder_id']),
-        'kbType': 'upload_file',
-    }, files=files)
+        if upload_id and (busy := claim(upload_id)):
+            return busy
+        response = await make_api_request('POST', '/v1/knowledgebase/add', api_key, data={
+            'appId': str(project_id),
+            'teamId': str(team_id),
+            'folderId': str(folder['folder_id']),
+            'kbType': 'upload_file',
+        }, files=files, timeout=UPLOAD_TIMEOUT)
+    finally:
+        close_upload_files(files)
 
     if response.get('status') != 'OK':
         logger.error(f"upload_knowledge_base_document: Upload failed: {response.get('message')}")
+        if upload_id:
+            release(upload_id)
         return response
+    if upload_id:
+        discard(upload_id)
 
     response['kb_ids'] = response.get('kbIds', [])
     response['folder_id'] = folder['folder_id']
@@ -4390,10 +4478,12 @@ async def import_figma_to_knowledge_base(
         "A .md file becomes a NEW page in the document, named after the file. A .csv/.xlsx/.xls "
         "file is converted to a Markdown table and APPENDED to one existing page — pass "
         "page_identifier to say which, or the document's first page is used. "
-        "TWO WAYS TO PROVIDE THE FILE — pick ONE per call: (1) file_path — an absolute path on "
-        "the machine running this server (terminal/CLI use); ask the user for the exact path, "
-        "never guess it. (2) source_url — a Google Drive / Dropbox / public download link. Never "
-        "read, encode, or convert the file yourself. "
+        "THREE WAYS TO PROVIDE THE FILE — pick ONE per call: (1) upload_id — from "
+        "bugasura_create_upload_link(purpose='document_import'), after the user uploaded the file "
+        "to that link (the normal way on the hosted server). (2) source_url — a Google Drive / "
+        "Dropbox / public download link. (3) file_path — an absolute path on the machine running "
+        "this server (local STDIO servers only); ask the user for the exact path, never guess it. "
+        "Never read, encode, or convert the file yourself. "
         "To add a document to the knowledge base as a file in its own right, use "
         "bugasura_upload_knowledge_base_document instead."
     ),
@@ -4404,6 +4494,7 @@ async def import_file_to_knowledge_base_document(
     file_path: Optional[str] = Field(default=None, description="Absolute path on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server). Ask the user for the exact path — never construct or guess it. Must be a .md, .csv, .xlsx or .xls file."),
     source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. IMPORTANT: a Google Drive link must be set to 'Anyone with the link'."),
     source_url_filename: Optional[str] = Field(default=None, description="Original filename with extension (e.g. 'metrics.csv'). Optional — inferred from the URL path when omitted. Only pass it if auto-detection fails or the user names the file."),
+    upload_id: Optional[str] = Field(default=None, description="upload_id returned by bugasura_create_upload_link(purpose='document_import'), once the user has uploaded the file to its link."),
     page_identifier: Optional[str] = Field(default=None, description="For a CSV/Excel import, the page to append the table to — its name or its page id (see bugasura_list_knowledge_base_pages). Omit to use the document's first page. Ignored for a Markdown import, which always creates its own page."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder the document lives in. Only needed when the same document name exists in more than one folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
@@ -4427,6 +4518,7 @@ async def import_file_to_knowledge_base_document(
         file_path: Absolute local path to the .md/.csv/.xlsx/.xls file
         source_url: Public/share link the server downloads the file from
         source_url_filename: Original filename for source_url when it cannot be detected
+        upload_id: A file staged through an upload link (bugasura_create_upload_link)
         page_identifier: Page a CSV/Excel table is appended to (first page when omitted)
         folder_name / folder_id: Scope the document lookup to one folder
         team_id / project_id: Resolved interactively if omitted
@@ -4469,15 +4561,23 @@ async def import_file_to_knowledge_base_document(
         return rejected
 
     # Need exactly one content source.
-    if not file_path and not source_url:
-        return _fail('No file provided',
-                     'Ask the user how they want to provide the file. In the terminal, ask for '
-                     'the exact absolute path and pass file_path=... Elsewhere, ask them to '
-                     'share a Google Drive or Dropbox link ("Anyone with the link") and pass '
-                     'source_url=<link>. Never read or encode the file yourself.')
-    if file_path and source_url:
+    sources = sum(bool(source) for source in (file_path, source_url, upload_id))
+    if not sources:
+        return _no_file_failure('the file',
+                                "bugasura_create_upload_link(purpose='document_import')", 'file_path=...')
+    if sources > 1:
         return _fail('Multiple content sources provided',
-                     'Provide either file_path or source_url per call, not both.')
+                     'Provide only one of upload_id, source_url or file_path per call.')
+
+    if upload_id:
+        staged = staged_paths(upload_id, current_user_id(), 'document_import')
+        if staged.get('status') != 'OK':
+            return staged
+        if len(staged['paths']) != 1:
+            return _fail('One file per import',
+                         'A document import takes exactly one file. Create a new upload link and '
+                         'upload a single file to it.')
+        file_path, source_url = staged['paths'][0], None
 
     # Read the file first, so a bad path or unsupported type never touches the document.
     collected = await asyncio.to_thread(
@@ -4486,35 +4586,44 @@ async def import_file_to_knowledge_base_document(
         return collected
     import_type = collected['import_type']
 
-    target = await _resolve_import_target_page(api_key, team_id, project_id, document_identifier,
-                                               page_identifier, folder_id, folder_name)
-    if target.get('status') != 'OK':
-        return target
+    try:
+        target = await _resolve_import_target_page(api_key, team_id, project_id, document_identifier,
+                                                   page_identifier, folder_id, folder_name)
+        if target.get('status') != 'OK':
+            return target
 
-    kb_id = target['document']['kb_id']
-    page = target['page']
+        kb_id = target['document']['kb_id']
+        page = target['page']
 
-    # A table import replaces the page with "what was there + the table", so what was
-    # there has to be read first — a blind write would drop the page's body.
-    page_content = None
-    if import_type in ('csv_file', 'excel_file'):
-        content_response = await asyncio.to_thread(_read_kb_page_content, page)
-        if content_response.get('status') != 'OK':
-            return _with_hint(content_response,
-                              "The table is appended to this page's existing content, so the "
-                              "import is not run until that content can be read. Nothing has "
-                              "been changed.")
-        page_content = content_response['content']
+        # A table import replaces the page with "what was there + the table", so what was
+        # there has to be read first — a blind write would drop the page's body.
+        page_content = None
+        if import_type in ('csv_file', 'excel_file'):
+            content_response = await asyncio.to_thread(_read_kb_page_content, page)
+            if content_response.get('status') != 'OK':
+                return _with_hint(content_response,
+                                  "The table is appended to this page's existing content, so the "
+                                  "import is not run until that content can be read. Nothing has "
+                                  "been changed.")
+            page_content = content_response['content']
 
-    response = await _submit_doc_page_import(api_key, team_id, project_id, kb_id,
-                                             page['page_id'], import_type,
-                                             page_content=page_content,
-                                             files=collected['files'])
+        if upload_id and (busy := claim(upload_id)):
+            return busy
+        response = await _submit_doc_page_import(api_key, team_id, project_id, kb_id,
+                                                 page['page_id'], import_type,
+                                                 page_content=page_content,
+                                                 files=collected['files'])
+    finally:
+        close_upload_files(collected['files'])
     if response.get('status') != 'OK':
         logger.error(f"import_file_to_knowledge_base_document: Import of "
                      f"'{collected['filename']}' into kb_id={kb_id} failed: "
                      f"{response.get('message')}")
+        if upload_id:
+            release(upload_id)
         return response
+    if upload_id:
+        discard(upload_id)
 
     pages = _pages_from_update_response(response, kb_id)
     response.pop('knowledgeBaseDetails', None)
@@ -5414,6 +5523,19 @@ def _fail(error: str, message: str, error_type: str = 'ValidationError', **extra
             'message': message, **extra}
 
 
+def _no_file_failure(what: str, link_call: str, path_arg: str) -> dict:
+    """Failure for an upload tool called without a file, pointing at the way that works here."""
+    if in_http_request():
+        how = (f"Call {link_call} and give the user the upload link, then call this tool again with "
+               f"its upload_id. A Google Drive or Dropbox link (\"Anyone with the link\") passed as "
+               f"source_url also works.")
+    else:
+        how = (f"Ask for the exact absolute path and pass {path_arg}, or for a Google Drive or Dropbox "
+               f"link (\"Anyone with the link\") to pass as source_url.")
+    return _fail('No file provided',
+                 f"Ask the user how they want to provide {what}. {how} Never read or encode the file yourself.")
+
+
 def _require_http_url(url: str, field: str, example: str) -> Optional[dict]:
     """
     Reject a tool URL that is not http(s), returning the failure envelope or None.
@@ -5605,8 +5727,10 @@ async def _submit_doc_page_import(api_key: str, team_id: int, project_id: int, k
     if page_content is not None:
         data['pageContent'] = page_content
 
+    # A file upload gets the long timeout; the Jira/Confluence imports send no file
     response = await make_api_request('POST', '/v1/knowledgebase/importDocPages', api_key,
-                                      data=data, files=files)
+                                      data=data, files=files,
+                                      **({'timeout': UPLOAD_TIMEOUT} if files else {}))
     # knowledgeBaseDetails is the raw row, whose connection_details holds Jira/Confluence secrets.
     return redact_secrets(response)
 
@@ -6233,27 +6357,30 @@ def _unsupported_extension_error(filename: str, ext: str) -> dict:
         'error': f'Unsupported extension .{ext}' if ext else 'Missing file extension',
         'error_type': 'ValidationError',
         'message': (f"'{filename}' is not a document type the knowledge base accepts. "
-                    f"Allowed: {', '.join('.' + e for e in sorted(_KB_DOC_EXTS))}.")
+                    f"Allowed: {', '.join('.' + e for e in sorted(KB_DOC_EXTS))}.")
     }
 
 
 def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
                           source_url_filename: Optional[str]) -> dict:
     """
-    Read the user-supplied documents into multipart fields for the upload.
+    Open the user-supplied documents as multipart fields for the upload.
 
     `source_url` is downloaded to a temp file (Google Drive / Dropbox share links are
-    normalised to direct-download URLs first); local `file_paths` are read as-is. Every
-    file is validated for extension and size before being read into memory, and temp
-    files are always removed before returning.
+    normalised to direct-download URLs first); local `file_paths` are used as-is. Every
+    file is validated for extension and size, then opened rather than read, so httpx
+    streams it to the API; the caller closes the handles with `close_upload_files` (helpers).
+    Temp files are unlinked before returning (an open handle keeps the data readable).
 
     Returns:
-        dict: {'status': 'OK', 'files': [(field, (filename, content, content_type))],
+        dict: {'status': 'OK', 'files': [(field, (filename, file_handle, content_type))],
                'filenames': [str]} or a failure envelope.
     """
     # Maps each temp-file path -> the display name to upload it under. Every path
     # registered here is unlinked in the finally block regardless of how we exit.
     tmp_display: dict = {}
+    files = []
+    succeeded = False
 
     try:
         if source_url and not file_paths:
@@ -6263,7 +6390,7 @@ def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
                 # User supplied the filename — validate the extension before downloading.
                 safe_name = os.path.basename(source_url_filename)
                 url_ext = os.path.splitext(safe_name)[1].lstrip('.').lower()
-                if url_ext not in _KB_DOC_EXTS:
+                if url_ext not in KB_DOC_EXTS:
                     return _unsupported_extension_error(safe_name, url_ext)
                 download_suffix = f'.{url_ext}'
             else:
@@ -6272,7 +6399,7 @@ def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
                 path_name = (infer_filename_from_url_path(download_url)
                              or infer_filename_from_url_path(source_url))
                 inferred_ext = os.path.splitext(path_name)[1].lstrip('.').lower() if path_name else ''
-                if inferred_ext in _KB_DOC_EXTS:
+                if inferred_ext in KB_DOC_EXTS:
                     safe_name = os.path.basename(path_name)
                     download_suffix = f'.{inferred_ext}'
                 else:
@@ -6282,7 +6409,7 @@ def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
             try:
                 tmp_path, content_disposition_name = download_url_tmp(
                     download_url, download_suffix,
-                    max_bytes=_KB_MAX_FILE_SIZE_MB * 1024 * 1024)
+                    max_bytes=KB_MAX_FILE_SIZE_MB * 1024 * 1024)
             except Exception as e:
                 logger.error(f"_collect_upload_files: Download failed for '{source_url}': {e}")
                 return {
@@ -6308,13 +6435,12 @@ def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
                     }
                 safe_name = os.path.basename(content_disposition_name)
                 detected_ext = os.path.splitext(safe_name)[1].lstrip('.').lower()
-                if detected_ext not in _KB_DOC_EXTS:
+                if detected_ext not in KB_DOC_EXTS:
                     return _unsupported_extension_error(safe_name, detected_ext)
                 tmp_display[tmp_path] = safe_name
 
             file_paths = [tmp_path]
 
-        files = []
         filenames = []
         for index, path in enumerate(file_paths):
             if not os.path.isfile(path):
@@ -6329,40 +6455,43 @@ def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
             # Extension check: only for real disk paths — temp paths are validated above.
             if path not in tmp_display:
                 ext = os.path.splitext(path)[1].lstrip('.').lower()
-                if ext not in _KB_DOC_EXTS:
+                if ext not in KB_DOC_EXTS:
                     return _unsupported_extension_error(os.path.basename(path), ext)
 
             display_name = tmp_display.get(path) or os.path.basename(path)
 
             file_size = os.path.getsize(path)
-            if file_size > _KB_MAX_FILE_SIZE_MB * 1024 * 1024:
+            if file_size > KB_MAX_FILE_SIZE_MB * 1024 * 1024:
                 return {
                     'status': 'failed',
                     'error': 'File too large',
                     'error_type': 'ValidationError',
                     'message': (f"'{display_name}' is {file_size / (1024 * 1024):.1f}MB. The knowledge base "
-                                f"accepts files up to {_KB_MAX_FILE_SIZE_MB}MB.")
+                                f"accepts files up to {KB_MAX_FILE_SIZE_MB}MB.")
                 }
 
             try:
-                with open(path, 'rb') as file_handle:
-                    content = file_handle.read()
+                file_handle = open(path, 'rb')
             except OSError as e:
+                logger.error(f"Could not open '{path}' for upload: {e}")
                 return {
                     'status': 'failed',
-                    'error': f'Could not read file: {path}',
+                    'error': 'Could not read file',
                     'error_type': 'IOError',
-                    'message': str(e)
+                    'message': f"Could not read '{display_name}'. Check the file and try again."
                 }
 
             content_type = mimetypes.guess_type(display_name)[0] or 'application/octet-stream'
             # One field per file: choose_file_0, choose_file_1, ...
-            files.append((f"{_KB_UPLOAD_FIELD_PREFIX}_{index}", (display_name, content, content_type)))
+            files.append((f"{_KB_UPLOAD_FIELD_PREFIX}_{index}", (display_name, file_handle, content_type)))
             filenames.append(display_name)
 
+        succeeded = True
         return {'status': 'OK', 'files': files, 'filenames': filenames}
 
     finally:
+        if not succeeded:
+            close_upload_files(files)
         for tmp_path in list(tmp_display):
             try:
                 if os.path.exists(tmp_path):
@@ -6373,7 +6502,7 @@ def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
 def _collect_doc_import_file(file_path: Optional[str], source_url: Optional[str],
                              source_url_filename: Optional[str]) -> dict:
     """
-    Read the Markdown/CSV/Excel file a document import uploads.
+    Open the Markdown/CSV/Excel file a document import uploads (streamed, like the KB upload).
 
     Same two ways in as the knowledge base upload — a local path or a share link the
     server downloads — but only one file per call, since the API's importDocPages endpoint
@@ -6381,7 +6510,8 @@ def _collect_doc_import_file(file_path: Optional[str], source_url: Optional[str]
 
     Returns:
         dict: {'status': 'OK', 'files': [(field, (filename, content, content_type))],
-        'filename': str, 'import_type': str} or a failure envelope.
+        'filename': str, 'import_type': str} or a failure envelope. The caller closes the
+        handle with `close_upload_files`.
     """
     tmp_path = None
     try:
@@ -6392,16 +6522,16 @@ def _collect_doc_import_file(file_path: Optional[str], source_url: Optional[str]
                          or infer_filename_from_url_path(source_url))
             display_name = os.path.basename(path_name) if path_name else ''
             extension = os.path.splitext(display_name)[1].lstrip('.').lower()
-            if extension not in _KB_DOC_IMPORT_TYPES:
+            if extension not in KB_DOC_IMPORT_TYPES:
                 return _fail('Unsupported file for a document import',
                              f"Could not tell from '{source_url}' that the file is one this "
-                             f"import accepts ({', '.join('.' + e for e in sorted(_KB_DOC_IMPORT_TYPES))}). "
+                             f"import accepts ({', '.join('.' + e for e in sorted(KB_DOC_IMPORT_TYPES))}). "
                              f"Pass source_url_filename with the original filename and extension.")
 
             try:
                 tmp_path, _ = download_url_tmp(
                     download_url, f'.{extension}',
-                    max_bytes=_KB_DOC_IMPORT_MAX_FILE_SIZE_MB * 1024 * 1024)
+                    max_bytes=KB_DOC_IMPORT_MAX_FILE_SIZE_MB * 1024 * 1024)
             except Exception as e:
                 logger.error(f"_collect_doc_import_file: Download failed for '{source_url}': {e}")
                 return _fail('Failed to download file from source_url',
@@ -6418,31 +6548,32 @@ def _collect_doc_import_file(file_path: Optional[str], source_url: Optional[str]
                              f"source_url.")
             display_name = os.path.basename(path)
             extension = os.path.splitext(display_name)[1].lstrip('.').lower()
-            if extension not in _KB_DOC_IMPORT_TYPES:
+            if extension not in KB_DOC_IMPORT_TYPES:
                 return _fail(f'Unsupported extension .{extension}' if extension
                              else 'Missing file extension',
                              f"'{display_name}' is not a file type a knowledge base document "
                              f"import accepts. Allowed: "
-                             f"{', '.join('.' + e for e in sorted(_KB_DOC_IMPORT_TYPES))}.")
+                             f"{', '.join('.' + e for e in sorted(KB_DOC_IMPORT_TYPES))}.")
 
         file_size = os.path.getsize(path)
-        if file_size > _KB_DOC_IMPORT_MAX_FILE_SIZE_MB * 1024 * 1024:
+        if file_size > KB_DOC_IMPORT_MAX_FILE_SIZE_MB * 1024 * 1024:
             return _fail('File too large',
                          f"'{display_name}' is {file_size / (1024 * 1024):.1f}MB. A document "
-                         f"import accepts files up to {_KB_DOC_IMPORT_MAX_FILE_SIZE_MB}MB.")
+                         f"import accepts files up to {KB_DOC_IMPORT_MAX_FILE_SIZE_MB}MB.")
 
         try:
-            with open(path, 'rb') as file_handle:
-                content = file_handle.read()
+            file_handle = open(path, 'rb')
         except OSError as e:
-            return _fail(f'Could not read file: {path}', str(e), error_type='IOError')
+            logger.error(f"_collect_doc_import_file: could not open '{path}': {e}")
+            return _fail('Could not read file', f"Could not read '{display_name}'. Check the file and try again.",
+                         error_type='IOError')
 
         content_type = mimetypes.guess_type(display_name)[0] or 'application/octet-stream'
         return {
             'status': 'OK',
-            'files': [('importFile', (display_name, content, content_type))],
+            'files': [('importFile', (display_name, file_handle, content_type))],
             'filename': display_name,
-            'import_type': _KB_DOC_IMPORT_TYPES[extension],
+            'import_type': KB_DOC_IMPORT_TYPES[extension],
         }
 
     finally:

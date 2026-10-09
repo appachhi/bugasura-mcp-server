@@ -44,6 +44,14 @@ def get_api_key(api_key: str = "") -> str:
     return env_key
 
 
+def current_user_id() -> str:
+    """The signed-in Bugasura user id (introspection `sub`) for this HTTP request; "" under STDIO."""
+    if not in_http_request():
+        return ""
+    token = get_access_token()
+    return str((token.claims or {}).get("sub") or "") if token else ""
+
+
 async def validate_api_key(api_key: str) -> dict:
     """
     Validate the resolved credential. Over HTTP the token is already verified by oauth.py;

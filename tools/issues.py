@@ -1,5 +1,6 @@
 """Bugasura MCP tools: issues."""
-from typing import Literal, Optional
+import json
+from typing import List, Literal, Optional
 
 from fastmcp import Context
 from pydantic import Field
@@ -9,15 +10,16 @@ from app import mcp
 from auth import get_api_key, validate_api_key
 from client import paginate_upstream, respond, validate_id, logger, make_api_request
 from helpers import (
-    find_user_ids_by_names_or_emails, resolve_issue_identifier_to_id,
-    filter_large_fields, select_team_project_context,
+    ATTACH_FILE_PATHS_DESCRIPTION, ATTACH_UPLOAD_ID_DESCRIPTION,
+    attachment_names_csv, close_upload_files, find_user_ids_by_names_or_emails, open_attachments,
+    resolve_issue_identifier_to_id, filter_large_fields, select_team_project_context, send_with_attachments,
 )
 
 
 @mcp.tool(
     name = "bugasura_create_issue",
     title = "Create Issue",
-    description = "Create a new issue/bug with required summary. Supports severity, status, environment details, tags, assignees, and custom fields. Interactive team/project/sprint selection available.",
+    description = "Create a new issue/bug with required summary. Supports severity, status, environment details, tags, assignees, custom fields and file attachments (screenshots, logs, recordings: pass upload_id from bugasura_create_upload_link(purpose='attachment')). An issue is always a failure: to report that a sprint test case passed or failed, use bugasura_report_test_case_result. Interactive team/project/sprint selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_issue(
@@ -40,6 +42,8 @@ async def create_issue(
     issue_assignees: str = Field(default="", description="Comma-separated assignee names, emails, or IDs (optional)"),
     is_public: str = Field(default="", description="Public visibility: 'true' or 'false' (optional)"),
     custom_fields: str = Field(default="", description="JSON string of custom field values (optional)"),
+    upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION),
+    file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
 ) -> ToolResponse:
     """
     Create a new issue/bug in Bugasura.
@@ -68,6 +72,7 @@ async def create_issue(
         issue_assignees: Comma-separated user IDs
         is_public: "1" for public, "0" for private
         custom_fields: JSON string of custom field values
+        upload_id / file_paths: Files to attach once the issue exists (/v1/issues/attachments/add)
 
     Returns:
         dict: API response containing:
@@ -198,9 +203,187 @@ async def create_issue(
     # This keeps the API request clean and avoids sending empty values
     payload.update({k: v for k, v in optional.items() if v})
 
+    # Open the attachments first, so a bad file fails before the issue exists
+    opened = open_attachments(file_paths, upload_id)
+    if opened.get('status') != 'OK':
+        return opened
+
     # Make POST request to create issue endpoint
     # data= parameter sends as form-encoded data (application/x-www-form-urlencoded)
-    return await make_api_request('POST', '/v1/issues/add', api_key, data=payload)
+    try:
+        response = await make_api_request('POST', '/v1/issues/add', api_key, data=payload)
+    except BaseException:
+        close_upload_files(opened['files'])
+        raise
+    if not opened['files']:
+        return response
+    # /issues/add returns the new issue under issue_details, not at the top level
+    issue_key = (response.get('issue_details') or {}).get('issue_key')
+    if response.get('status') != 'OK' or not issue_key:
+        close_upload_files(opened['files'])
+        return response
+
+    # Attached in a second call: /issues/attachments/add records every file type, while
+    # /issues/add only appears to keep images from its multipart files
+    attached = await _attach_issue_files(api_key, team_id, issue_key, opened, upload_id)
+    if attached.get('status') == 'OK':
+        for key in ('attached_files', 'not_attached', 'attachment_errors', 'warning'):
+            if key in attached:
+                response[key] = attached[key]
+    else:
+        response['attachment_error'] = attached.get('message') or attached.get('error')
+        response['message'] = (f"{response.get('message', 'Issue created')}. The attachments could not be "
+                               f"added; retry with bugasura_add_issue_attachments"
+                               f"{' and the same upload_id' if upload_id else ''}.")
+    return response
+
+
+async def _attach_issue_files(api_key: str, team_id: int, issue_key, opened: dict,
+                              upload_id: Optional[str]) -> dict:
+    """POST /v1/issues/attachments/add with already opened files (one field per file)."""
+    logger.info(f"Attaching {len(opened['files'])} file(s) to issue {issue_key}")
+    return await send_with_attachments('POST', '/v1/issues/attachments/add', api_key, opened, upload_id, data={
+        'team_id': team_id,
+        'issue_key': issue_key,
+        'source': 'API',
+    })
+
+
+@mcp.tool(
+    name = "bugasura_add_issue_attachments",
+    title = "Add Issue Attachments",
+    description = (
+        "Attach files (screenshots, logs, recordings, documents) to an existing issue. "
+        "On the hosted server get an upload link with bugasura_create_upload_link(purpose='attachment'), "
+        "let the user upload the file(s), then pass its upload_id here. Local STDIO servers can pass "
+        "file_paths instead. Never read or encode the file yourself."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+)
+async def add_issue_attachments(
+    issue_id: int = Field(description="Issue numeric ID (testresults_id, ge=1)", ge=1),
+    upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION),
+    file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+) -> ToolResponse:
+    """
+    Attach files to an issue via POST /v1/issues/attachments/add.
+
+    Each file is its own multipart field. The API skips files over the team's attachment
+    size limit (10 MB, or 200 MB on paid plans) and lists them in `errorMessage`; it renames
+    stored files (spaces become underscores, clashes get a numeric prefix), so read the
+    final names back with bugasura_get_issue.
+
+    Returns:
+        dict: {'status': 'OK', 'message': str, 'attached_files': [str], 'errorMessage'?: [str]}
+        OR a selection prompt / failure envelope.
+    """
+    api_key = get_api_key()
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_add_issue_attachments',
+                                                f', issue_id={issue_id}')
+    if context.get('status') == 'selection_required':
+        return context
+
+    if not file_paths and not upload_id:
+        return {
+            'status': 'failed',
+            'error': 'No files provided',
+            'error_type': 'ValidationError',
+            'message': ("Call bugasura_create_upload_link(purpose='attachment'), give the user the link, and "
+                        "call this tool again with its upload_id once they have uploaded the file(s)."),
+        }
+    opened = open_attachments(file_paths, upload_id)
+    if opened.get('status') != 'OK':
+        return opened
+
+    response = await _attach_issue_files(api_key, context['team_id'], issue_id, opened, upload_id)
+    if response.get('status') == 'OK':
+        response['next_step'] = "Tell the user which files were attached; mention any listed in errorMessage."
+    return response
+
+
+@mcp.tool(
+    name = "bugasura_delete_issue_attachments",
+    title = "Delete Issue Attachments",
+    description = (
+        "Permanently delete attachments from an issue by file name — the attachments[].name values "
+        "bugasura_get_issue returns. Confirm the exact files with the user first; they cannot be "
+        "recovered. Comment attachments are not touched (edit the comment instead)."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
+)
+async def delete_issue_attachments(
+    issue_id: int = Field(description="Issue numeric ID (testresults_id, ge=1)", ge=1),
+    file_names: List[str] = Field(description="Attachment file names to delete, exactly as bugasura_get_issue lists them in attachments[].name", min_length=1),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+) -> ToolResponse:
+    """
+    Delete issue attachments via POST /v1/issues/attachments/delete.
+
+    The names are checked against the issue's current attachments (/v1/issues/attachments/get)
+    first, so a typo comes back with the real names instead of a partial delete.
+
+    Returns:
+        dict: {'status': 'OK', 'message': str, 'deleted_files': [str]}
+        OR a selection prompt / failure envelope (unknown names list `available_files`).
+    """
+    api_key = get_api_key()
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_delete_issue_attachments',
+                                                f', issue_id={issue_id}')
+    if context.get('status') == 'selection_required':
+        return context
+    team_id = context['team_id']
+
+    names = [name.strip() for name in file_names if name and name.strip()]
+    # The API splits file_names on commas
+    if not names or any(',' in name for name in names):
+        return {
+            'status': 'failed',
+            'error': 'Invalid file names',
+            'error_type': 'ValidationError',
+            'message': "Pass each attachment name as its own list item, exactly as bugasura_get_issue lists it.",
+        }
+
+    current = await make_api_request('GET', '/v1/issues/attachments/get', api_key, params={
+        'team_id': team_id, 'issue_key': issue_id})
+    if current.get('status') != 'OK':
+        return current
+    available = [a.get('name') for a in current.get('issue_attachments') or [] if a.get('name')]
+    unknown = [name for name in names if name not in available]
+    if unknown:
+        return {
+            'status': 'failed',
+            'error': 'Attachment not found',
+            'error_type': 'NotFound',
+            'message': (f"Issue {issue_id} has no attachment named {', '.join(repr(n) for n in unknown)}, so "
+                        f"nothing was deleted. Pick from available_files."),
+            'available_files': available,
+        }
+
+    logger.info(f"delete_issue_attachments: Deleting {len(names)} attachment(s) from issue {issue_id}")
+    response = await make_api_request('POST', '/v1/issues/attachments/delete', api_key, data={
+        'team_id': team_id,
+        'issue_key': issue_id,
+        'file_names': ','.join(names),
+    })
+    # A partial failure is still OK upstream, with the failed names only in errorMessage text
+    if response.get('status') == 'OK':
+        if response.get('errorMessage'):
+            response['next_step'] = ("Some files were not deleted (see errorMessage). Check what is left "
+                                     "with bugasura_get_issue before retrying.")
+        else:
+            response['deleted_files'] = names
+    return response
 
 
 @mcp.tool(
@@ -559,6 +742,8 @@ async def delete_issue(
         "List issues for a project with optional sprint or run-level filter and pagination. "
         "Returns issue summaries with key details. "
         "Provide sprint_id to scope to a sprint; add test_run_execution_run_id to scope to a specific run execution. "
+        "Provide testcase_id to list only the issues reported against that test case (combines with sprint/run). "
+        "Issues are failures only; for passes use bugasura_list_test_cases with test_case_status. "
         "Interactive team/project selection available."
     ),
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
@@ -568,6 +753,7 @@ async def list_issues(
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id) to filter issues by sprint (optional, ge=1)", ge=1),
     test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID. When provided, scopes issues to that specific run only. Obtain from bugasura_list_test_runs."),
+    testcase_id: Optional[int] = Field(default=None, description="Test case ID (test_case_id from bugasura_list_test_cases). When provided, lists only issues linked to that test case (optional, ge=1).", ge=1),
     start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)", ge=0),
     max_results: int = Field(default=10, description="Number of results to return (default: 10, ge=1, le=100)", ge=1, le=100),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
@@ -600,6 +786,10 @@ async def list_issues(
         params['reportId'] = sprint_id
     if test_run_execution_run_id:
         params['testRunsExecutionRunId'] = test_run_execution_run_id
+    if testcase_id:
+        # The web app's issue filter; it matches the test case links made when a result is reported.
+        params['filterConfig'] = json.dumps([{'filterType': 'basic', 'fieldName': 'project_test_case_id',
+                                              'value': str(testcase_id), 'separator': 'AND', 'isCustomField': 0}])
 
     response = await make_api_request('GET', '/issues/getListDetails', api_key, params=params)
 
@@ -931,7 +1121,7 @@ async def get_issue_comment(
 @mcp.tool(
     name="bugasura_add_issue_comment",
     title="Add Issue Comment",
-    description="Add a comment to an issue. Supports text comments with optional attachments and mentions. Interactive team/project/issue selection available.",
+    description="Add a comment to an issue. Supports text, mentions and file attachments (pass upload_id from bugasura_create_upload_link(purpose='attachment'); comment text is still required). Interactive team/project/issue selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def add_issue_comment(
@@ -941,9 +1131,11 @@ async def add_issue_comment(
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     is_public_comment: int = Field(default=1, description="Comment visibility: 1 for public (default), 0 for private"),
     source: str = Field(default="API", description="Comment source (default: API)"),
+    upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION),
+    file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
 ) -> ToolResponse:
     """
-    Add a comment to an issue with support for mentions and formatting.
+    Add a comment to an issue with support for mentions, formatting and attachments.
     Interactive flow: If team_id/project_id/issue_id are not provided, this function
     will guide you through selection:
     1. Select team (if not provided)
@@ -967,6 +1159,7 @@ async def add_issue_comment(
                           - 0: Private comment (visible only to team members)
         source: Comment source tracking (default: "API")
                 Common values: "API", "PLATFORM", "EXTENSION", "IMPORT"
+        upload_id / file_paths: Files attached to the comment (sent in the same request)
     Returns:
         dict: {
             'status': 'OK',
@@ -1143,9 +1336,14 @@ async def add_issue_comment(
         "source": source                 # Source tracking
     }
 
+    opened = open_attachments(file_paths, upload_id)
+    if opened.get('status') != 'OK':
+        return opened
+
     # Make POST request to create comment endpoint
-    logger.info(f"add_issue_comment: Sending request with {len(comment)} character comment, is_public={is_public_comment}")
-    response = await make_api_request('POST', '/v1/issues/comments/add', api_key, data=payload)
+    logger.info(f"add_issue_comment: Sending request with {len(comment)} character comment, is_public={is_public_comment}, "
+                f"{len(opened['files'])} attachment(s)")
+    response = await send_with_attachments('POST', '/v1/issues/comments/add', api_key, opened, upload_id, data=payload)
 
     # Add helpful information to response
     if response.get('status') == 'OK':
@@ -1170,8 +1368,8 @@ async def add_issue_comment(
 @mcp.tool(
     name="bugasura_update_issue_comment",
     title="Update Issue Comment",
-    description="Update an existing issue comment. Supports full interactive selection - prompts for team/project/issue/comment if not provided. Guides user through entire flow.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
+    description="Update an existing issue comment, optionally adding attachments (upload_id from bugasura_create_upload_link(purpose='attachment')). Supports full interactive selection - prompts for team/project/issue/comment if not provided. Guides user through entire flow.",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False,  "openWorldHint": True}
 )
 async def update_issue_comment(
     comment: str = Field(default="", description="Updated comment text (required when comment_id provided, 1-65535 characters, supports HTML, min_length=1)"),
@@ -1180,6 +1378,8 @@ async def update_issue_comment(
     team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     comment_attachment_names: str = Field(default="", description="Comma-separated attachment filenames (optional, preserves existing if empty)"),
+    upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION + " The files are added to the comment's existing attachments."),
+    file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
 ) -> ToolResponse:
     """
     Update an existing issue comment with full interactive flow.
@@ -1211,6 +1411,7 @@ async def update_issue_comment(
         comment_attachment_names: Comma-separated attachment filenames to preserve (optional)
                                  - If empty, existing attachments are preserved
                                  - If provided, only listed attachments are kept
+        upload_id / file_paths: New files to add to the comment
     Returns:
         dict: {
             'status': 'OK',
@@ -1401,13 +1602,18 @@ async def update_issue_comment(
     }
 
     # Add optional attachment names if provided
+    comment_attachment_names = attachment_names_csv(comment_attachment_names)
     if comment_attachment_names:
         payload["commentAttachmentNames"] = comment_attachment_names
         logger.info(f"update_issue_comment: Preserving specific attachments: {comment_attachment_names}")
 
+    opened = open_attachments(file_paths, upload_id)
+    if opened.get('status') != 'OK':
+        return opened
+
     # Make POST request to update comment endpoint
     logger.info(f"update_issue_comment: Sending request to update comment {comment_id}")
-    response = await make_api_request('POST', '/v1/issues/comments/update', api_key, data=payload)
+    response = await send_with_attachments('POST', '/v1/issues/comments/update', api_key, opened, upload_id, data=payload)
 
     # Add helpful information to response
     if response.get('status') == 'OK':

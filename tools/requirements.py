@@ -1,5 +1,5 @@
 """Bugasura MCP tools: requirements."""
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from fastmcp import Context
 from pydantic import Field
@@ -8,7 +8,11 @@ from output_types import ToolResponse
 from app import mcp
 from auth import get_api_key, validate_api_key
 from client import paginate_upstream, paginated, respond, logger, make_api_request
-from helpers import find_user_ids_by_names_or_emails, filter_large_fields, select_team_project_context
+from helpers import (
+    ATTACH_FILE_PATHS_DESCRIPTION, ATTACH_UPLOAD_ID_DESCRIPTION, find_user_ids_by_names_or_emails,
+    attachment_names_csv, filter_large_fields, open_attachments, project_comment_attachment_names,
+    select_team_project_context, send_with_attachments,
+)
 
 
 @mcp.tool(
@@ -295,7 +299,7 @@ async def list_requirement_folders(
 @mcp.tool(
     name="bugasura_create_requirement",
     title="Create Requirement",
-    description="Create a new requirement in Bugasura with automatic folder management. If no folder exists for requirements, creates a default folder first. Supports smart assignee resolution and interactive team/project selection.",
+    description="Create a new requirement in Bugasura with automatic folder management. If no folder exists for requirements, creates a default folder first. Supports smart assignee resolution, file attachments (pass upload_id from bugasura_create_upload_link(purpose='attachment')) and interactive team/project selection.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_requirement(
@@ -317,6 +321,8 @@ async def create_requirement(
     parent_id: Optional[int] = Field(default=None, description="Parent requirement ID for hierarchical structure"),
     tags: str = Field(default="", description="Comma-separated tags for categorization"),
     isQuickAdd: int = Field(default=0, description="Quick add flag (0 or 1)"),
+    upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION),
+    file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
 ) -> ToolResponse:
     """
     Create a new requirement in Bugasura with automatic folder management.
@@ -634,10 +640,15 @@ async def create_requirement(
         payload["parentId"] = str(parent_id)
         logger.debug(f"create_requirement: Added parent_id: {parent_id}")
 
+    # /requirement/add stores multipart files as the requirement's attachments
+    opened = open_attachments(file_paths, upload_id)
+    if opened.get('status') != 'OK':
+        return opened
+
     logger.info(f"create_requirement: Submitting requirement to API")
     logger.debug(f"create_requirement: Payload keys: {list(payload.keys())}")
 
-    response = await make_api_request("POST", "/v1/requirement/add", api_key, data=payload)
+    response = await send_with_attachments("POST", "/v1/requirement/add", api_key, opened, upload_id, data=payload)
 
     if response.get('status') == 'OK':
         # Add folder info to successful response for user reference
@@ -726,6 +737,83 @@ async def get_requirement_details(
 
     # Return full response with requirement details, parent details, and priority list
     return respond(response, response_format)
+
+
+@mcp.tool(
+    name="bugasura_add_requirement_attachments",
+    title="Add Requirement Attachments",
+    description=(
+        "Attach files (specs, mockups, documents) to an existing requirement. On the hosted server get "
+        "an upload link with bugasura_create_upload_link(purpose='attachment'), let the user upload the "
+        "file(s), then pass its upload_id here. Local STDIO servers can pass file_paths instead. "
+        "Never read or encode the file yourself."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+)
+async def add_requirement_attachments(
+    requirement_id: int = Field(description="Requirement numeric ID (requirement_id, ge=1)", ge=1),
+    upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION),
+    file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
+    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+) -> ToolResponse:
+    """
+    Attach files to a requirement via POST /v1/requirement/addDeleteRequirementAttachments.
+
+    The API stores each file (up to 100 MB) under a generated name and answers with the
+    requirement's full attachment list in `fileAvailableDetails.files_details`.
+
+    Returns:
+        dict: {'status': 'OK', 'message': str, 'attached_files': [str], 'fileAvailableDetails': {...}}
+        OR a selection prompt / failure envelope.
+    """
+    api_key = get_api_key()
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_add_requirement_attachments',
+                                                f', requirement_id={requirement_id}')
+    if context.get('status') == 'selection_required':
+        return context
+
+    if not file_paths and not upload_id:
+        return {
+            'status': 'failed',
+            'error': 'No files provided',
+            'error_type': 'ValidationError',
+            'message': ("Call bugasura_create_upload_link(purpose='attachment'), give the user the link, and "
+                        "call this tool again with its upload_id once they have uploaded the file(s)."),
+        }
+    # The API rewrites the attachment list by requirement_id alone, so a requirement from another
+    # project would come back with an empty list and lose its existing attachments
+    existing = await make_api_request('GET', '/v1/requirement/get', api_key, params={
+        'teamId': context['team_id'], 'appId': context['project_id'], 'requirementId': requirement_id})
+    details = existing.get('requirementDetails') if isinstance(existing, dict) else None
+    if isinstance(details, list):
+        details = details[0] if details else None
+    if not details:
+        return {
+            'status': 'failed',
+            'error': 'Requirement not found',
+            'error_type': 'NotFound',
+            'message': (f"Requirement {requirement_id} was not found in project {context['project_id']}. Check the "
+                        f"id with bugasura_list_requirements for this project."),
+        }
+
+    opened = open_attachments(file_paths, upload_id)
+    if opened.get('status') != 'OK':
+        return opened
+
+    logger.info(f"add_requirement_attachments: Attaching {len(opened['files'])} file(s) to requirement {requirement_id}")
+    return await send_with_attachments(
+        'POST', '/v1/requirement/addDeleteRequirementAttachments', api_key, opened, upload_id, data={
+            'team_id': context['team_id'],
+            'teamId': context['team_id'],
+            'appId': context['project_id'],
+            'requirementId': requirement_id,
+            'isDelete': 0,
+        })
 
 
 @mcp.tool(
@@ -1605,3 +1693,213 @@ async def link_unlink_requirement_testcases(
 def _normalise_requirement_status(status: str) -> str:
     """'IN_PROGRESS' -> 'IN PROGRESS': project statuses are space-separated names."""
     return ' '.join(str(status).replace('_', ' ').split())
+
+
+# --- Requirement comments (/v1/requirementcomments/*, same controller as test case comments) ---
+
+_REQUIREMENT_ID_FIELD = Field(description="Requirement numeric ID (requirement_id from bugasura_list_requirements, not the REQ number, ge=1)", ge=1)
+_TEAM_ID_FIELD = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1)
+_PROJECT_ID_FIELD = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1)
+
+
+async def _requirement_comment_context(team_id: Optional[int], project_id: Optional[int], tool: str,
+                                       extra: str) -> dict:
+    """Credential plus team/project for a requirement comment tool, or the response to return as is."""
+    api_key = get_api_key()
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+    context = await select_team_project_context(api_key, team_id, project_id, tool, extra)
+    if context.get('status') == 'selection_required':
+        return context
+    return {'status': 'OK', 'api_key': api_key, 'team_id': context['team_id'], 'project_id': context['project_id']}
+
+
+def _requirement_comment_ids(context: dict, requirement_id: int, comment_id: Optional[int] = None) -> dict:
+    """The id params every requirementcomments endpoint reads (both spellings, as the web app sends)."""
+    ids = {
+        'teamId': context['team_id'], 'team_id': context['team_id'],
+        'appId': context['project_id'], 'app_id': context['project_id'],
+        'requirementId': requirement_id,
+    }
+    if comment_id is not None:
+        ids.update(commentId=comment_id, comment_id=comment_id)
+    return ids
+
+
+@mcp.tool(
+    name="bugasura_list_requirement_comments",
+    title="List Requirement Comments",
+    description="List the comments on a requirement (paginated), including system comments. Each comment's attachments are in comment_attachments; use bugasura_get_requirement_comment for their download URLs.",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def list_requirement_comments(
+    requirement_id: int = _REQUIREMENT_ID_FIELD,
+    team_id: Optional[int] = _TEAM_ID_FIELD,
+    project_id: Optional[int] = _PROJECT_ID_FIELD,
+    start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
+    response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
+) -> ToolResponse:
+    """List a requirement's comments via GET /v1/requirementcomments/list (paged locally)."""
+    context = await _requirement_comment_context(team_id, project_id, 'bugasura_list_requirement_comments',
+                                                 f', requirement_id={requirement_id}')
+    if context.get('status') != 'OK':
+        return respond(context, response_format)
+    response = await make_api_request('GET', '/v1/requirementcomments/list', context['api_key'],
+                                      params=_requirement_comment_ids(context, requirement_id))
+    return respond(paginate_upstream(filter_large_fields(response), items_key='commentsList',
+                                     offset=start_at, max_results=max_results, local=True), response_format)
+
+
+@mcp.tool(
+    name="bugasura_get_requirement_comment",
+    title="Get Requirement Comment",
+    description="Get one requirement comment by ID, with its attachments (comment_attachments_files: file_name, file_url) and inline images.",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def get_requirement_comment(
+    requirement_id: int = _REQUIREMENT_ID_FIELD,
+    comment_id: int = Field(description="Comment ID (from bugasura_list_requirement_comments, ge=1)", ge=1),
+    team_id: Optional[int] = _TEAM_ID_FIELD,
+    project_id: Optional[int] = _PROJECT_ID_FIELD,
+    response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
+) -> ToolResponse:
+    """Get a requirement comment via GET /v1/requirementcomments/get."""
+    context = await _requirement_comment_context(team_id, project_id, 'bugasura_get_requirement_comment',
+                                                 f', requirement_id={requirement_id}, comment_id={comment_id}')
+    if context.get('status') != 'OK':
+        return respond(context, response_format)
+    response = await make_api_request('GET', '/v1/requirementcomments/get', context['api_key'],
+                                      params=_requirement_comment_ids(context, requirement_id, comment_id))
+    return respond(filter_large_fields(response), response_format)
+
+
+@mcp.tool(
+    name="bugasura_add_requirement_comment",
+    title="Add Requirement Comment",
+    description="Add a comment to a requirement, optionally with file attachments (pass upload_id from bugasura_create_upload_link(purpose='attachment')) or as a threaded reply. Supports HTML and @mentions.",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+)
+async def add_requirement_comment(
+    requirement_id: int = _REQUIREMENT_ID_FIELD,
+    comment: str = Field(default="", description="Comment content (supports HTML formatting and @mentions). May be empty only when files are attached."),
+    parent_comment_id: Optional[int] = Field(default=None, description="Parent comment ID for a threaded reply (optional, ge=1)", ge=1),
+    upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION),
+    file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
+    team_id: Optional[int] = _TEAM_ID_FIELD,
+    project_id: Optional[int] = _PROJECT_ID_FIELD,
+) -> ToolResponse:
+    """
+    Add a requirement comment via POST /v1/requirementcomments/add.
+
+    Files go in the same multipart request, one field per file.
+
+    Returns:
+        dict: {'status': 'OK', 'message': str, 'commentDetails': {...}, 'attached_files'?: [str]}
+        OR a selection prompt / failure envelope.
+    """
+    context = await _requirement_comment_context(team_id, project_id, 'bugasura_add_requirement_comment',
+                                                 f', requirement_id={requirement_id}')
+    if context.get('status') != 'OK':
+        return context
+    if not comment.strip() and not file_paths and not upload_id:
+        return {'status': 'failed', 'error': 'Empty comment', 'error_type': 'ValidationError',
+                'message': 'Provide the comment text, files to attach, or both.'}
+
+    opened = open_attachments(file_paths, upload_id)
+    if opened.get('status') != 'OK':
+        return opened
+
+    payload = {**_requirement_comment_ids(context, requirement_id), 'comment': comment, 'source': 'API'}
+    if parent_comment_id is not None:
+        payload['parentCommentId'] = parent_comment_id
+    logger.info(f"add_requirement_comment: Adding comment to requirement {requirement_id} "
+                f"with {len(opened['files'])} attachment(s)")
+    return await send_with_attachments('POST', '/v1/requirementcomments/add', context['api_key'], opened,
+                                       upload_id, data=payload)
+
+
+@mcp.tool(
+    name="bugasura_update_requirement_comment",
+    title="Update Requirement Comment",
+    description="Update a requirement comment's text, keep a subset of its attachments (comment_attachments) and add new files (upload_id from bugasura_create_upload_link(purpose='attachment')). Existing attachments are kept unless comment_attachments says otherwise. Only the comment's author can update it.",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+)
+async def update_requirement_comment(
+    requirement_id: int = _REQUIREMENT_ID_FIELD,
+    comment_id: int = Field(description="Comment ID to update (from bugasura_list_requirement_comments, ge=1)", ge=1),
+    comment: str = Field(description="Updated comment content (supports HTML formatting and @mentions)", min_length=1),
+    comment_attachments: Optional[str] = Field(default=None, description="Comma-separated list of the existing attachment filenames to keep (optional). Omit to keep them all; '' removes them all."),
+    upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION + " The files are added to the comment's attachments."),
+    file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
+    team_id: Optional[int] = _TEAM_ID_FIELD,
+    project_id: Optional[int] = _PROJECT_ID_FIELD,
+) -> ToolResponse:
+    """
+    Update a requirement comment via POST /v1/requirementcomments/update.
+
+    The endpoint deletes every attachment missing from its keep-list, and an absent list
+    means "keep none", so the current list is read back and resent when none is given.
+
+    Returns:
+        dict: {'status': 'OK', 'message': str, 'commentDetails': {...}, 'attached_files'?: [str]}
+        OR a selection prompt / failure envelope.
+    """
+    context = await _requirement_comment_context(team_id, project_id, 'bugasura_update_requirement_comment',
+                                                 f', requirement_id={requirement_id}, comment_id={comment_id}')
+    if context.get('status') != 'OK':
+        return context
+    api_key = context['api_key']
+
+    comment_attachments = attachment_names_csv(comment_attachments)
+    if comment_attachments is None:
+        comment_attachments = await project_comment_attachment_names(
+            api_key, 'requirement', context['team_id'], context['project_id'], requirement_id, comment_id)
+        if comment_attachments is None:
+            return {
+                'status': 'failed',
+                'error': 'Could not read the comment',
+                'error_type': 'APIError',
+                'message': ("The comment's current attachments could not be read, so it was not updated "
+                            "(updating without them would delete them). Check the comment_id with "
+                            "bugasura_list_requirement_comments, or pass comment_attachments with the "
+                            "filenames to keep."),
+            }
+
+    opened = open_attachments(file_paths, upload_id)
+    if opened.get('status') != 'OK':
+        return opened
+
+    payload = {
+        **_requirement_comment_ids(context, requirement_id, comment_id),
+        'comment': comment,
+        'commentsAttachments': comment_attachments,
+        'commentAttachments': comment_attachments,
+        'source': 'API',
+    }
+    logger.info(f"update_requirement_comment: Updating comment {comment_id} on requirement {requirement_id}")
+    return await send_with_attachments('POST', '/v1/requirementcomments/update', api_key, opened, upload_id,
+                                       data=payload)
+
+
+@mcp.tool(
+    name="bugasura_delete_requirement_comment",
+    title="Delete Requirement Comment",
+    description="Delete a requirement comment and its attachments. Confirm with the user first; it cannot be undone. Only the comment's author or a team admin can delete it.",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
+)
+async def delete_requirement_comment(
+    requirement_id: int = _REQUIREMENT_ID_FIELD,
+    comment_id: int = Field(description="Comment ID to delete (from bugasura_list_requirement_comments, ge=1)", ge=1),
+    team_id: Optional[int] = _TEAM_ID_FIELD,
+    project_id: Optional[int] = _PROJECT_ID_FIELD,
+) -> ToolResponse:
+    """Delete a requirement comment via POST /v1/requirementcomments/delete."""
+    context = await _requirement_comment_context(team_id, project_id, 'bugasura_delete_requirement_comment',
+                                                 f', requirement_id={requirement_id}, comment_id={comment_id}')
+    if context.get('status') != 'OK':
+        return context
+    logger.info(f"delete_requirement_comment: Deleting comment {comment_id} on requirement {requirement_id}")
+    return await make_api_request('POST', '/v1/requirementcomments/delete', context['api_key'],
+                                  data=_requirement_comment_ids(context, requirement_id, comment_id))

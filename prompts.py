@@ -44,29 +44,24 @@ def kb_upload_guide() -> str:
 
 ## The correct upload flow
 
-### When the user attaches a file or asks to upload one
-Respond immediately with this message (adapt the wording naturally):
+Never read, encode, or process an attached file yourself: file bytes must not pass through
+the conversation. Call bugasura_prepare_kb_upload first; it returns the wording to show.
 
-  "To upload your file, please share a Google Drive or Dropbox link to it:
-   1. Upload the file to Google Drive (or use an existing file there)
-   2. Right-click the file → Share → Change to 'Anyone with the link' → Copy link
-   3. Paste the link here and I'll upload it directly to the sprint."
+### Documents (.txt, .pdf, .doc, .docx, .md) on the user's computer
+1. Call bugasura_create_upload_link and show the user its upload_url.
+   In a terminal client with shell access you may upload a file the user named yourself:
+   `curl -sS -F file=@/path/to/PRD.pdf <upload_url>`.
+2. When the upload is done, call bugasura_upload_knowledge_base_document(upload_id=...).
+3. For a TestPert sprint, link the returned kb_ids with
+   bugasura_testpert_upload_kb(existing_kb_ids=[...], sprint_id=...).
 
-Do NOT read, encode, or process the attached file. Do NOT run Script, Analysis,
-Bash, or any other tool on it. Just ask for the link.
+### Files already in Google Drive or Dropbox
+Ask for a share link set to 'Anyone with the link' and pass it as source_url to
+bugasura_upload_knowledge_base_document (documents) or bugasura_testpert_upload_kb
+(images, with the matching kb_type). Drive and Dropbox links are auto-converted.
 
-### Once the user shares the link
-Call bugasura_testpert_upload_kb with:
-  - source_url = the link they shared
-  - source_url_filename = the original filename with extension (e.g. 'PRD.pdf', 'wireframe.png')
-  - sprint_id, team_id, project_id, kb_type as appropriate
-
-The MCP server downloads the file and uploads it to Bugasura — no base64 ever
-enters the conversation. Google Drive and Dropbox share links are auto-converted.
-
-### For terminal / CLI users
-Ask for the exact absolute path to the file on their machine
-(e.g. '/home/user/docs/PRD.pdf') and use file_paths=[...].
+### Local STDIO server
+Ask for the exact absolute path on the user's machine and pass file_paths=[...].
 
 ### kb_type guide
 | File                                      | kb_type             |
@@ -83,7 +78,8 @@ Ask for the exact absolute path to the file on their machine
 | Flow diagrams, screenshots                | flow_image          |
 
 ### Multiple files
-Make one call per file. Each call to bugasura_testpert_upload_kb handles one source.
+One upload link takes up to 10 documents (100 MB in total), and each
+bugasura_upload_knowledge_base_document call adds all of them to the same folder.
 """
 
 

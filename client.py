@@ -5,7 +5,7 @@ from typing import Any, Optional
 import httpx
 from fastmcp.server.dependencies import get_http_request
 
-from config import API_BASE, logger
+from config import API_BASE, UPLOAD_TIMEOUT_SECONDS, logger
 
 
 # Bugasura-issued OAuth access tokens carry this prefix; anything else is a legacy API key.
@@ -346,6 +346,10 @@ def paginate_upstream(upstream: dict, items_key: Optional[str] = None,
               and k != items_key
               and k != 'status'}
     return paginated(items, total=total, offset=offset, max_results=max_results, **extras)
+
+
+# Per-request timeout for posting files (`timeout=UPLOAD_TIMEOUT`); the connect timeout stays short
+UPLOAD_TIMEOUT = httpx.Timeout(UPLOAD_TIMEOUT_SECONDS, connect=10.0)
 
 
 def get_http_client() -> httpx.AsyncClient:

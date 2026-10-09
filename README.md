@@ -44,6 +44,7 @@ If you're upgrading from 1.x, update your client configuration:
 - 📚 **Knowledge Base** - Upload, list, star, and delete documents in a project's knowledge base, with folders created on demand; import from a website, Coda, Jira, Confluence or Figma
 - 🏃 **Sprint Planning** - Create, update, delete, and manage agile sprints
 - 🏁 **Test Runs** - Create one-time or scheduled (recurring) runs, edit/rerun/delete them, pick environments and app builds, and add test cases — all by name or ID
+- 🧪 **Test Data** - Manage a project's test data environments (create, rename, duplicate, delete), their variables and the Globals scope, plus test data files (upload, read, download, delete), app builds and file categories — all by name or ID
 - 🤖 **Testpert Sprints** - Full AI-driven test enrichment flow: upload specs, answer requirement questions, edit the test plan, and generate test cases automatically
 - 👥 **Team Collaboration** - Assign work using names or emails (auto-resolves to user IDs)
 - 👤 **Team Member Management** - Add, update roles, and remove team members using team names or IDs
@@ -137,7 +138,7 @@ codex mcp login bugasura
 <details>
 <summary><b>Cursor</b></summary>
 
-[Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=bugasura&config=eyJ1cmwiOiJodHRwczovL21jcC5idWdhc3VyYS5pby9tY3AifQ==), or add to `~/.cursor/mcp.json`:
+[Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=bugasura&config=eyJ1cmwiOiJodHRwczovL21jcC5zdGFnZS5idWdhc3VyYS5pby9tY3AifQ==), or add to `~/.cursor/mcp.json`:
 
 ```json
 {
@@ -542,6 +543,62 @@ Delete the "Smoke run" run
 
 **Note:** Reports/suites, environments, app builds, runs, and schedulers can all be referenced by **name or numeric ID** — names are resolved automatically (with a helpful prompt if a name is ambiguous).
 
+### 🧪 Test Data
+
+```
+List the test data environments for this project
+```
+
+```
+Create a "Staging" environment and set its baseUrl to https://staging.example.com
+```
+
+```
+Add a variable loginEmail = qa@example.com to the Staging environment
+```
+
+```
+Show me everything in the Staging environment
+```
+
+```
+Duplicate Staging as "UAT"
+```
+
+```
+Deactivate the legacyToken variable in Globals
+```
+
+```
+List the App Build files in Production
+```
+
+```
+Upload /home/me/users.csv to the Staging environment as Sample Data Files
+```
+
+```
+Show me what's in users.csv in Staging
+```
+
+```
+Download app-release.apk from Production to /home/me/builds/
+```
+
+```
+Which app builds does this project have?
+```
+
+```
+Add a custom file category "Payment Fixtures"
+```
+
+```
+Delete the "Old QA" environment
+```
+
+**Note:** Environments, variables and files can be referenced by **name or numeric ID**; use **"Globals"** for the project-wide global scope. Writes and deletes need the scope named explicitly and match names exactly; only the read tools accept part of a name. Deleting an environment that still holds custom variables or files asks for confirmation first (`delete_contents=true`). The default `baseUrl` / `apiBaseUrl` variables can have their value changed but cannot be renamed or deleted.
+
 ### 🤖 Testpert Sprints
 
 TestPert is a paid, project-level feature that uses AI to generate a full test plan and test cases from your requirement documents.
@@ -736,7 +793,9 @@ Show all projects in team 456
 
 - `bugasura_list_issues` - List issues with optional sprint filter
 - `bugasura_get_issue` - Get detailed issue information
-- `bugasura_create_issue` - Create a new bug/issue
+- `bugasura_create_issue` - Create a new bug/issue, optionally with attachments (`upload_id` / `file_paths`)
+- `bugasura_add_issue_attachments` - Attach files (screenshots, logs, recordings) to an existing issue
+- `bugasura_delete_issue_attachments` - Delete issue attachments by file name (DESTRUCTIVE; names are checked against the issue first)
 - `bugasura_update_issue` - Update issue details (partial updates supported)
 - `bugasura_delete_issue` - Delete an issue permanently (supports ID, issue key like "ISS09", or summary/title)
 - `bugasura_get_issue_assignees` - Get list of assignees for an issue with names, emails, and profile images
@@ -752,8 +811,8 @@ Show all projects in team 456
 
 - `bugasura_list_issue_comments` - List comments for an issue with pagination and filtering (supports creator_id filter, exclude system comments)
 - `bugasura_get_issue_comment` - Get single comment details with full content and metadata
-- `bugasura_add_issue_comment` - Create a new comment on an issue (supports public/private visibility, HTML formatting)
-- `bugasura_update_issue_comment` - Update existing comment text (author-only, supports interactive comment selection)
+- `bugasura_add_issue_comment` - Create a new comment on an issue (supports public/private visibility, HTML formatting, attachments)
+- `bugasura_update_issue_comment` - Update existing comment text and add attachments (author-only, supports interactive comment selection)
 - `bugasura_delete_issue_comment` - Delete comment permanently (author or admin, supports interactive comment selection)
 
 **Key Features:**
@@ -819,6 +878,62 @@ Names are resolved via `bugasura_list_sprints` (report ↔ sprint), `bugasura_li
 </details>
 
 <details>
+<summary><b>Test Data Management</b></summary>
+
+- `bugasura_list_test_data_environments` - List a project's test data environments with their baseUrl / apiBaseUrl (optionally with the Globals scope)
+- `bugasura_get_test_data_environment` - Get one environment (or Globals) with all its active variables and files
+- `bugasura_create_test_data_environment` - Create an environment (starts with empty baseUrl / apiBaseUrl variables)
+- `bugasura_rename_test_data_environment` - Rename an environment
+- `bugasura_duplicate_test_data_environment` - Copy an environment, or the Globals scope, with its variables and files into a new environment
+- `bugasura_delete_test_data_environment` - Delete an environment with its variables and files (DESTRUCTIVE; needs `delete_contents=true` when it is not empty)
+- `bugasura_list_test_data_variables` - List the variables of an environment or Globals (filter by key or active state)
+- `bugasura_create_test_data_variable` - Add a variable to an environment or Globals
+- `bugasura_update_test_data_variable` - Change a variable's value, key, description or active state (partial update)
+- `bugasura_delete_test_data_variable` - Delete one variable (DESTRUCTIVE; default variables are protected)
+- `bugasura_list_test_data_files` - List the files of an environment or Globals (filter by category or name), with download URLs and the project's categories
+- `bugasura_upload_test_data_files` - Upload one or more files to an environment or Globals under a category, from an upload link, a share link or local paths (terminal)
+- `bugasura_get_test_data_file` - Get one file's details, download link and (Office files) preview link; optionally read a text file's content
+- `bugasura_download_test_data_file` - Get a file's direct download link, optionally saving it to the server's disk (terminal)
+- `bugasura_list_test_data_app_builds` - List the app builds (App Build category) across all environments and Globals
+- `bugasura_delete_test_data_file` - Delete one file (DESTRUCTIVE)
+- `bugasura_list_test_data_categories` - List the built-in and custom file categories
+- `bugasura_create_test_data_category` - Add a custom file category
+
+**Key Features:**
+- Environments, variables and files accept a **name or numeric ID**; `"Globals"` names the project-wide global scope
+- Deletes always target a single resolved ID, never a whole scope
+- Update keeps every field you do not pass; the default `baseUrl` / `apiBaseUrl` variables only take value and active-state changes, as in the web app
+
+**Note:** All test data tools require `team_id` and `project_id`; the create/update variable and upload tools also require `environment` (pass `"Globals"` for the global scope). File types follow the web app: the 'App Build' category takes apk, aab, ipa, apks, apkm, xapk; other categories take documents, spreadsheets, csv/json/xml/yaml, images, audio/video and app builds, up to 1024MB per file.
+
+**Uploading.** `bugasura_upload_test_data_files` sends the files themselves to `/v1/projectTestDataFiles/add` as multipart `testData[]` parts, so it works wherever the server runs. Local paths (`file_paths`) are STDIO-only; on the hosted server the user uploads their own file through `bugasura_create_upload_link(purpose='test_data')` and the tool takes its `upload_id` (up to 100 MB per link), or passes a Google Drive, Dropbox or other public link as `source_url` (up to 1024 MB). Large builds get a longer timeout, and if Bugasura is still slower than that, the tool checks whether the files arrived before reporting the upload as unconfirmed, so a retry does not create duplicates.
+
+**API endpoints used:**
+
+| Tool | Method & endpoint | What it does |
+|------|-------------------|--------------|
+| `bugasura_list_test_data_environments` | `GET /v1/projectTestDataEnvironments/get` | Lists environments (and the Globals row). |
+| `bugasura_get_test_data_environment` | `GET /v1/projectTestDataEnvironmentsDetails/get` | Fetches a scope's active variables and files. |
+| `bugasura_create_test_data_environment` | `POST /v1/projectTestDataEnvironments/add` | Creates an environment. |
+| `bugasura_rename_test_data_environment` | `POST /v1/projectTestDataEnvironments/update` | Renames an environment. |
+| `bugasura_duplicate_test_data_environment` | `POST /v1/projectTestDataEnvironments/duplicate` | Copies an environment or Globals. |
+| `bugasura_delete_test_data_environment` | `POST /v1/projectTestDataEnvironments/delete` | Deletes an environment and its contents. |
+| `bugasura_list_test_data_variables` | `GET /v1/projectTestData/get` | Lists variables. |
+| `bugasura_create_test_data_variable` | `POST /v1/projectTestData/add` | Creates a variable. |
+| `bugasura_update_test_data_variable` | `POST /v1/projectTestData/update` | Updates a variable. |
+| `bugasura_delete_test_data_variable` | `POST /v1/projectTestData/delete` | Deletes a variable. |
+| `bugasura_list_test_data_files` | `GET /v1/projectTestDataFiles/get` | Lists files and custom categories. |
+| `bugasura_upload_test_data_files` | `POST /v1/projectTestDataFiles/add` | Sends the files as multipart `testData[]` parts (up to 20 files, 1024 MB per call). |
+| `bugasura_get_test_data_file` | `GET /v1/projectTestDataFiles/get` | Fetches a file's details (content read from the CDN). |
+| `bugasura_download_test_data_file` | `GET /v1/projectTestDataFiles/get` | Resolves the file's CDN download link. |
+| `bugasura_list_test_data_app_builds` | `GET /v1/projectTestDataFiles/get` | Lists App Build files across all scopes. |
+| `bugasura_delete_test_data_file` | `POST /v1/projectTestDataFiles/delete` | Deletes a file. |
+| `bugasura_list_test_data_categories` | `GET /v1/projectTestDataFiles/get` | Reads the custom categories. |
+| `bugasura_create_test_data_category` | `POST /v1/projectTestDataFiles/addCategory` | Adds a custom category. |
+
+</details>
+
+<details>
 <summary><b>Test Case Comments</b></summary>
 
 - `bugasura_list_testcase_comments` - List comments for a test case with pagination and filtering (supports creator_id filter, exclude system comments)
@@ -834,6 +949,7 @@ Names are resolved via `bugasura_list_sprints` (report ↔ sprint), `bugasura_li
 - **Comment Types**: User comments (editable) vs System comments (auto-generated, read-only)
 - **Visibility Control**: Public comments (visible to all) vs Private comments (team members only)
 - **HTML Support**: Comments support HTML formatting and user mentions (@username)
+- **Attachments**: `upload_id` / `file_paths` attach files to a new comment or add them to an updated one; a comment is the only place a test case holds files. An update keeps the comment's existing attachments unless `comment_attachments` lists the ones to keep.
 
 **Note:** All test case comment tools support full interactive context selection, including comment selection for update/delete operations. System comments cannot be edited or deleted.
 
@@ -844,12 +960,18 @@ Names are resolved via `bugasura_list_sprints` (report ↔ sprint), `bugasura_li
 
 - `bugasura_list_requirements` - List all requirements for a project or sprint
 - `bugasura_get_requirement_details` - Get detailed requirement information including parent/child hierarchy
-- `bugasura_create_requirement` - Create a new requirement with interactive folder selection
+- `bugasura_create_requirement` - Create a new requirement with interactive folder selection, optionally with attachments
+- `bugasura_add_requirement_attachments` - Attach files to an existing requirement
 - `bugasura_update_requirement` - Update requirement details (partial updates supported, preserves all fields)
 - `bugasura_delete_requirement` - Delete a requirement permanently
 - `bugasura_link_unlink_requirement_testcases` - Link or unlink test cases to/from a requirement
 - `bugasura_create_requirement_folder` - Create a folder for organizing requirements
 - `bugasura_list_requirement_folders` - List all folders in a project
+- `bugasura_list_requirement_comments` - List a requirement's comments (paginated)
+- `bugasura_get_requirement_comment` - Get one comment with its attachment URLs
+- `bugasura_add_requirement_comment` - Comment on a requirement, with optional attachments or as a threaded reply
+- `bugasura_update_requirement_comment` - Edit a comment and add attachments (existing ones are kept unless `comment_attachments` says otherwise)
+- `bugasura_delete_requirement_comment` - Delete a comment and its attachments (DESTRUCTIVE)
 
 **Key Features:**
 - **Folder Organization**: Requirements must be organized in folders. Interactive folder selection helps you choose or create folders during requirement creation.
@@ -877,7 +999,8 @@ The knowledge base is a project-level document library, organized in folders and
 
 The six entries in the Knowledge Base page's "+" menu, plus the document editor's own Import menu. Everything except the file upload runs in the background — the tool returns as soon as the crawl/sync is queued, and `bugasura_list_knowledge_base_documents` shows its progress in `stage`. Connector credentials are supplied per call and are never stored by this server.
 
-- `bugasura_upload_knowledge_base_document` - Upload document(s) (`.txt`, `.pdf`, `.doc`, `.docx`, `.md`) from a local path or a share link
+- `bugasura_create_upload_link` - A short-lived, single-use upload link on this server for a file on the user's own computer (hosted server only). `purpose` picks the consuming tool: `knowledge_base`, `document_import`, `testpert_kb`, `attachment` (issues, issue/test case comments, requirements; any file type), or `test_data` (`bugasura_upload_test_data_files`)
+- `bugasura_upload_knowledge_base_document` - Upload document(s) (`.txt`, `.pdf`, `.doc`, `.docx`, `.md`) from an upload link, a share link or a local path
 - `bugasura_import_website_to_knowledge_base` - Crawl a website (`max_pages`, `include_linked_pages`)
 - `bugasura_import_coda_to_knowledge_base` - Import a Coda doc's pages ("Superhuman Import"); needs a Coda API key and the doc's URL, id or name
 - `bugasura_import_jira_to_knowledge_base` - Import Jira issues, one page per Jira project; whole projects by default, or specific `issue_keys`
@@ -914,8 +1037,11 @@ A page document is written in Bugasura instead of uploaded — the web app's "Cr
 
 **Key Features:**
 - **Automatic Folder Handling**: Pass `folder_name` to file the document in that folder — it is matched case-insensitively and created when the project doesn't have one by that name. Omit it and the project's first knowledge base folder is used, or a `Knowledge Base` folder is created when the project has none.
-- **Two Ways to Provide a File**: `file_paths` (absolute paths, for terminal/CLI use) or `source_url` (Google Drive / Dropbox / any public download link — the server fetches it). Files are never encoded by the assistant.
-- **Multiple Files**: Several paths in one call are uploaded into the same folder.
+- **Three Ways to Provide a File**: Files are never encoded by the assistant.
+  - `upload_id` (hosted server): `bugasura_create_upload_link` returns a link on this server, `/upload/<upload_id>`, bound to the signed-in user. It works once and expires after 30 minutes. The user opens it and uploads the file through a plain form, or a terminal client runs `curl -sS -F file=@PRD.pdf <upload_url>`. The bytes go through the browser or the shell, never through the model. The file is staged under `UPLOAD_STAGING_PATH` for up to an hour, until `bugasura_upload_knowledge_base_document(upload_id=...)` (or `bugasura_import_file_to_knowledge_base_document` for `purpose='document_import'`) sends it to Bugasura and deletes it. Only the user who created the link can use its `upload_id`.
+  - `source_url`: a Google Drive, Dropbox or any public download link. The server fetches it.
+  - `file_paths`: absolute paths, local STDIO servers only.
+- **Multiple Files**: Several paths, or up to 10 files in one upload link (100 MB in total), are uploaded into the same folder.
 - **Folder Names**: A folder name cannot contain `<`, `>`, `/` or `\`, and two folders cannot share a name under the same parent — `bugasura_rename_knowledge_base_folder` reports both cases up front, and renaming a folder to the name it already has is answered without a write.
 - **Smart Document Resolution**: Documents are identified by file name (exact match, then partial) or by numeric id. Ambiguous names come back with the matching documents so the user can pick one; add `folder_name` to narrow the search.
 - **Background Processing**: Bugasura processes uploaded documents automatically; they become searchable project context once processing finishes.
@@ -940,7 +1066,7 @@ TestPert is a paid, project-level AI feature (`is_testpert_enabled` on the proje
 - `bugasura_create_testpert_sprint` - Create a TestPert sprint (confirms options before creating; set `confirm_options=True` to proceed)
 
 **Normal flow** — upload documents → answer questions → edit plan → generate
-- `bugasura_testpert_upload_kb` - Upload requirement docs/images to the sprint knowledge base (`.txt`, `.pdf`, `.docx`, `.md`, `.json`, `.png`, `.jpg`, etc.)
+- `bugasura_testpert_upload_kb` - Link project KB documents to the sprint, or upload docs/images to it (`.txt`, `.pdf`, `.docx`, `.md`, `.json` up to 100 MB; `.png`, `.jpg`, etc. up to 20 MB). Images come through an upload link with `purpose='testpert_kb'`.
 - `bugasura_testpert_list_kb` - List documents currently in the knowledge base
 - `bugasura_testpert_delete_kb` - Remove a document from the knowledge base
 - `bugasura_testpert_generate_sprint_context` - Start requirement analysis (KB → SPRINT_CONTEXT)
@@ -1109,11 +1235,12 @@ Add to the instance's dotenv file (`.env`, or the tenant file named by `MCP_ENV_
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `MCP_PUBLIC_BASE_URL` | yes | Public https origin, no trailing slash, e.g. `https://mcp.example.com`. Becomes the OAuth issuer (also sent as the RFC 9207 `iss` on every redirect back to the client) and the callback host. |
+| `MCP_PUBLIC_BASE_URL` | yes | Public https origin, no trailing slash, e.g. `https://mcp.bugasura.io`. Becomes the OAuth issuer (also sent as the RFC 9207 `iss` on every redirect back to the client) and the callback host. |
 | `BUGASURA_OAUTH_CLIENT_ID` | yes | `bugasura-mcp` |
 | `BUGASURA_OAUTH_CLIENT_SECRET` | yes | The plaintext whose hash is in the API config |
 | `MCP_JWT_SIGNING_KEY` | recommended | Signs the tokens issued to MCP clients and encrypts stored state. Without it both derive from the client secret, so rotating the secret signs everyone out. |
 | `OAUTH_STORAGE_PATH` | recommended | Directory for persistent OAuth state (`/var/lib/bugasura-mcp/<tenant>`), a Fernet-encrypted `FileTreeStore` (one JSON file per entry, FastMCP's own default). Without it, sessions live in memory and every client re-authenticates after a restart. Upgrading from the earlier `DiskStore` layout signs every client out once; the old diskcache files (`cache.db*`) in the directory can be deleted after the deploy. |
+| `UPLOAD_STAGING_PATH` | no | Directory where files uploaded through upload links wait for the KB tool, at most an hour (default `<tmp>/bugasura-mcp-uploads/<LOG_FILE_PREFIX>`, separate per tenant). Expired uploads are swept when the server starts, every hour after that, and when a new link is created. |
 | `OAUTH_REQUIRE_CONSENT` | no | `true` shows FastMCP's own consent interstitial before Bugasura's login (default `false`; see *About consent pages*). |
 | `BUGASURA_WEBSITE_URL` | no | Public product site linked from the server metadata and from the page a browser gets on `/mcp` (default `https://bugasura.io`). |
 | `MCP_SERVER_ICON_URL` | no | PNG logo on the server's consent interstitial and in the icons offered to MCP clients (default `https://bugasura.io/bugasura_icon_1024.png`). `MCP_SERVER_NAME` is the name shown there. |
@@ -1146,14 +1273,16 @@ What keeps that safe: MCP clients register themselves (DCR) or bring their own m
 
 ### 3. Reverse proxy
 
-Forward the whole origin, not just `/mcp`. FastMCP mounts these at the root: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/mcp`, `/authorize`, `/token`, `/register`, `/revoke`, `/auth/callback`, `/consent`, plus `/mcp`, `/health` and `/sse`. Only `/mcp` requires a token.
+Forward the whole origin, not just `/mcp`. FastMCP mounts these at the root: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/mcp`, `/authorize`, `/token`, `/register`, `/revoke`, `/auth/callback`, `/consent`, plus `/mcp`, `/health`, `/sse` and `/upload/<upload_id>`. Only `/mcp` requires a token; an upload link's unguessable, single-use id is its own credential.
+
+Upload links accept up to 100 MB per request. A user can hold 20 open links and 500 MB of uploaded files waiting for a tool, and the staging directory as a whole 5 GB (the `UPLOAD_MAX_*` constants in `config.py`). Keep the reverse proxy's request-body limit at or above 101 MB (Apache `LimitRequestBody`, nginx `client_max_body_size`), and its proxy timeout long enough for a 100 MB upload from a slow connection (for example 300 seconds).
 
 ### 4. Check it
 
 ```bash
-curl -s https://mcp.example.com/.well-known/oauth-authorization-server | jq '{issuer, client_id_metadata_document_supported, authorization_response_iss_parameter_supported}'
-curl -si -X POST https://mcp.example.com/mcp -H 'content-type: application/json' -d '{}' | grep -i www-authenticate   # 401 + resource_metadata
-curl -s https://mcp.example.com/health   # "auth": "oauth"
+curl -s https://mcp.bugasura.io/.well-known/oauth-authorization-server | jq '{issuer, client_id_metadata_document_supported, authorization_response_iss_parameter_supported}'
+curl -si -X POST https://mcp.bugasura.io/mcp -H 'content-type: application/json' -d '{}' | grep -i www-authenticate   # 401 + resource_metadata
+curl -s https://mcp.bugasura.io/health   # "auth": "oauth"
 ```
 
 Then add the URL in Claude Code (`claude mcp add --transport http …`, `/mcp` → Authenticate) and confirm the browser lands on the Bugasura consent page and back.
