@@ -3,11 +3,13 @@ from typing import Literal, Optional
 
 from pydantic import Field
 
-from output_types import ToolResponse
-from app import mcp
-from auth import fetch_user_context, get_api_key, invalidate_user_context_cache, validate_api_key
-from client import paginate_upstream, respond, logger, make_api_request
-from helpers import search_projects_by_name
+from config.config import logger
+from core.app import mcp
+from utils.auth import fetch_user_context, get_api_key, invalidate_user_context_cache, validate_api_key
+from utils.client import make_api_request
+from utils.formatting import paginate_upstream, respond
+from utils.output_types import ToolResponse
+from utils.resolvers import IdOrName, search_projects_by_name
 
 
 @mcp.tool(
@@ -17,7 +19,7 @@ from helpers import search_projects_by_name
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_projects(
-    team_id: int = Field(description="Team identifier (required, ge=1)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     start_at: int = Field(default=0, description="Pagination offset (default: 0, ge=0)", ge=0),
     max_results: int = Field(default=10, description="Number of results to return (10-100, default: 10, ge=1, le=100)", ge=1, le=100),
     platform: Literal["ALL", "Android", "iOS", "Desktop", "API", "Multiple"] = Field(default="ALL", description="Filter by platform: 'ALL', 'Android', 'iOS', 'Desktop', 'Multiple' (case-sensitive)"),
@@ -205,7 +207,7 @@ async def list_projects(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_project_details(
-    team_id: int = Field(description="Team identifier", ge=1),
+    team_id: IdOrName = Field(description="Team id or name"),
     project_id: int = Field(description="Project identifier", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -227,7 +229,7 @@ async def get_project_details(
 )
 async def create_project(
     project_name: str = Field(description="Project name (required, min_length=1)", min_length=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     platform: Literal["ALL", "Android", "iOS", "Desktop", "API", "Multiple"] = Field(default="Multiple", description="Platform: 'Android', 'iOS', 'Desktop', 'API', 'Multiple' (default: Multiple)"),
     platform_type: Literal["ALL", "Apps", "Mobileweb", "Web", "API", "Multiple"] = Field(default="Multiple", description="Platform type: 'Apps', 'Mobileweb', 'Web', 'API', 'Multiple' (default: Multiple)"),
     is_public_project: bool = Field(default=False, description="Public visibility (default: False for private)"),
@@ -344,7 +346,7 @@ async def create_project(
 async def update_project(
     project_id: Optional[int] = Field(default=None, description="Project identifier (provide either project_id or search_project_name, ge=1)", ge=1),
     search_project_name: Optional[str] = Field(default=None, description="Project name to search for (provide either project_id or search_project_name)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     new_project_name: Optional[str] = Field(default=None, description="New project name (optional)"),
     issue_prefix: Optional[str] = Field(default=None, description="New issue prefix (e.g., 'BUG', 'ISS') (optional)"),
     is_public_project: Optional[bool] = Field(default=None, description="Public visibility (optional)"),
@@ -494,7 +496,7 @@ async def update_project(
 async def delete_project(
     project_id: Optional[int] = Field(default=None, description="Project identifier (provide either project_id or project_name, ge=1)", ge=1),
     project_name: Optional[str] = Field(default=None, description="Project name to search for (provide either project_id or project_name)"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
 ) -> ToolResponse:
     """
     Delete project permanently.

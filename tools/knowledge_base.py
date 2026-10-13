@@ -65,25 +65,27 @@ the complete set of Figma entries for the project and DELETES every stored Figma
 missing from it. `bugasura_import_figma_to_knowledge_base` therefore reads the existing
 entries first and carries them forward unless the caller explicitly asks to replace them.
 """
-import asyncio, json, mimetypes, os, urllib.parse
+import asyncio, json, mimetypes, os, urllib.parse, httpx
 from typing import Any, Dict, List, Literal, Optional
 
-import httpx
 from pydantic import Field
 
-from output_types import ToolResponse
-from app import mcp
-from auth import current_user_id, get_api_key, validate_api_key
-from client import UPLOAD_TIMEOUT, get_http_client, in_http_request, paginated, respond, logger, make_api_request
-from config import (
-    KB_DOC_EXTS, KB_DOC_IMPORT_MAX_FILE_SIZE_MB, KB_DOC_IMPORT_TYPES, KB_MAX_FILE_SIZE_MB,
-    UPLOAD_CONSUMER_TOOLS, UploadPurpose,
+from config.config import (
+    logger, KB_DOC_EXTS, KB_DOC_IMPORT_MAX_FILE_SIZE_MB, KB_DOC_IMPORT_TYPES, KB_MAX_FILE_SIZE_MB,
+    UPLOAD_CONSUMER_TOOLS, UploadPurpose, CDN_BASE_URL, WEB_BASE_URL,
 )
-from uploads import claim, create_ticket, discard, release, staged_paths
-from helpers import (
-    close_upload_files, download_url_to_path, download_url_tmp, fetch_url_bytes,
-    infer_filename_from_url_path, local_path_rejected, normalise_share_url,
-    redact_secrets, select_team_project_context, CDN_BASE_URL, WEB_BASE_URL,
+from core.app import mcp
+from core.uploads import claim, create_ticket, discard, release, staged_paths
+from utils.attachments import close_upload_files
+from utils.auth import current_user_id, get_api_key, validate_api_key
+from utils.client import UPLOAD_TIMEOUT, get_http_client, in_http_request, make_api_request
+from utils.files import local_path_rejected
+from utils.formatting import paginated, respond, redact_secrets
+from utils.output_types import ToolResponse
+from utils.resolvers import IdOrName, select_team_project_context
+from utils.urls import (
+    download_url_to_path, download_url_tmp, fetch_url_bytes, infer_filename_from_url_path,
+    normalise_share_url,
 )
 
 
@@ -157,7 +159,7 @@ async def create_knowledge_base_folder(
     folder_name: str = Field(description="Name for the new knowledge base folder"),
     parent_folder_name: Optional[str] = Field(default=None, description="Existing knowledge base folder to nest the new folder inside. Matched case-insensitively anywhere in the folder tree. Omit for a root-level folder."),
     parent_folder_id: Optional[int] = Field(default=None, description="Parent folder identifier. Use only when the user picked a specific folder from a list — parent_folder_name is the normal way to target a parent.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -286,7 +288,7 @@ async def rename_knowledge_base_folder(
     new_name: str = Field(description="New name for the folder. Up to 250 characters; cannot contain < > / or \\."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to rename, by its current name. Matched case-insensitively anywhere in the folder tree."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -475,7 +477,7 @@ async def list_knowledge_base_folders(
     parent_folder_id: Optional[int] = Field(default=None, description="Filter to the direct children of this folder. Pass 0 for root-level folders only. Omit to get root-level folders (default).", ge=0),
     start_at: int = Field(default=0, description="Pagination offset over the top-level folders in scope (default: 0). Each returned folder's sub-folders and documents are always shown in full — this only limits how many top-level folders come back.", ge=0),
     max_results: int = Field(default=10, description="Number of top-level folders to return (default: 10, max 50).", ge=1, le=50),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -655,7 +657,7 @@ async def list_knowledge_base_documents(
     starred_only: bool = Field(default=False, description="List only the documents that have been starred (default: False)"),
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=25, description="Number of documents to return (default: 25)", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -799,7 +801,7 @@ async def download_knowledge_base_document(
     overwrite: bool = Field(default=False, description="Set True to replace the file at save_to_path when one is already there. Leave False to have the tool refuse rather than overwrite it (default: False)."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same file name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -813,7 +815,7 @@ async def download_knowledge_base_document(
     extra step for terminal use, where the server and the user share a filesystem.
 
     The CDN base is a separate CloudFront/S3 host that the API never returns, so it comes
-    from the known-deployment map (or CDN_BASE_URL) in helpers. Without it the file cannot
+    from the known-deployment map (or CDN_BASE_URL) in config/config.py. Without it the file cannot
     be linked or fetched, and the tool falls back to the web app document link.
 
     Args:
@@ -1053,7 +1055,7 @@ async def star_knowledge_base_document(
     starred: bool = Field(default=True, description="True to star the document, False to remove the star (default: True)"),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same file name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1167,7 +1169,7 @@ async def delete_knowledge_base_document(
     document_identifier: str = Field(description="Document to delete: its file name (e.g. 'PRD.pdf', matched exactly then partially) or its numeric id from bugasura_list_knowledge_base_documents"),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same file name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1272,7 +1274,7 @@ async def delete_knowledge_base_folder(
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to delete. Matched case-insensitively anywhere in the folder tree."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
     delete_documents: bool = Field(default=False, description="Set True to delete a folder that still holds documents — the documents stop being listed with it. Leave False to have the tool refuse and report what is inside (default: False)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1420,7 +1422,7 @@ async def create_knowledge_base_document(
     first_page_name: Optional[str] = Field(default=None, description="Name of the page the document starts with. Defaults to 'Untitled Page'."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to create the document in. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1564,7 +1566,7 @@ async def rename_knowledge_base_document(
     new_name: str = Field(description="New name for the document. Trimmed to 250 characters; '<' and '>' are stripped upstream."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1678,7 +1680,7 @@ async def list_knowledge_base_pages(
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=50, description="Number of pages to return (default: 50)", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -1789,7 +1791,7 @@ async def create_knowledge_base_page(
     after_page: Optional[str] = Field(default=None, description="Existing page to place the new page right after, as its sibling, by page name or page id. Cannot be combined with parent_page."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1971,7 +1973,7 @@ async def rename_knowledge_base_page(
     new_name: str = Field(description="New name for the page. Trimmed to 250 characters; '<' and '>' are stripped upstream."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -2098,7 +2100,7 @@ async def get_knowledge_base_page_content(
     page_identifier: str = Field(description="Page to read: its page name (matched exactly then partially) or its page id (e.g. 'page_20250104120500')"),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -2245,7 +2247,7 @@ async def update_knowledge_base_page_content(
     mode: Literal["replace", "append", "prepend"] = Field(default="replace", description="'replace' overwrites the whole body (default); 'append' adds the text to the end of the current body; 'prepend' adds it to the start. Append/prepend read the current body first and separate the two halves with a blank line."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -2444,7 +2446,7 @@ async def duplicate_knowledge_base_page(
     include_sub_pages: bool = Field(default=True, description="Copy the page's sub pages along with it (default: True). Set False to copy just the page itself."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -2584,7 +2586,7 @@ async def move_knowledge_base_page(
     to_root: bool = Field(default=False, description="Move the page to the top level of the document, at the end. Cannot be combined with parent_page or after_page (default: False)."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -2793,7 +2795,7 @@ async def delete_knowledge_base_page(
     delete_sub_pages: bool = Field(default=False, description="Set True to delete a page that has sub pages — they are deleted with it. Leave False to have the tool refuse and report what is underneath (default: False)."),
     folder_name: Optional[str] = Field(default=None, description="Folder to search in when the same document name exists in several folders. Omit to search the whole project."),
     folder_id: Optional[int] = Field(default=None, description="Folder identifier to search in. Use only when the user picked a specific folder from a list.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -3036,7 +3038,7 @@ async def upload_knowledge_base_document(
     upload_id: Optional[str] = Field(default=None, description="upload_id returned by bugasura_create_upload_link, once the user has uploaded the file(s) to its link. Every file uploaded there is added."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to add the document to. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -3197,7 +3199,7 @@ async def import_website_to_knowledge_base(
     include_linked_pages: bool = Field(default=True, description="Follow links from the given page and import those too (default: True). Set False to import only the one page at website_url."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to import into. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -3481,7 +3483,7 @@ async def import_coda_to_knowledge_base(
     page_identifiers: List[str] = Field(default=[], description="Pages to import, by page name or page id (see bugasura_list_coda_pages). Omit to import every page in the doc. A page whose parent is left out is re-filed under the nearest ancestor that was included."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to import into. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -3619,7 +3621,7 @@ async def list_jira_projects(
     deployment_type: Literal["CLOUD", "SERVER"] = Field(default="CLOUD", description="'CLOUD' for Jira Cloud (*.atlassian.net, API token), 'SERVER' for a self-hosted Jira/Data Center (password). Default: CLOUD."),
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=_KB_CONNECTOR_PAGE_SIZE, description=f"Number of projects to return (default: {_KB_CONNECTOR_PAGE_SIZE})", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -3696,7 +3698,7 @@ async def list_jira_issues(
     search_text: str = Field(default="", description="Filter issues whose summary or key matches this text. Omit to list the project's issues in order."),
     page_token: str = Field(default="", description="Continue from a previous call — pass the `next_page_token` it returned. Omit for the first page."),
     max_results: int = Field(default=_KB_CONNECTOR_PAGE_SIZE, description=f"Number of issues to return (default: {_KB_CONNECTOR_PAGE_SIZE})", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -3813,7 +3815,7 @@ async def import_jira_to_knowledge_base(
     document_identifier: Optional[str] = Field(default=None, description="Add the issues to this existing Knowledge Base document instead of creating a new one — its name or its kb_id (see bugasura_list_knowledge_base_documents). Only a page document accepts an import; an uploaded file does not."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to import into (or, with document_identifier, the folder to look the document up in). Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -3979,7 +3981,7 @@ async def list_confluence_spaces(
     api_token: str = Field(default="", description="The Confluence API token. Ask the user — never guess or reuse one. Omit to use the project's saved Confluence integration."),
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=_KB_CONNECTOR_PAGE_SIZE, description=f"Number of spaces to return (default: {_KB_CONNECTOR_PAGE_SIZE})", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -4055,7 +4057,7 @@ async def list_confluence_pages(
     api_token: str = Field(default="", description="The Confluence API token. Ask the user — never guess or reuse one. Omit to use the project's saved Confluence integration."),
     start_at: int = Field(default=0, description="Pagination offset (default: 0)", ge=0),
     max_results: int = Field(default=_KB_CONNECTOR_PAGE_SIZE, description=f"Number of pages to return (default: {_KB_CONNECTOR_PAGE_SIZE})", ge=1, le=100),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -4141,7 +4143,7 @@ async def import_confluence_to_knowledge_base(
     document_identifier: Optional[str] = Field(default=None, description="Add the pages to this existing Knowledge Base document instead of creating a new one — its name or its kb_id (see bugasura_list_knowledge_base_documents). Only a page document accepts an import; an uploaded file does not."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to import into (or, with document_identifier, the folder to look the document up in). Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -4317,7 +4319,7 @@ async def import_figma_to_knowledge_base(
     replace_existing: bool = Field(default=False, description="Remove the project's existing Figma frames instead of keeping them (default: False). Only set True when the user explicitly asks to replace what is already imported — this deletes those knowledge base entries."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to import into. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -4498,7 +4500,7 @@ async def import_file_to_knowledge_base_document(
     page_identifier: Optional[str] = Field(default=None, description="For a CSV/Excel import, the page to append the table to — its name or its page id (see bugasura_list_knowledge_base_pages). Omit to use the document's first page. Ignored for a Markdown import, which always creates its own page."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder the document lives in. Only needed when the same document name exists in more than one folder."),
     folder_id: Optional[int] = Field(default=None, description="Knowledge base folder identifier. Use only when the user picked a specific folder from a list — folder_name is the normal way to target a folder.", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -5136,7 +5138,7 @@ def _kb_file_url(file_path: str) -> Optional[str]:
     Stored files are public objects on the CDN — the web app fetches them with a plain GET
     and hands Office documents straight to view.officeapps.live.com — so the URL needs no
     signing and works in a browser as-is. Returns None when the deployment's CDN base is
-    not known (see CDN_BASE_URL in helpers).
+    not known (see CDN_BASE_URL in config/config.py).
     """
     if not CDN_BASE_URL or not file_path:
         return None
@@ -5448,7 +5450,7 @@ async def _kb_doc_page_action(api_key: str, team_id: int, project_id: int, kb_id
     logger.info(f"_kb_doc_page_action: Applying action='{action}' on kb_id={kb_id} "
                 f"(type='{doc_type}') in project_id={project_id}")
 
-    return await make_api_request('POST', '/v1/knowledgebase/update', api_key, data={
+    response = await make_api_request('POST', '/v1/knowledgebase/update', api_key, data={
         'appId': str(project_id),
         'teamId': str(team_id),
         'kbId': str(kb_id),
@@ -5457,6 +5459,8 @@ async def _kb_doc_page_action(api_key: str, team_id: int, project_id: int, kb_id
         'kbSource': '',
         'customFileDetails': json.dumps(custom_file_details),
     })
+    # knowledgeBaseDetails is the raw row, whose connection_details holds Jira/Confluence/Coda secrets.
+    return redact_secrets(response)
 
 
 def _pages_from_update_response(response: dict, kb_id: Any) -> list:
@@ -6369,7 +6373,7 @@ def _collect_upload_files(file_paths: List[str], source_url: Optional[str],
     `source_url` is downloaded to a temp file (Google Drive / Dropbox share links are
     normalised to direct-download URLs first); local `file_paths` are used as-is. Every
     file is validated for extension and size, then opened rather than read, so httpx
-    streams it to the API; the caller closes the handles with `close_upload_files` (helpers).
+    streams it to the API; the caller closes the handles with `close_upload_files` (utils/attachments.py).
     Temp files are unlinked before returning (an open handle keeps the data readable).
 
     Returns:

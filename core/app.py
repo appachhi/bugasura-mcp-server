@@ -12,12 +12,14 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from mcp_types import Icon
 
-from config import (
+from config.config import (
     API_BASE, BUGASURA_WEBSITE_URL, ERROR_STATUSES, MCP_CONNECT_URL, MCP_PUBLIC_BASE_URL,
     MCP_SERVER_ICON_SVG_URL, MCP_SERVER_ICON_URL, MCP_SERVER_NAME, OPENAI_APPS_CHALLENGE_TOKEN, logger,
 )
-from oauth import build_auth_provider
-from uploads import sweep_periodically, upload_files, upload_page
+from core.oauth import build_auth_provider
+from core.uploads import sweep_periodically, upload_files, upload_page
+from utils.auth import get_api_key, validate_api_key
+from utils.resolvers import resolve_team_identifier
 
 
 # OAuth front door when configured (HTTP deployments); None for STDIO / local dev.
@@ -80,7 +82,29 @@ class ToolErrorFlagMiddleware(Middleware):
         return result
 
 
+class TeamNameMiddleware(Middleware):
+    """Accept a team name wherever a tool takes team_id: swap it for the numeric id before the arguments are validated."""
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        arguments = context.message.arguments or {}
+        team = arguments.get('team_id')
+        if isinstance(team, str):
+            if team.strip().isdigit():
+                arguments['team_id'] = int(team)
+            else:
+                api_key = get_api_key()
+                validation = await validate_api_key(api_key)
+                resolved = (await resolve_team_identifier(api_key, None, team) if validation.get('valid')
+                            else validation)
+                if resolved.get('status') != 'OK':
+                    tool = await context.fastmcp_context.fastmcp.get_tool(context.message.name)
+                    return tool.convert_result(resolved)
+                arguments['team_id'] = resolved['team_id']
+        return await call_next(context)
+
+
 mcp.add_middleware(ToolErrorFlagMiddleware())
+mcp.add_middleware(TeamNameMiddleware())
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -142,7 +166,7 @@ async def sse_migration(request: Request):
     )
 
 
-# Upload links (uploads.py). Registered here because http_app() below fixes the route list.
+# Upload links (core/uploads.py). Registered here because http_app() below fixes the route list.
 mcp.custom_route("/upload/{upload_id}", methods=["GET"])(upload_page)
 mcp.custom_route("/upload/{upload_id}", methods=["POST"])(upload_files)
 

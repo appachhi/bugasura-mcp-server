@@ -3,11 +3,13 @@ from typing import Literal, Optional
 
 from pydantic import Field
 
-from output_types import ToolResponse
-from app import mcp
-from auth import get_api_key, validate_api_key
-from client import paginate_upstream, respond, logger, make_api_request
-from helpers import select_team_project_context
+from config.config import logger
+from core.app import mcp
+from utils.auth import get_api_key, validate_api_key
+from utils.client import make_api_request
+from utils.formatting import paginate_upstream, respond
+from utils.output_types import ToolResponse
+from utils.resolvers import IdOrName, select_team_project_context
 
 
 @mcp.tool(
@@ -17,7 +19,7 @@ from helpers import select_team_project_context
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_sprints(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
     max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
@@ -71,7 +73,7 @@ async def list_sprints(
 )
 async def get_sprint_details(
     sprint_id: int = Field(description="Sprint identifier", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -118,7 +120,7 @@ async def get_sprint_details(
 )
 async def create_sprint(
     sprint_name: str = Field(description="Name of the sprint (5-250 characters required, min_length=1)", min_length=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     start_date: Optional[str] = Field(default=None, description="Sprint start date in YYYY-MM-DD format (optional)"),
     end_date: Optional[str] = Field(default=None, description="Sprint end date in YYYY-MM-DD format (optional)"),
@@ -245,7 +247,7 @@ async def create_sprint(
 )
 async def update_sprint(
     sprint_id: int = Field(description="Sprint identifier", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_name: Optional[str] = Field(default=None, description="New sprint name (5-250 characters, optional)"),
     start_date: Optional[str] = Field(default=None, description="New start date in YYYY-MM-DD format (optional)"),
@@ -400,7 +402,7 @@ async def update_sprint(
 )
 async def delete_sprint(
     sprint_identifier: str = Field(description="Sprint identifier: numeric ID (e.g., '123') or exact sprint name (e.g., 'Sprint 15')"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """

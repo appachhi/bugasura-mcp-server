@@ -6,27 +6,24 @@ Metadata Document (CIMD) and run PKCE against it. The proxy holds Bugasura's sin
 client and does the upstream code exchange at ``<MCP_PUBLIC_BASE_URL>/auth/callback``. Bugasura's own token is never handed to the
 MCP client; the proxy issues its own JWT and swaps it for the upstream token on every request.
 """
-import hashlib
-import time
+import hashlib, time, httpx
 from typing import Any, Optional
 
-import httpx
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from fastmcp.server.auth import AccessToken, OAuthProxy, TokenVerifier
 from mcp.server.auth.provider import RegistrationError
 from mcp.shared.auth import OAuthClientInformationFull
 
-from client import ACCESS_TOKEN_PREFIX
-from config import (
+from config.config import (
     BUGASURA_OAUTH_AUTHORIZE_URL, BUGASURA_OAUTH_CLIENT_ID, BUGASURA_OAUTH_CLIENT_SECRET,
     BUGASURA_OAUTH_INTROSPECT_URL, BUGASURA_OAUTH_REVOKE_URL, BUGASURA_OAUTH_TOKEN_URL,
-    DEFAULT_ALLOWED_REDIRECT_URIS, MCP_JWT_SIGNING_KEY, MCP_PUBLIC_BASE_URL,
-    OAUTH_ALLOWED_REDIRECT_URIS, OAUTH_FALLBACK_TOKEN_EXPIRY_SECONDS,
-    OAUTH_INTROSPECTION_CACHE_MAX_ENTRIES, OAUTH_INTROSPECTION_CACHE_TTL,
-    OAUTH_INTROSPECTION_TIMEOUT_SECONDS, OAUTH_REQUIRE_CONSENT, OAUTH_STORAGE_PATH, WEB_BASE_URL,
-    logger, oauth_configured,
+    DEFAULT_ALLOWED_REDIRECT_URIS, MCP_JWT_SIGNING_KEY, MCP_PUBLIC_BASE_URL, OAUTH_ALLOWED_REDIRECT_URIS,
+    OAUTH_FALLBACK_TOKEN_EXPIRY_SECONDS, OAUTH_INTROSPECTION_CACHE_MAX_ENTRIES,
+    OAUTH_INTROSPECTION_CACHE_TTL, OAUTH_INTROSPECTION_TIMEOUT_SECONDS, OAUTH_REQUIRE_CONSENT,
+    OAUTH_STORAGE_PATH, WEB_BASE_URL, logger, oauth_configured,
 )
+from utils.client import ACCESS_TOKEN_PREFIX
 
 
 class BugasuraTokenVerifier(TokenVerifier):

@@ -5,8 +5,9 @@ from typing import Optional
 
 from fastmcp.server.dependencies import get_access_token
 
-from client import auth_required_payload, display_team_name, in_http_request, logger, make_api_request
-from config import BUGASURA_API_KEY, USER_CONTEXT_TTL_SECONDS
+from config.config import logger, BUGASURA_API_KEY, USER_CONTEXT_TTL_SECONDS
+from utils.client import auth_required_payload, in_http_request, make_api_request
+from utils.formatting import display_team_name
 
 
 _user_context_cache: dict = {}
@@ -54,7 +55,7 @@ def current_user_id() -> str:
 
 async def validate_api_key(api_key: str) -> dict:
     """
-    Validate the resolved credential. Over HTTP the token is already verified by oauth.py;
+    Validate the resolved credential. Over HTTP the token is already verified by core/oauth.py;
     under STDIO the env key is checked with a lightweight call to the Bugasura API.
 
     Args:

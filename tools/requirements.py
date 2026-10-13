@@ -4,15 +4,17 @@ from typing import List, Literal, Optional
 from fastmcp import Context
 from pydantic import Field
 
-from output_types import ToolResponse
-from app import mcp
-from auth import get_api_key, validate_api_key
-from client import paginate_upstream, paginated, respond, logger, make_api_request
-from helpers import (
-    ATTACH_FILE_PATHS_DESCRIPTION, ATTACH_UPLOAD_ID_DESCRIPTION, find_user_ids_by_names_or_emails,
-    attachment_names_csv, filter_large_fields, open_attachments, project_comment_attachment_names,
-    select_team_project_context, send_with_attachments,
+from config.config import logger
+from core.app import mcp
+from utils.attachments import (
+    ATTACH_FILE_PATHS_DESCRIPTION, ATTACH_UPLOAD_ID_DESCRIPTION, attachment_names_csv, open_attachments,
+    project_comment_attachment_names, send_with_attachments,
 )
+from utils.auth import get_api_key, validate_api_key
+from utils.client import make_api_request
+from utils.formatting import paginate_upstream, paginated, respond, filter_large_fields
+from utils.output_types import ToolResponse
+from utils.resolvers import IdOrName, find_user_ids_by_names_or_emails, select_team_project_context
 
 
 @mcp.tool(
@@ -28,7 +30,7 @@ from helpers import (
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_requirements(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier for filtering requirements", ge=1),
     folder_id: str = Field(default="", description="Folder identifier (empty string fetches all root requirements)"),
@@ -157,7 +159,7 @@ async def list_requirements(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_requirement_folders(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     parent_folder_id: Optional[int] = Field(default=None, description="Filter by parent folder ID (optional - omit to get all folders)"),
     include_hierarchy: bool = Field(default=True, description="Include full folder hierarchy (default: True)"),
@@ -304,7 +306,7 @@ async def list_requirement_folders(
 )
 async def create_requirement(
     title: str = Field(description="Requirement title"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     app_id: Optional[int] = Field(default=None, description="Application identifier"),
     details: str = Field(default="", description="Detailed description of the requirement"),
@@ -674,7 +676,7 @@ async def create_requirement(
 )
 async def get_requirement_details(
     requirement_id: int = Field(description="Requirement numeric ID"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
@@ -754,7 +756,7 @@ async def add_requirement_attachments(
     requirement_id: int = Field(description="Requirement numeric ID (requirement_id, ge=1)", ge=1),
     upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION),
     file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -824,7 +826,7 @@ async def add_requirement_attachments(
 )
 async def update_requirement(
     requirement_id: int = Field(description="Requirement numeric ID to update"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     title: Optional[str] = Field(default=None, description="Updated requirement title"),
     details: Optional[str] = Field(default=None, description="Updated detailed description"),
@@ -1116,7 +1118,7 @@ async def update_requirement(
 )
 async def create_requirement_folder(
     folder_name: str = Field(description="Name for the new folder"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     parent_folder_id: int = Field(default=0, description="Parent folder ID for nested folders (0 for root level)"),
 ) -> ToolResponse:
@@ -1270,7 +1272,7 @@ async def create_requirement_folder(
 )
 async def delete_requirement(
     requirement_identifier: str = Field(description="Requirement identifier: numeric ID (e.g., '123'), requirement key (e.g., 'REQ5', 'MCP11'), or requirement title text for matching"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint ID (optional - if provided, deletes from sprint; otherwise deletes from project, ge=1)", ge=1),
     folder_id: Optional[int] = Field(default=None, description="Folder ID (optional, ge=1)", ge=1),
@@ -1501,7 +1503,7 @@ async def delete_requirement(
 )
 async def link_unlink_requirement_testcases(
     requirement_id: int = Field(description="Requirement numeric ID to link/unlink test cases"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     testcase_ids: Optional[str] = Field(default=None, description="Comma-separated test case IDs to link (e.g., '123,456,789'). Required for linking."),
     unlink_testcase_id: Optional[int] = Field(default=None, description="Single test case ID to unlink from requirement. Required for unlinking."),
@@ -1698,7 +1700,7 @@ def _normalise_requirement_status(status: str) -> str:
 # --- Requirement comments (/v1/requirementcomments/*, same controller as test case comments) ---
 
 _REQUIREMENT_ID_FIELD = Field(description="Requirement numeric ID (requirement_id from bugasura_list_requirements, not the REQ number, ge=1)", ge=1)
-_TEAM_ID_FIELD = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1)
+_TEAM_ID_FIELD = Field(default=None, description="Team id or name (optional - will prompt if not provided)")
 _PROJECT_ID_FIELD = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1)
 
 
@@ -1735,7 +1737,7 @@ def _requirement_comment_ids(context: dict, requirement_id: int, comment_id: Opt
 )
 async def list_requirement_comments(
     requirement_id: int = _REQUIREMENT_ID_FIELD,
-    team_id: Optional[int] = _TEAM_ID_FIELD,
+    team_id: Optional[IdOrName] = _TEAM_ID_FIELD,
     project_id: Optional[int] = _PROJECT_ID_FIELD,
     start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
     max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
@@ -1761,7 +1763,7 @@ async def list_requirement_comments(
 async def get_requirement_comment(
     requirement_id: int = _REQUIREMENT_ID_FIELD,
     comment_id: int = Field(description="Comment ID (from bugasura_list_requirement_comments, ge=1)", ge=1),
-    team_id: Optional[int] = _TEAM_ID_FIELD,
+    team_id: Optional[IdOrName] = _TEAM_ID_FIELD,
     project_id: Optional[int] = _PROJECT_ID_FIELD,
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -1787,7 +1789,7 @@ async def add_requirement_comment(
     parent_comment_id: Optional[int] = Field(default=None, description="Parent comment ID for a threaded reply (optional, ge=1)", ge=1),
     upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION),
     file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
-    team_id: Optional[int] = _TEAM_ID_FIELD,
+    team_id: Optional[IdOrName] = _TEAM_ID_FIELD,
     project_id: Optional[int] = _PROJECT_ID_FIELD,
 ) -> ToolResponse:
     """
@@ -1833,7 +1835,7 @@ async def update_requirement_comment(
     comment_attachments: Optional[str] = Field(default=None, description="Comma-separated list of the existing attachment filenames to keep (optional). Omit to keep them all; '' removes them all."),
     upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION + " The files are added to the comment's attachments."),
     file_paths: List[str] = Field(default=[], description=ATTACH_FILE_PATHS_DESCRIPTION),
-    team_id: Optional[int] = _TEAM_ID_FIELD,
+    team_id: Optional[IdOrName] = _TEAM_ID_FIELD,
     project_id: Optional[int] = _PROJECT_ID_FIELD,
 ) -> ToolResponse:
     """
@@ -1892,7 +1894,7 @@ async def update_requirement_comment(
 async def delete_requirement_comment(
     requirement_id: int = _REQUIREMENT_ID_FIELD,
     comment_id: int = Field(description="Comment ID to delete (from bugasura_list_requirement_comments, ge=1)", ge=1),
-    team_id: Optional[int] = _TEAM_ID_FIELD,
+    team_id: Optional[IdOrName] = _TEAM_ID_FIELD,
     project_id: Optional[int] = _PROJECT_ID_FIELD,
 ) -> ToolResponse:
     """Delete a requirement comment via POST /v1/requirementcomments/delete."""

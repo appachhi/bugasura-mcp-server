@@ -5,19 +5,20 @@ from typing import Any, List, Literal, Optional
 from fastmcp import Context
 from pydantic import Field
 
-from output_types import ToolResponse
-from app import mcp
-from auth import fetch_user_context, get_api_key, validate_api_key
-from client import paginate_upstream, respond, logger, make_api_request
-from config import (
-    BROWSER_AGENT_PLATFORM_TYPES, MOBILE_AGENT_PLATFORM_TYPES, TestCaseExecutionStatus, TestCasePlatformType,
-    TestCaseResultStatus, TestCaseStatus,
+from config.config import (
+    logger, AGENT_LABELS, BROWSER_AGENT_PLATFORM_TYPES, MOBILE_AGENT_PLATFORM_TYPES, TestCaseExecutionStatus,
+    TestCasePlatformType, TestCaseResultStatus, TestCaseStatus,
 )
-from helpers import (
-    ATTACH_FILE_PATHS_DESCRIPTION, ATTACH_UPLOAD_ID_DESCRIPTION, find_user_ids_by_names_or_emails,
-    attachment_names_csv, filter_large_fields, open_attachments, project_comment_attachment_names,
-    select_team_project_context, send_with_attachments,
+from core.app import mcp
+from utils.attachments import (
+    ATTACH_FILE_PATHS_DESCRIPTION, ATTACH_UPLOAD_ID_DESCRIPTION, attachment_names_csv, open_attachments,
+    project_comment_attachment_names, send_with_attachments,
 )
+from utils.auth import fetch_user_context, get_api_key, validate_api_key
+from utils.client import make_api_request
+from utils.formatting import paginate_upstream, respond, filter_large_fields
+from utils.output_types import ToolResponse
+from utils.resolvers import IdOrName, find_user_ids_by_names_or_emails, select_team_project_context
 
 
 @mcp.tool(
@@ -39,7 +40,7 @@ from helpers import (
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_cases(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id). When provided, returns full test case details for that sprint, grouped by sub-feature."),
     test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID (testRunsExecutionRunId). When provided alongside sprint_id, filters test cases to that specific run. Obtain from bugasura_list_test_runs."),
@@ -190,7 +191,7 @@ async def list_test_cases(
 )
 async def create_test_case(
     scenario: str = Field(description="Test case scenario/title (required, min_length=1)", min_length=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     feature_name: str = Field(default="", description="Feature name/tag (optional; the API requires one, so 'feature_name_1' is stored when omitted)"),
     sub_feature_name: str = Field(default="", description="Sub-feature name/tag (optional; 'sub_feature_name_1' is stored when omitted)"),
@@ -354,7 +355,7 @@ async def create_test_case(
 )
 async def get_test_case(
     testcase_id: int = Field(description="Test case numeric ID", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)", ge=1),
     test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID, to get the test case's status in that run. Needs sprint_id. Get from bugasura_list_test_runs.", ge=1),
@@ -405,12 +406,12 @@ async def get_test_case(
 @mcp.tool(
     name = "bugasura_update_test_case",
     title = "Update Test Case",
-    description = "Update test case details (partial updates supported). Can update any field including scenario, feature tags, testing type, severity, priority, conditions, test steps, assignees, status, and sprint associations. execution_status and test_case_status apply to the project test case, or with sprint_id to the test case in that sprint, or with sprint_id and test_run_execution_run_id to the test case in that test run (e.g. to mark it COMPLETED in a run). To assign a sprint-level test case to an agent for automated execution, set assign_to_agent=True along with sprint_id. API test cases go to the API Agent; functional test cases go by platform_type: DESKTOP_WEB to the Browser Agent, the mobile types to the Mobile Agent. A functional test case with no platform_type cannot be assigned, so pass platform_type in the same call (e.g. platform_type='DESKTOP_WEB' for the Browser Agent). If the agent cannot be assigned the call fails, and test_case_updated says whether the other changes were saved. Interactive selection available.",
+    description = "Update test case details (partial updates supported). Can update any field including scenario, feature tags, testing type, severity, priority, conditions, test steps, assignees, status, and sprint associations. execution_status and test_case_status apply to the project test case, or with sprint_id to the test case in that sprint, or with sprint_id and test_run_execution_run_id to the test case in that test run (e.g. to mark it COMPLETED in a run). To assign a sprint-level test case to an agent for automated execution, set assign_to_agent=True along with sprint_id. API test cases go to the API Agent; functional test cases go by platform_type: DESKTOP_WEB to the Browser Agent, the mobile types to the Mobile Agent. A functional test case with no platform_type cannot be assigned, so pass platform_type in the same call (e.g. platform_type='DESKTOP_WEB' for the Browser Agent). If the agent cannot be assigned the call fails, and test_case_updated says whether the other changes were saved. Agents are not team members, so never put an agent in assignees: use assign_to_agent here, or bugasura_assign_test_cases_to_agent for several test cases. To have an agent run it in an existing test run, also pass test_run_execution_run_id; without it only test runs created afterwards include the assignment. Interactive selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_test_case(
     testcase_id: int = Field(description="Test case numeric ID to update", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     feature_name: Optional[str] = Field(default=None, description="New feature name/tag (optional)"),
     sub_feature_name: Optional[str] = Field(default=None, description="New sub-feature name/tag (optional)"),
@@ -431,7 +432,7 @@ async def update_test_case(
     sprint_ids: Optional[str] = Field(default=None, description="Comma-separated sprint IDs to tag the test case with (optional). This only sets the sprint tag; it does not add the test case to the sprint's test case list. Use bugasura_link_test_cases_to_sprint for that."),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (report_id) for sprint-level operations: agent assignment, or setting execution_status / test_case_status in the sprint (optional, ge=1)", ge=1),
     test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID (testRunsExecutionRunId), with sprint_id. Scopes execution_status / test_case_status and agent assignment to that test run. Get from bugasura_list_test_runs.", ge=1),
-    assign_to_agent: bool = Field(default=False, description="When True (and sprint_id is provided), assigns this test case to an agent for automated execution within that sprint. API test cases go to the API Agent; functional ones to the Browser Agent (platform_type DESKTOP_WEB) or the Mobile Agent (mobile platform types). The project must have that agent enabled."),
+    assign_to_agent: bool = Field(default=False, description="When True (and sprint_id is provided), assigns this test case to an agent for automated execution within that sprint. API test cases go to the API Agent; functional ones to the Browser Agent (platform_type DESKTOP_WEB) or the Mobile Agent (mobile platform types). The project must have that agent enabled (bugasura_list_agents). Add test_run_execution_run_id to queue it in an existing test run."),
 ) -> ToolResponse:
     """
     Update a test case. Only updates the fields that are provided.
@@ -605,25 +606,8 @@ async def update_test_case(
     # - feature_name, sub_feature_name, test_case_scenario, testing_type (mandatory)
     # - severity, priority (backend validation may require these)
 
-    # Start with all existing fields so a partial update never clears untouched data.
-    tc_details = {
-        'feature_name': tc_data.get('feature_name', ''),
-        'sub_feature_name': tc_data.get('sub_feature_name', ''),
-        'test_case_scenario': tc_data.get('test_case_scenario') or tc_data.get('scenario', ''),
-        'testing_type': tc_data.get('testing_type', ''),
-        'severity': tc_data.get('severity', 'MEDIUM'),
-        'priority': tc_data.get('priority', 'P2'),
-        'test_conditions': tc_data.get('test_conditions') or '',
-        'test_idea': tc_data.get('test_idea') or '',
-        'test_data': _test_data_text(tc_data.get('test_data')),
-        'acceptance_criteria': tc_data.get('acceptance_criteria') or '',
-        'test_steps': _normalise_steps(tc_data.get('test_steps') or tc_data.get('steps')),
-        'assignee': tc_data.get('assignee') or '',
-    }
-    # API test cases keep their steps in api_test_steps; the backend clears them when it is not sent.
-    is_api_test_case = str(tc_data.get('is_api_test_case') or '0') == '1'
-    if is_api_test_case:
-        tc_details['api_test_steps'] = tc_data.get('api_test_steps') or ''
+    tc_details = _baseline_tc_details(tc_data)
+    is_api_test_case = 'api_test_steps' in tc_details
 
     # Override mandatory fields if user provided new values
     if feature_name is not None:
@@ -759,7 +743,7 @@ async def update_test_case(
 )
 async def delete_test_case(
     testcase_identifier: str = Field(description="Test case identifier: numeric ID (e.g., '123'), test case key (e.g., 'TES5', 'MCP11'), or scenario text for matching"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id). When provided, unlinks the test case from the sprint instead of deleting it from the project. Get from bugasura_list_sprints."),
     test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID. When provided together with sprint_id, removes the test case from that specific run only (not from the sprint). Get from bugasura_list_test_runs."),
@@ -891,16 +875,9 @@ async def _link_unlink_sprint_test_cases(tool_name: str, is_delete: bool, sprint
     team_id = context['team_id']
     project_id = context['project_id']
 
-    ids = [i.strip() for i in str(testcase_ids).split(',') if i.strip()]
-    invalid_ids = [i for i in ids if not i.isdigit()]
-    if not ids or invalid_ids:
-        return {
-            'status': 'failed',
-            'error': 'Invalid testcase_ids',
-            'error_type': 'ValidationError',
-            'message': f"testcase_ids must be comma-separated numeric test case IDs; invalid: {invalid_ids or [testcase_ids]}"
-        }
-    ids = list(dict.fromkeys(ids))
+    ids, error = _parse_testcase_ids(testcase_ids)
+    if error:
+        return error
 
     # The API does not check that the sprint belongs to the project, so check it here.
     sprint_resp = await make_api_request('GET', '/v1/sprints/list', api_key, params={
@@ -963,7 +940,7 @@ async def _link_unlink_sprint_test_cases(tool_name: str, is_delete: bool, sprint
 async def link_test_cases_to_sprint(
     sprint_id: int = Field(description="Sprint ID (report_id) to add the test cases to. Get from bugasura_list_sprints."),
     testcase_ids: str = Field(description="Comma-separated numeric test case IDs to link (e.g., '123,456')"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Link existing project test cases to a sprint via /v1/testcases/addRemoveSprintTestCases."""
@@ -984,7 +961,7 @@ async def link_test_cases_to_sprint(
 async def unlink_test_cases_from_sprint(
     sprint_id: int = Field(description="Sprint ID (report_id) to remove the test cases from. Get from bugasura_list_sprints."),
     testcase_ids: str = Field(description="Comma-separated numeric test case IDs to unlink (e.g., '123,456')"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Unlink test cases from a sprint via /v1/testcases/addRemoveSprintTestCases with isDelete=1."""
@@ -1026,7 +1003,7 @@ async def report_test_case_result(
     network_name: str = Field(default="", description="Network condition (optional)", max_length=25),
     resolution: str = Field(default="", description="Screen resolution like '1920x1080', web projects only (optional)", max_length=25),
     mark_completed: bool = Field(default=False, description="Also set the execution status to COMPLETED, in the test run when test_run_execution_run_id is given, otherwise in the sprint. Leave False unless the user explicitly asks to mark the test case completed; by default reporting moves NEW to IN_PROGRESS only."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1168,7 +1145,7 @@ async def report_test_case_result(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_case_comments(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)", ge=1),
@@ -1282,7 +1259,7 @@ async def list_test_case_comments(
 )
 async def add_test_case_comment(
     comment: str = Field(description="Comment content (supports HTML formatting, required, min_length=1)", min_length=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)", ge=1),
@@ -1420,7 +1397,7 @@ async def add_test_case_comment(
 )
 async def get_test_case_comment(
     comment_id: int = Field(description="Comment identifier (required, ge=1)", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)", ge=1),
@@ -1573,7 +1550,7 @@ async def get_test_case_comment(
 )
 async def update_test_case_comment(
     comment: str = Field(description="Updated comment content (supports HTML formatting, required, min_length=1)", min_length=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
     comment_id: Optional[int] = Field(default=None, description="Comment identifier to update (optional - will prompt if not provided, ge=1)", ge=1),
@@ -1781,7 +1758,7 @@ async def update_test_case_comment(
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_test_case_comment(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
     comment_id: Optional[int] = Field(default=None, description="Comment identifier to delete (optional - will prompt if not provided, ge=1)", ge=1),
@@ -1985,6 +1962,389 @@ async def delete_test_case_comment(
 
 
 # ---------------------------------------------------------------------------
+# Agents
+# ---------------------------------------------------------------------------
+
+# What each agent runs, for bugasura_list_agents.
+_AGENT_RUNS = {
+    'api_agent': 'API test cases',
+    'browser_agent': 'Functional test cases with platform_type ' + ', '.join(sorted(BROWSER_AGENT_PLATFORM_TYPES)),
+    'mobile_agent': 'Functional test cases with platform_type ' + ', '.join(sorted(MOBILE_AGENT_PLATFORM_TYPES)),
+}
+# Progress reads per bugasura_run_agent_test_cases status call; each is one API call.
+_AGENT_PROGRESS_LIMIT = 25
+
+
+def _parse_testcase_ids(testcase_ids: str):
+    """Comma-separated numeric ids -> (unique ids, error dict or None)."""
+    ids = [i.strip() for i in str(testcase_ids).split(',') if i.strip()]
+    invalid_ids = [i for i in ids if not i.isdigit()]
+    if not ids or invalid_ids:
+        return [], {'status': 'failed', 'error': 'Invalid testcase_ids', 'error_type': 'ValidationError',
+                    'message': f"testcase_ids must be comma-separated numeric test case IDs; invalid: {invalid_ids or [testcase_ids]}"}
+    return list(dict.fromkeys(ids)), None
+
+
+async def _sprint_agent_context(api_key, team_id, project_id, sprint_id, test_run_execution_run_id=None):
+    """One sprint (or run) read and one project read -> (test case rows, agent settings, enabled agents, failure)."""
+    params = {'teamId': team_id, 'appId': project_id, 'sprintId': sprint_id}
+    if test_run_execution_run_id:
+        params['testRunsExecutionRunId'] = test_run_execution_run_id
+    resp = await make_api_request('GET', '/testpert/sprintTestCase/get', api_key, params=params)
+    if not (isinstance(resp, dict) and resp.get('status') == 'OK'):
+        logger.warning(f"sprintTestCase/get failed for sprint_id={sprint_id} run={test_run_execution_run_id}: "
+                       f"{resp.get('message') if isinstance(resp, dict) else resp}")
+        return None, None, None, {
+            'status': 'failed', 'error': 'Could not read the sprint test cases', 'error_type': 'APIError',
+            'message': (resp.get('message') if isinstance(resp, dict) else None)
+                       or f"Check that sprint {sprint_id} belongs to project {project_id} and Testpert is enabled for it."}
+    settings = await _project_agent_settings(api_key, team_id, project_id)
+    if settings is None:
+        return None, None, None, {'status': 'failed', 'error': "Could not read the project's agent settings",
+                                  'error_type': 'APIError', 'message': 'Try again in a moment.'}
+    rows = [r for r in resp.get('testCaseDetails') or [] if isinstance(r, dict) and r.get('test_case_id')]
+    return rows, settings, _enabled_agents(settings, resp.get('teamMembersDetails')), None
+
+
+async def _save_agent_fields(api_key, team_id, project_id, testcase_id, platform_type=None, fill_test_data=False) -> str:
+    """Set platform_type and/or empty test data to '[]' (the executor json-decodes it) on the project test case
+    before an agent assignment. Returns '' once saved, otherwise the reason."""
+    resp = await make_api_request('GET', '/v1/testcases/get', api_key,
+                                  params={'team_id': team_id, 'app_id': project_id, 'testcase_id': testcase_id})
+    rows = resp.get('testCaseDetails') if isinstance(resp, dict) and resp.get('status') == 'OK' else None
+    tc_data = rows[0] if isinstance(rows, list) and rows else rows
+    if not isinstance(tc_data, dict) or not tc_data:
+        return 'Could not read the test case to update it'
+    tc_details = _baseline_tc_details(tc_data)
+    if platform_type:
+        tc_details['platform_type'] = platform_type
+    if fill_test_data and not tc_details['test_data'].strip():
+        tc_details['test_data'] = '[]'
+    saved = await make_api_request('POST', '/v1/testcases/update', api_key, data={
+        'app_id': project_id, 'testcase_id': testcase_id, 'team_id': team_id,
+        'testCaseDetails': json.dumps([tc_details])})
+    if not (isinstance(saved, dict) and saved.get('status') == 'OK'):
+        message = (saved.get('message') if isinstance(saved, dict) else '') or 'The test case update was rejected'
+        logger.warning(f"Saving agent fields failed for testcase_id={testcase_id}: {message}")
+        return message
+    return ''
+
+
+async def _agent_progress(api_key, team_id, project_id, sprint_id, test_run_execution_run_id, testcase_id) -> dict:
+    """Summary of the latest agent attempt on a test case in a run, from /testpert/getAgentExecutionProgress."""
+    resp = await make_api_request('GET', '/testpert/getAgentExecutionProgress', api_key, params={
+        'appId': project_id, 'reportId': sprint_id, 'teamId': team_id, 'testCaseId': testcase_id,
+        'testRunsExecutionRunId': test_run_execution_run_id})
+    if not (isinstance(resp, dict) and resp.get('status') == 'OK'):
+        return {'available': False,
+                'message': (resp.get('message') if isinstance(resp, dict) else '') or 'No progress recorded yet'}
+    progress = resp.get('TestpertAgentExecution') if isinstance(resp.get('TestpertAgentExecution'), dict) else {}
+    steps = progress.get('testCaseSteps') or progress.get('apiExecutionLogs') or []
+    steps = steps if isinstance(steps, list) else []
+    out = {
+        'attempt': resp.get('resolvedAttemptNumber'),
+        'progress_status': progress.get('progressExecutionStatus'),
+        'message': progress.get('executionMessage'),
+        'duration': progress.get('executionDuration'),
+        'steps_reported': len(steps),
+    }
+    last = steps[-1] if steps and isinstance(steps[-1], dict) else {}
+    last_step = {k: last.get(k) for k in ('task_index', 'name', 'result') if last.get(k) not in (None, '')}
+    if last_step:
+        out['last_step'] = last_step
+    return {k: v for k, v in out.items() if v not in (None, '')}
+
+
+@mcp.tool(
+    name = "bugasura_list_agents",
+    title = "List Agents",
+    description = (
+        "List the AI agents enabled on a project and what each one runs: the API Agent runs API test cases, the "
+        "Browser Agent functional test cases with platform_type DESKTOP_WEB, the Mobile Agent those with a mobile "
+        "platform type. Agents are not team members, so they never appear in member lists and cannot be set through "
+        "assignees: assign them with bugasura_assign_test_cases_to_agent. Pass sprint_id to also get each agent's user id. "
+        "Interactive team/project selection available."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def list_agents(
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id), to include each agent's user id (optional)", ge=1),
+    response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
+) -> ToolResponse:
+    """The project's agents from apps.agent_settings (/v1/projects/get); user ids from the sprint's AGENT members."""
+    api_key = get_api_key()
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return respond(validation, response_format)
+
+    context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_list_agents')
+    if 'status' in context and context['status'] == 'selection_required':
+        return respond(context, response_format)
+    tid, pid = context['team_id'], context['project_id']
+
+    agents = None
+    if sprint_id:
+        _, settings, agents, failure = await _sprint_agent_context(api_key, tid, pid, sprint_id)
+        if failure:
+            return respond(failure, response_format)
+    else:
+        settings = await _project_agent_settings(api_key, tid, pid)
+        if settings is None:
+            return respond({'status': 'failed', 'error': "Could not read the project's agent settings",
+                            'error_type': 'APIError', 'message': 'Try again in a moment.'}, response_format)
+
+    enabled, not_enabled = [], []
+    for key, label in AGENT_LABELS.items():
+        entry = {'agent': key, 'label': label, 'runs': _AGENT_RUNS[key]}
+        if str((settings.get(key) or {}).get('is_enabled')) != '1':
+            not_enabled.append(entry)
+            continue
+        if agents is not None:
+            if key in agents:
+                entry.update(user_id=agents[key]['user_id'], email_id=agents[key]['email_id'])
+            else:
+                entry['note'] = 'Enabled, but its agent user is missing from this sprint, so it cannot be assigned here.'
+        enabled.append(entry)
+
+    if enabled:
+        message = (f"Enabled: {', '.join(a['label'] for a in enabled)}. Assign test cases with "
+                   "bugasura_assign_test_cases_to_agent; each test case goes to the agent for its platform.")
+    else:
+        message = "No agents are enabled on this project. A project admin can enable them in the project's settings in Bugasura."
+    return respond({'status': 'OK', 'project_id': pid, 'agents': enabled, 'not_enabled': not_enabled,
+                    'message': message}, response_format)
+
+
+@mcp.tool(
+    name = "bugasura_assign_test_cases_to_agent",
+    title = "Assign Test Cases to Agent",
+    description = (
+        "Assign sprint test cases to the AI agents for automated execution. Each test case goes to the agent for its "
+        "platform: API test cases to the API Agent, DESKTOP_WEB to the Browser Agent, mobile platform types to the "
+        "Mobile Agent; platform_type fills in test cases that have none. With test_run_execution_run_id the test cases are "
+        "assigned in that test run and the agents pick them up on their own (track them with bugasura_run_agent_test_cases). "
+        "Without it they are assigned in the sprint, which only test runs created afterwards copy. "
+        "Reports per test case what was assigned and why the rest were not. Interactive team/project selection available."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def assign_test_cases_to_agent(
+    sprint_id: int = Field(description="Sprint ID (report_id) the test cases are in. Get from bugasura_list_sprints.", ge=1),
+    testcase_ids: str = Field(description="Comma-separated numeric test case IDs (test_case_id from bugasura_list_test_cases with sprint_id), e.g. '123,456'"),
+    test_run_execution_run_id: Optional[int] = Field(default=None, description="Test run execution ID to assign them in (and queue them for the agents). Get from bugasura_list_test_runs.", ge=1),
+    platform_type: Optional[TestCasePlatformType] = Field(default=None, description="Platform to set on functional test cases that have none, which decides their agent: DESKTOP_WEB for the Browser Agent, ANDROID / ANDROID_MOBILE_WEB / IOS / IOS_MOBILE_WEB for the Mobile Agent. Test cases with a platform keep theirs (optional)."),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+) -> ToolResponse:
+    """One /testpert/sprintTestCase/update per test case, not updateGroup: updateGroup skips the API's platform check."""
+    api_key = get_api_key()
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_assign_test_cases_to_agent',
+                                                f', sprint_id={sprint_id}, testcase_ids="{testcase_ids}"')
+    if 'status' in context and context['status'] == 'selection_required':
+        return context
+    tid, pid = context['team_id'], context['project_id']
+    run_id = test_run_execution_run_id
+
+    ids, error = _parse_testcase_ids(testcase_ids)
+    if error:
+        return error
+    rows, _, agents, failure = await _sprint_agent_context(api_key, tid, pid, sprint_id, run_id)
+    if failure:
+        return failure
+    if not agents:
+        logger.warning(f"assign_test_cases_to_agent: no agents enabled for project_id={pid} sprint_id={sprint_id}")
+        return {'status': 'failed', 'error': 'No agents are enabled for this project', 'error_type': 'AgentAssignmentError',
+                'message': "Nothing was assigned. A project admin can enable agents in the project's settings in Bugasura."}
+
+    by_id = {str(r.get('test_case_id')): r for r in rows}
+    scope = f"test run {run_id}" if run_id else f"sprint {sprint_id}"
+    assigned, rejected = [], []
+
+    def reject(tc_id, reason, message=''):
+        logger.warning(f"Agent assignment rejected for {_agent_scope(tc_id, sprint_id, run_id)}: {reason}. {message}")
+        rejected.append({'testcase_id': int(tc_id), 'reason': reason, **({'message': message} if message else {})})
+
+    for tc_id in ids:
+        row = by_id.get(tc_id)
+        if row is None:
+            reject(tc_id, f'Not in {scope}', 'Link it with bugasura_link_test_cases_to_sprint first.')
+            continue
+        is_api = str(row.get('is_api_test_case') or '0') == '1'
+        set_platform = platform_type if platform_type and not is_api and not row.get('platform_type') else None
+        agent_key, problem = _route_agent(row, set_platform)
+        if problem:
+            reject(tc_id, *problem)
+            continue
+        agent = agents.get(agent_key)
+        if not agent:
+            reject(tc_id, f'The {AGENT_LABELS[agent_key]} is not enabled for this project')
+            continue
+        # The executor json-decodes functional test data and errors the case when it is not JSON, empty included.
+        fill_test_data = False
+        if not is_api and 'original_test_data' in row:
+            stored = html.unescape(row.get('original_test_data') or '').strip()
+            if stored and not _is_json_test_data(stored):
+                reject(tc_id, 'Agents need test_data as a JSON list of {key, value} items, not plain text',
+                       'Fix it with bugasura_update_test_case (test_data), then assign again.')
+                continue
+            fill_test_data = not stored
+        if set_platform or fill_test_data:
+            save_error = await _save_agent_fields(api_key, tid, pid, tc_id, set_platform, fill_test_data)
+            if save_error:
+                reject(tc_id, 'Could not prepare the test case for the agent', save_error)
+                continue
+        result = await _assign_to_agent(api_key, tid, pid, tc_id, sprint_id, run_id, agent)
+        if result['status'] != 'OK':
+            rejected.append({'testcase_id': int(tc_id), 'reason': result['error'], 'message': result['detail']})
+            continue
+        assigned.append({'testcase_id': int(tc_id), 'test_case_number': row.get('test_case_number'), 'agent': agent['label']})
+
+    out = {'sprint_id': sprint_id, 'assigned': assigned, 'rejected': rejected}
+    if run_id:
+        out['test_run_execution_run_id'] = run_id
+    if not assigned:
+        return {'status': 'failed', 'error': 'No test case was assigned to an agent', 'error_type': 'AgentAssignmentError',
+                'message': f"{rejected[0]['reason']}. {rejected[0].get('message', '')}".strip(), **out}
+    if run_id:
+        message = (f"Assigned {len(assigned)} test case(s) in test run {run_id}. The agents pick them up on their own; "
+                   "check progress with bugasura_run_agent_test_cases (action='status').")
+    else:
+        message = (f"Assigned {len(assigned)} test case(s) in sprint {sprint_id}. Test runs created from now on include them; "
+                   "an existing run does not change, so pass test_run_execution_run_id to assign them in it.")
+    if rejected:
+        message += f" {len(rejected)} could not be assigned, see rejected."
+    return {'status': 'partial_success' if rejected else 'OK', 'message': message, **out}
+
+
+@mcp.tool(
+    name = "bugasura_run_agent_test_cases",
+    title = "Run Agent Test Cases",
+    description = (
+        "Run or check the agent test cases of a test run. action='status' reports each agent-assigned test case: its "
+        "execution status and the latest agent attempt (steps reported, last step, message). action='start' queues them "
+        "for the agents, as the Run agent button in Bugasura does: it sets the execution status to NEW, skipping test "
+        "cases already queued or running. The agents poll for queued test cases, so they start on their own shortly "
+        "after, not during this call. Every start is a new agent execution that uses AI credits, so pass testcase_ids to "
+        "re-run only some. Test cases must first be assigned in the run (bugasura_assign_test_cases_to_agent with "
+        "test_run_execution_run_id). Interactive team/project selection available."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+)
+async def run_agent_test_cases(
+    sprint_id: int = Field(description="Sprint ID (report_id) the test run belongs to. Get from bugasura_list_sprints.", ge=1),
+    test_run_execution_run_id: int = Field(description="Test run execution ID. Get from bugasura_list_test_runs.", ge=1),
+    action: Literal["status", "start"] = Field(default="status", description="'status' (default) to report progress, 'start' to queue the agent test cases"),
+    testcase_ids: Optional[str] = Field(default=None, description="Comma-separated numeric test case IDs to limit to (optional; default every agent-assigned test case in the run)"),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+) -> ToolResponse:
+    """Nothing starts an agent run directly: Testpert-Executor polls /testcases/getTestpertExecutorTestCase for
+    run rows with testpert_executor=1 and execution_status NEW, so 'start' sets NEW (/testpert/sprintTestCase/update)."""
+    api_key = get_api_key()
+    validation = await validate_api_key(api_key)
+    if not validation.get('valid'):
+        return validation
+
+    context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_run_agent_test_cases',
+                                                f', sprint_id={sprint_id}, test_run_execution_run_id={test_run_execution_run_id}, action="{action}"')
+    if 'status' in context and context['status'] == 'selection_required':
+        return context
+    tid, pid = context['team_id'], context['project_id']
+    run_id = test_run_execution_run_id
+
+    ids = None
+    if testcase_ids:
+        ids, error = _parse_testcase_ids(testcase_ids)
+        if error:
+            return error
+    rows, _, agents, failure = await _sprint_agent_context(api_key, tid, pid, sprint_id, run_id)
+    if failure:
+        return failure
+
+    agent_labels = {a['user_id']: a['label'] for a in (agents or {}).values()}
+
+    def agent_of(row):
+        assignees = [a.strip() for a in str(row.get('assignee') or '').split(',')]
+        return next((agent_labels[a] for a in assignees if a in agent_labels), None)
+
+    by_id = {str(r.get('test_case_id')): r for r in rows}
+    targets = [by_id[i] for i in ids if i in by_id] if ids else rows
+    out = {'sprint_id': sprint_id, 'test_run_execution_run_id': run_id}
+    if ids:
+        missing = [int(i) for i in ids if i not in by_id]
+        not_assigned = [int(r['test_case_id']) for r in targets if not agent_of(r)]
+        if missing:
+            out['not_in_run'] = missing
+        if not_assigned:
+            out['not_assigned_to_agent'] = not_assigned
+    agent_rows = [(r, agent_of(r)) for r in targets if agent_of(r)]
+    if not agent_rows:
+        message = (f"No test case{' given' if ids else ''} in test run {run_id} is assigned to an agent. Assign them with "
+                   f"bugasura_assign_test_cases_to_agent (test_run_execution_run_id={run_id}).")
+        if action == 'start':
+            return {'status': 'failed', 'error': 'No agent test cases to start', 'error_type': 'NotFound', 'message': message, **out}
+        return {'status': 'OK', 'test_cases': [], 'message': message, **out}
+
+    if action == 'start':
+        queued, already_queued, running, failed = [], [], [], []
+        for row, label in agent_rows:
+            tc_id = row['test_case_id']
+            status = str(row.get('execution_status') or '').upper()
+            if status == 'IN_PROGRESS':
+                running.append(int(tc_id))
+                continue
+            if status == 'NEW':
+                already_queued.append(int(tc_id))
+                continue
+            logger.info(f"Queueing testcase_id={tc_id} for the {label} in run={run_id}")
+            resp = await make_api_request('POST', '/testpert/sprintTestCase/update', api_key, data={
+                'teamId': tid, 'appId': pid, 'sprintId': sprint_id, 'testCaseId': tc_id,
+                'executionStatus': 'NEW', 'testRunsExecutionRunId': run_id})
+            if isinstance(resp, dict) and resp.get('status') == 'OK':
+                queued.append(int(tc_id))
+            else:
+                message = (resp.get('message') if isinstance(resp, dict) else '') or 'The API rejected it'
+                logger.warning(f"Queueing testcase_id={tc_id} in run={run_id} failed: {message}")
+                failed.append({'testcase_id': int(tc_id), 'message': message})
+        out.update(queued=queued, already_queued=already_queued, running=running, failed=failed)
+        message = (f"Queued {len(queued)} test case(s) for the agents in test run {run_id}"
+                   f"{f', {len(already_queued)} already queued' if already_queued else ''}"
+                   f"{f', {len(running)} running' if running else ''}. The agents pick queued test cases up on their own "
+                   "shortly; check with action='status'.")
+        if failed:
+            message += f" {len(failed)} could not be queued: {failed[0]['message']}"
+        if failed and not (queued or already_queued or running):
+            return {'status': 'failed', 'error': 'No test case could be queued', 'error_type': 'APIError', 'message': message, **out}
+        return {'status': 'partial_success' if failed else 'OK', 'message': message, **out}
+
+    test_cases, counts, progress_reads = [], {}, 0
+    for row, label in agent_rows:
+        status = str(row.get('execution_status') or 'NEW').upper()
+        counts[status] = counts.get(status, 0) + 1
+        entry = {'testcase_id': int(row['test_case_id']), 'test_case_number': row.get('test_case_number'),
+                 'scenario': row.get('scenario'), 'agent': label, 'execution_status': status,
+                 'test_case_status': row.get('test_case_status') or 'PENDING'}
+        if row.get('agent_execution_count'):
+            entry['agent_executions'] = row.get('agent_execution_count')
+        # A NEW test case has not been picked up yet, so it has no progress to read.
+        if status != 'NEW' and progress_reads < _AGENT_PROGRESS_LIMIT:
+            progress_reads += 1
+            entry['progress'] = await _agent_progress(api_key, tid, pid, sprint_id, run_id, row['test_case_id'])
+        test_cases.append(entry)
+    summary = ', '.join(f"{n} {s}" for s, n in sorted(counts.items()))
+    message = f"{len(test_cases)} agent test case(s) in test run {run_id}: {summary}. NEW means queued, not yet picked up."
+    if progress_reads == _AGENT_PROGRESS_LIMIT and sum(1 for t in test_cases if t['execution_status'] != 'NEW') > progress_reads:
+        message += f" Progress is shown for the first {_AGENT_PROGRESS_LIMIT}; pass testcase_ids for the others."
+    return {'status': 'OK', 'test_cases': test_cases, 'counts': counts, 'message': message, **out}
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -2024,19 +2384,105 @@ def _is_json_test_data(test_data: str) -> bool:
         return False
 
 
-def _agent_failed(error: str, message: str, test_case_updated: bool = False) -> dict:
+def _baseline_tc_details(tc_data: dict) -> dict:
+    """The stored fields /v1/testcases/update needs, so a partial update never clears untouched data."""
+    tc_details = {
+        'feature_name': tc_data.get('feature_name', ''),
+        'sub_feature_name': tc_data.get('sub_feature_name', ''),
+        'test_case_scenario': tc_data.get('test_case_scenario') or tc_data.get('scenario', ''),
+        'testing_type': tc_data.get('testing_type', ''),
+        'severity': tc_data.get('severity', 'MEDIUM'),
+        'priority': tc_data.get('priority', 'P2'),
+        'test_conditions': tc_data.get('test_conditions') or '',
+        'test_idea': tc_data.get('test_idea') or '',
+        'test_data': _test_data_text(tc_data.get('test_data')),
+        'acceptance_criteria': tc_data.get('acceptance_criteria') or '',
+        'test_steps': _normalise_steps(tc_data.get('test_steps') or tc_data.get('steps')),
+        'assignee': tc_data.get('assignee') or '',
+    }
+    # API test cases keep their steps in api_test_steps; the backend clears them when it is not sent.
+    if str(tc_data.get('is_api_test_case') or '0') == '1':
+        tc_details['api_test_steps'] = tc_data.get('api_test_steps') or ''
+    return tc_details
+
+
+def _agent_failed(where: str, error: str, message: str, test_case_updated: bool = False) -> dict:
     """A failed agent assignment fails the whole call; test_case_updated says whether the field changes were saved."""
+    logger.warning(f"Agent assignment rejected for {where}: {error}. {message}")
     saved = ('The other test case changes were saved, so retrying the same call is safe. ' if test_case_updated
              else 'Nothing was saved. ')
     return {'status': 'failed', 'error': error, 'error_type': 'AgentAssignmentError',
-            'message': saved + message, 'test_case_updated': test_case_updated}
+            'message': saved + message, 'detail': message, 'test_case_updated': test_case_updated}
+
+
+def _agent_scope(testcase_id, sprint_id, test_run_execution_run_id) -> str:
+    return (f"testcase_id={testcase_id} sprint_id={sprint_id}"
+            f"{f' run={test_run_execution_run_id}' if test_run_execution_run_id else ''}")
+
+
+def _parse_agent_settings(raw) -> dict:
+    """apps.agent_settings ({"agent_settings": {"browser_agent": {"email_id", "is_enabled"}, ...}}) per agent key."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(html.unescape(raw)) if raw.strip() else {}
+        except ValueError:
+            logger.warning(f"Unreadable agent_settings: {raw[:200]}")
+            raw = {}
+    settings = raw.get('agent_settings') if isinstance(raw, dict) else None
+    if not isinstance(settings, dict):
+        return {}
+    return {key: cfg for key, cfg in settings.items() if key in AGENT_LABELS and isinstance(cfg, dict)}
+
+
+async def _project_agent_settings(api_key: str, team_id: int, project_id: int) -> Optional[dict]:
+    """The project's agent settings from /v1/projects/get, or None when the project cannot be read."""
+    resp = await make_api_request('GET', '/v1/projects/get', api_key,
+                                  params={'team_id': team_id, 'project_id': project_id})
+    if not (isinstance(resp, dict) and resp.get('status') == 'OK'):
+        logger.warning(f"Could not read the agent settings of project_id={project_id}: "
+                       f"{resp.get('message') if isinstance(resp, dict) else resp}")
+        return None
+    return _parse_agent_settings((resp.get('project_details') or {}).get('agent_settings'))
+
+
+def _enabled_agents(settings: dict, team_members) -> dict:
+    """{agent_key: agent} for each enabled agent, its AGENT user matched by email_id. The sprint listing's
+    teamMembersDetails holds the AGENT users but not their is_<agent>_enabled flags, so these come from agent_settings."""
+    agent_users = {str(m.get('email_id') or '').strip().lower(): m for m in team_members or []
+                   if isinstance(m, dict) and str(m.get('type') or m.get('user_type') or '').upper() == 'AGENT'}
+    agents = {}
+    for key, cfg in settings.items():
+        if str(cfg.get('is_enabled')) != '1':
+            continue
+        user = agent_users.get(str(cfg.get('email_id') or '').strip().lower())
+        if user and user.get('user_id'):
+            agents[key] = {'agent': key, 'label': AGENT_LABELS[key], 'user_id': str(user['user_id']),
+                           'email_id': user.get('email_id') or '', 'name': user.get('user_name') or user.get('name') or ''}
+        else:
+            logger.warning(f"The enabled {AGENT_LABELS[key]} ({cfg.get('email_id')}) is not among the sprint's AGENT users")
+    return agents
+
+
+def _route_agent(tc_detail: dict, platform_type: Optional[str] = None):
+    """The agent key that runs this sprint test case, or (None, (error, message)) when no agent can."""
+    if str(tc_detail.get('is_api_test_case') or '0') == '1':
+        return 'api_agent', None
+    tc_platform = str(platform_type or tc_detail.get('platform_type') or '').upper()
+    if tc_platform in BROWSER_AGENT_PLATFORM_TYPES:
+        return 'browser_agent', None
+    if tc_platform in MOBILE_AGENT_PLATFORM_TYPES:
+        return 'mobile_agent', None
+    return None, (f"No agent runs test cases with platform type '{tc_platform or 'not set'}'",
+                  "Call again with platform_type='DESKTOP_WEB' for the Browser Agent, or a mobile platform type "
+                  "(ANDROID, ANDROID_MOBILE_WEB, IOS, IOS_MOBILE_WEB) for the Mobile Agent.")
 
 
 async def _pick_agent(api_key, team_id, project_id, testcase_id, sprint_id, test_run_execution_run_id, platform_type):
     """Return (agent, failure) for a sprint test case before anything is saved. The API silently drops an
     agent whose platform does not match (status OK + warningMsg), so the platform is checked here first."""
+    where = _agent_scope(testcase_id, sprint_id, test_run_execution_run_id)
     if not sprint_id:
-        return None, _agent_failed('sprint_id is required for agent assignment',
+        return None, _agent_failed(where, 'sprint_id is required for agent assignment',
                                    'Provide sprint_id together with assign_to_agent=True.')
 
     tc_params = {'teamId': str(team_id), 'appId': str(project_id), 'sprintId': str(sprint_id)}
@@ -2044,47 +2490,37 @@ async def _pick_agent(api_key, team_id, project_id, testcase_id, sprint_id, test
         tc_params['testRunsExecutionRunId'] = str(test_run_execution_run_id)
     tc_resp = await make_api_request('GET', '/testpert/sprintTestCase/get', api_key, params=tc_params)
     if not (isinstance(tc_resp, dict) and tc_resp.get('status') == 'OK'):
-        return None, _agent_failed('Could not fetch sprint test case data for agent assignment',
+        logger.warning(f"sprintTestCase/get failed for {where}: {tc_resp.get('message') if isinstance(tc_resp, dict) else tc_resp}")
+        return None, _agent_failed(where, 'Could not fetch sprint test case data for agent assignment',
                                    'Testpert may not be enabled for this project, or the sprint_id is invalid.')
 
     tc_detail = next((t for t in tc_resp.get('testCaseDetails') or []
                       if str(t.get('test_case_id', '')) == str(testcase_id)), None)
     if tc_detail is None:
-        return None, _agent_failed('Test case is not in this sprint',
+        scope = 'test run' if test_run_execution_run_id else 'sprint'
+        return None, _agent_failed(where, f'Test case is not in this {scope}',
                                    'Link the test case to the sprint before assigning it to an agent.')
 
-    # The sprint listing flags each enabled agent user as is_<agent>_enabled.
-    agent_ids = {}
-    for member in tc_resp.get('teamMembersDetails') or []:
-        if str(member.get('type') or member.get('user_type') or '').upper() != 'AGENT':
-            continue
-        for agent in ('api_agent', 'browser_agent', 'mobile_agent'):
-            if str(member.get(f'is_{agent}_enabled')) == '1':
-                agent_ids.setdefault(agent, str(member.get('user_id', '')))
+    agent_key, problem = _route_agent(tc_detail, platform_type)
+    if problem:
+        return None, _agent_failed(where, *problem)
 
-    tc_platform = str(platform_type or tc_detail.get('platform_type') or '').upper()
-    if str(tc_detail.get('is_api_test_case') or '0') == '1':
-        agent, label = 'api_agent', 'API Agent'
-    elif tc_platform in BROWSER_AGENT_PLATFORM_TYPES:
-        agent, label = 'browser_agent', 'Browser Agent'
-    elif tc_platform in MOBILE_AGENT_PLATFORM_TYPES:
-        agent, label = 'mobile_agent', 'Mobile Agent'
-    else:
-        return None, _agent_failed(
-            f"No agent runs test cases with platform type '{tc_platform or 'not set'}'",
-            "Call again with platform_type='DESKTOP_WEB' for the Browser Agent, or a mobile platform type "
-            "(ANDROID, ANDROID_MOBILE_WEB, IOS, IOS_MOBILE_WEB) for the Mobile Agent.")
-
-    if not agent_ids.get(agent):
-        return None, _agent_failed(f'The {label} is not enabled for this project',
-                                   f'Enable the {label} in the project settings before assigning.')
-    return {'user_id': agent_ids[agent], 'label': label}, None
+    settings = await _project_agent_settings(api_key, team_id, project_id)
+    if settings is None:
+        return None, _agent_failed(where, "Could not read the project's agent settings", 'Try again in a moment.')
+    agent = _enabled_agents(settings, tc_resp.get('teamMembersDetails')).get(agent_key)
+    if not agent:
+        label = AGENT_LABELS[agent_key]
+        return None, _agent_failed(where, f'The {label} is not enabled for this project',
+                                   f'Enable the {label} in the project settings before assigning (bugasura_list_agents shows which are on).')
+    return agent, None
 
 
 async def _assign_to_agent(api_key, team_id, project_id, testcase_id, sprint_id, test_run_execution_run_id, agent) -> dict:
     """Assign the sprint test case to the agent _pick_agent chose; runs after the field update was saved."""
     label = agent['label']
-    logger.info(f"Assigning testcase_id={testcase_id} to the {label} in sprint_id={sprint_id}")
+    where = _agent_scope(testcase_id, sprint_id, test_run_execution_run_id)
+    logger.info(f"Assigning {where} to the {label} (user_id={agent['user_id']})")
     agent_payload = {
         'appId': str(project_id),
         'teamId': str(team_id),
@@ -2099,14 +2535,14 @@ async def _assign_to_agent(api_key, team_id, project_id, testcase_id, sprint_id,
         agent_payload['testRunsExecutionRunId'] = str(test_run_execution_run_id)
     agent_resp = await make_api_request('POST', '/testpert/sprintTestCase/update', api_key, data=agent_payload)
     if not isinstance(agent_resp, dict) or agent_resp.get('status') != 'OK':
-        return _agent_failed(f'Could not assign the test case to the {label}',
+        return _agent_failed(where, f'Could not assign the test case to the {label}',
                              (agent_resp.get('message') if isinstance(agent_resp, dict) else '') or 'The assignment was rejected.',
                              test_case_updated=True)
     # warningMsg means the API dropped the agent from the assignees.
     if str(agent_resp.get('warningMsg') or '0') == '1':
-        return _agent_failed(f'The {label} was not assigned', agent_resp.get('message') or '', test_case_updated=True)
+        return _agent_failed(where, f'The {label} was not assigned', agent_resp.get('message') or '', test_case_updated=True)
     # Runs copy the sprint's assignee and executor flag only when they are created.
-    scope = ('this test run' if test_run_execution_run_id else
+    scope = ('this test run; the agent picks it up on its own, track it with bugasura_run_agent_test_cases' if test_run_execution_run_id else
              'test runs created from now on; pass test_run_execution_run_id to assign it in an existing run')
     return {'status': 'OK', 'agent': label, 'message': f'Assigned to the {label} for {scope}.'}
 

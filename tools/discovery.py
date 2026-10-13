@@ -3,11 +3,11 @@ from typing import Literal
 
 from pydantic import Field
 
-from output_types import ToolResponse
-from app import mcp
-from auth import fetch_user_context, get_api_key
-from client import paginated, respond
-from helpers import search_projects_by_name
+from core.app import mcp
+from utils.auth import fetch_user_context, get_api_key
+from utils.formatting import paginated, respond
+from utils.output_types import ToolResponse
+from utils.resolvers import search_projects_by_name
 
 
 @mcp.tool(

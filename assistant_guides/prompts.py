@@ -1,6 +1,6 @@
 """MCP prompt registrations."""
-from app import mcp
-from config import MCP_CONNECT_URL
+from config.config import MCP_CONNECT_URL
+from core.app import mcp
 
 
 @mcp.prompt(title="Connect to Bugasura")

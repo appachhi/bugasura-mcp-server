@@ -1,12 +1,9 @@
 """Shared configuration: environment variables + logging setup."""
-import logging
-import os
-import tempfile
+import logging, os, tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
-
 from dotenv import load_dotenv
 
 # Per-tenant dotenv selection. MCP_ENV_FILE must come from the real process
@@ -17,7 +14,8 @@ from dotenv import load_dotenv
 _env_name = os.getenv("MCP_ENV_FILE", "").strip()
 _env_path = Path(_env_name) if _env_name else Path(".env")
 if not _env_path.is_absolute():
-    _env_path = Path(__file__).resolve().parent / _env_path
+    # Resolved against the repo root, one level above this config/ package
+    _env_path = Path(__file__).resolve().parents[1] / _env_path
 if _env_name and not _env_path.is_file():
     raise RuntimeError(f"MCP_ENV_FILE points at a missing file: {_env_path}")
 
@@ -187,6 +185,8 @@ ERROR_STATUSES = {"failed", "error", "api_key_required"}
 TestCasePlatformType = Literal["DESKTOP_WEB", "ANDROID", "ANDROID_MOBILE_WEB", "IOS", "IOS_MOBILE_WEB", "MULTI_PLATFORM"]
 BROWSER_AGENT_PLATFORM_TYPES = {"DESKTOP_WEB"}
 MOBILE_AGENT_PLATFORM_TYPES = {"ANDROID", "ANDROID_MOBILE_WEB", "IOS", "IOS_MOBILE_WEB"}
+# The agents a project can enable: the keys of apps.agent_settings, whose email_id names the AGENT user.
+AGENT_LABELS = {"api_agent": "API Agent", "browser_agent": "Browser Agent", "mobile_agent": "Mobile Agent"}
 
 # Test case statuses /v1/testcases/update accepts: the progress of the work vs. its result.
 TestCaseExecutionStatus = Literal["NEW", "IN_PROGRESS", "BLOCKED", "CANCELLED", "COMPLETED"]

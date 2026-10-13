@@ -17,19 +17,19 @@ from typing import Any, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from output_types import ToolResponse
-from app import mcp
-from auth import get_api_key, validate_api_key
-from auth import current_user_id
-from client import UPLOAD_TIMEOUT, in_http_request, logger, make_api_request
-from config import (
-    KB_MAX_FILE_SIZE_MB, TESTPERT_KB_DOC_EXTS, TESTPERT_KB_IMG_EXTS, TESTPERT_KB_MAX_IMAGE_SIZE_MB,
+from config.config import (
+    logger, KB_MAX_FILE_SIZE_MB, TESTPERT_KB_DOC_EXTS, TESTPERT_KB_IMG_EXTS,
+    TESTPERT_KB_MAX_IMAGE_SIZE_MB, WEB_BASE_URL,
 )
-from uploads import claim, discard, release, staged_paths
-from helpers import (
-    close_upload_files, download_url_tmp, infer_filename_from_url_path, local_path_rejected, normalise_share_url,
-    select_team_project_context, WEB_BASE_URL,
-)
+from core.app import mcp
+from core.uploads import claim, discard, release, staged_paths
+from utils.attachments import close_upload_files
+from utils.auth import get_api_key, validate_api_key, current_user_id
+from utils.client import UPLOAD_TIMEOUT, in_http_request, make_api_request
+from utils.files import local_path_rejected
+from utils.output_types import ToolResponse
+from utils.resolvers import IdOrName, select_team_project_context
+from utils.urls import download_url_tmp, infer_filename_from_url_path, normalise_share_url
 from tools.projects import get_project_details
 from tools.knowledge_base import fetch_kb_documents
 
@@ -194,7 +194,7 @@ _DEEPEN_SUBCAT_ORDER = ['product', 'business', 'tech', 'test', 'user']
 )
 async def create_testpert_sprint(
     sprint_name: str = Field(description="Name of the sprint (5-250 characters required, min_length=1)", min_length=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     start_date: Optional[str] = Field(default=None, description="Sprint start date in YYYY-MM-DD format (optional)"),
     end_date: Optional[str] = Field(default=None, description="Sprint end date in YYYY-MM-DD format (optional)"),
@@ -424,7 +424,7 @@ async def upload_testpert_kb(
         'document', 'api_docs', 'meeting_notes', 'user_flow', 'test_data',
         'architecture_image', 'db_schema_image', 'wireframe_image', 'design_image', 'flow_image'
     ] = Field(default='document', description="Knowledge-base source type for these files. 'document'/'api_docs'/'meeting_notes'/'user_flow'/'test_data' take text docs; the '*_image' types take images."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -796,7 +796,7 @@ async def start_skip_testplan(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=45, description="Upper bound on polling while the test plan is generated (0-45, default 45). Capped at 45s to stay under MCP client timeouts; re-call to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -960,7 +960,7 @@ async def advance_testpert(
     testpert_flow_attempt: Optional[int] = Field(default=None, description="Retry attempt counter for REGENERATE flows (0-99). Usually omit."),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response). When provided, a clickable sprint link is included once a phase is reached."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting on long phases."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1106,7 +1106,7 @@ async def advance_testpert(
 async def get_testpert_requirement_contexts(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     category: Literal['all', 'deepen_questions', 'missing', 'risk'] = Field(default='all', description="Which context set to return (default: all)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1227,7 +1227,7 @@ async def add_testpert_context_question(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     sub_category: str = Field(default='product', description="Sub-category for the question. One of: product, business, tech, test, user (default: product)."),
     answer: Optional[str] = Field(default=None, description="Optional initial answer/response for the question (default: empty — unanswered)."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Add a new deepen-requirement context question via /v1/testpertrequirementcontexts/add."""
@@ -1285,7 +1285,7 @@ async def add_testpert_context_question(
 async def delete_testpert_context_question(
     requirement_context_id: int = Field(description="ID of the context question to delete (from bugasura_testpert_get_requirement_contexts deepen_questions_list)."),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Delete a deepen-requirement context question via /v1/testpertrequirementcontexts/delete."""
@@ -1336,7 +1336,7 @@ async def update_testpert_requirement_contexts(
     )),
     advance: bool = Field(default=True, description="If True (default) and the sprint is at MISSING_REQUIREMENTS, advance to RISKS_IN_REQUIREMENTS once every missing requirement has a decision. Undecided rows left over keep the sprint where it is (the count comes back as undecided_missing_requirements). No effect at other stages (e.g. deepen-questions or risks) — advance those manually with bugasura_testpert_advance."),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1503,7 +1503,7 @@ async def update_testpert_requirement_contexts(
 )
 async def get_testpert_testplan(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Read the sprint's test plan via /v1/testpert/sprint/testplan/get."""
@@ -1606,7 +1606,7 @@ async def update_testpert_testplan(
     test_models: Optional[Any] = Field(default=None, description="Test models: a list of names, or a comma-separated string."),
     sprint_test_data: Optional[Any] = Field(default=None, description="Edited sprint test data structure (shape from get_testplan)."),
     test_plan_details: Optional[dict] = Field(default=None, description="Advanced: full testPlanDetails object sent as-is; other params are merged on top of it."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1709,7 +1709,7 @@ async def update_testpert_testplan(
 )
 async def get_testpert_coverage(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Get the coverage mind map via /v1/testpert/getSprintCoverageMindMap (flips to TEST_COVERAGE)."""
@@ -1761,7 +1761,7 @@ async def generate_testpert_testcases(
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (for the sprint link). Optional — resolved automatically from the sprint if omitted."),
     elapsed_seconds: int = Field(default=0, description="Internal: cumulative seconds already spent polling across earlier re-calls. Pass back the value the previous response's next_step gives you."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1929,7 +1929,7 @@ async def regenerate_testpert_testcases(
     is_retry: bool = Field(default=False, description="True to retry a sub-feature in ERROR status (the retry/circular-arrow button); False (default) to regenerate a COMPLETED sub-feature (the green refresh icon)."),
     elapsed_seconds: int = Field(default=0, description="Internal: cumulative seconds already spent polling across earlier re-calls. Pass back the elapsed_seconds value from the previous response to keep polling."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -2290,7 +2290,7 @@ async def enrich_testpert_requirements(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (for the sprint link). Optional — resolved automatically if omitted."),
     max_wait_seconds: int = Field(default=45, description="Upper bound on polling while enrichment runs (0-45, default 45). Capped at 45s; re-call to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -2427,7 +2427,7 @@ async def generate_testpert_coverage(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=45, description="Upper bound on polling for whichever phase is currently running — enrich or test plan (0-45, default 45). Capped at 45s; re-call to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -2651,7 +2651,7 @@ async def generate_testpert_coverage(
 )
 async def get_testpert_features(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Read the feature tree via /v1/testpert/testpertfeatures/getTestpertFeatures and group it."""
@@ -2732,7 +2732,7 @@ async def add_testpert_feature(
     is_parent: bool = Field(default=False, description="True to add a top-level feature; False (default) to add a sub-feature under parent_feature_id."),
     is_api_endpoint: bool = Field(default=False, description="Mark the feature as an API endpoint (default False)."),
     requirement_id: Optional[int] = Field(default=None, description="Optional requirement id to link the sub-feature to."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Add a feature/sub-feature via /v1/testpert/testpertfeatures/addTestpertFeatures."""
@@ -2787,7 +2787,7 @@ async def delete_testpert_feature(
     feature_id: int = Field(description="Id of the feature / sub-feature to delete."),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     requirement_id: Optional[Any] = Field(default=None, description="Optional requirement id (or list of ids) linked to the feature, to unlink on delete."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Delete a feature/sub-feature via /v1/testpert/testpertfeatures/deleteTestpertFeatures."""
@@ -2840,7 +2840,7 @@ async def generate_testpert_sprint_context(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -2936,7 +2936,7 @@ async def generate_testpert_sprint_context(
 )
 async def get_testpert_kb_validation(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """GET /v1/testpert/sprint/getContext (dataType=USER_VALIDATION) and extract the flagged files."""
@@ -3061,7 +3061,7 @@ async def resolve_testpert_kb_validation(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -3187,7 +3187,7 @@ async def resolve_testpert_kb_validation(
 )
 async def get_testpert_sprint_context(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """GET /v1/testpert/sprint/getContext (dataType=SPRINT_CONTEXT) and extract the parked verdict."""
@@ -3258,7 +3258,7 @@ async def confirm_testpert_sprint_context(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on this call's polling (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -3385,7 +3385,7 @@ async def answer_testpert_context_questions(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     advance: bool = Field(default=True, description="If True (default), advance to GENERATE_MISSING_REQUIREMENTS and poll until MISSING_REQUIREMENTS. If False, just save the answers."),
     max_wait_seconds: int = Field(default=30, description="Upper bound on polling when advance=True (0-45, default 30). Capped at 45s; call again to keep waiting."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -3568,7 +3568,7 @@ async def answer_testpert_context_questions(
 )
 async def list_testpert_kb(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """List knowledge-base items via /v1/testpertKB/sprint/get."""
@@ -3612,7 +3612,7 @@ async def delete_testpert_kb(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     kb_source: Optional[str] = Field(default=None, description="Optional source of the item (e.g. FILE_UPLOAD), as listed by list_kb."),
     kb_source_type: Optional[str] = Field(default=None, description="Optional source type (e.g. REQUIREMENTS), as listed by list_kb."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Delete a knowledge-base item via /v1/testpertKB/sprint/delete."""
@@ -3663,7 +3663,7 @@ async def delete_testpert_kb(
 async def link_testpert_requirements(
     requirement_ids: List[int] = Field(description="Internal requirement_id values to link (the `requirement_id` field from bugasura_list_requirements — NOT the display `id`)."),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """

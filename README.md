@@ -138,7 +138,7 @@ codex mcp login bugasura
 <details>
 <summary><b>Cursor</b></summary>
 
-[Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=bugasura&config=eyJ1cmwiOiJodHRwczovL21jcC5zdGFnZS5idWdhc3VyYS5pby9tY3AifQ==), or add to `~/.cursor/mcp.json`:
+[Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=bugasura&config=eyJ1cmwiOiJodHRwczovL21jcC5idWdhc3VyYS5pby9tY3AifQ==), or add to `~/.cursor/mcp.json`:
 
 ```json
 {
@@ -837,6 +837,9 @@ Show all projects in team 456
 - `bugasura_delete_test_case` - Delete a test case permanently (supports ID, test case key like "TES5", or scenario name)
 - `bugasura_link_test_cases_to_sprint` - Add existing test cases to a sprint (comma-separated test case IDs)
 - `bugasura_unlink_test_cases_from_sprint` - Remove test cases from a sprint; they stay in the project
+- `bugasura_list_agents` - List the AI agents (API, Browser, Mobile) enabled on a project and what each one runs
+- `bugasura_assign_test_cases_to_agent` - Assign sprint test cases to the agent for their platform, in the sprint or in a test run
+- `bugasura_run_agent_test_cases` - Queue a test run's agent test cases (`action='start'`) or report their progress (`action='status'`)
 
 **Note:** All test case tools support interactive context selection. Delete operations can be performed using numeric IDs, test case keys (e.g., "TES5"), or scenario names.
 
@@ -1221,7 +1224,7 @@ The hosted version at `https://mcp.bugasura.io/mcp` uses streamable HTTP. Built 
 
 > For whoever operates the server. Users never see any of this.
 
-The MCP server is an OAuth 2.0 front door built on FastMCP's `OAuthProxy` (`oauth.py`). MCP clients identify themselves either through Dynamic Client Registration or with a Client ID Metadata Document (CIMD, a URL they use as their `client_id`), and run PKCE against it. Both are accepted; the server itself is one pre-registered, confidential client of Bugasura and exchanges the code with the Bugasura API server-to-server. Bugasura's token never reaches the MCP client — the server issues its own short-lived token and swaps it on every request, validating the Bugasura token with `POST /v1/oauth/introspect` (cached for 60 s).
+The MCP server is an OAuth 2.0 front door built on FastMCP's `OAuthProxy` (`core/oauth.py`). MCP clients identify themselves either through Dynamic Client Registration or with a Client ID Metadata Document (CIMD, a URL they use as their `client_id`), and run PKCE against it. Both are accepted; the server itself is one pre-registered, confidential client of Bugasura and exchanges the code with the Bugasura API server-to-server. Bugasura's token never reaches the MCP client — the server issues its own short-lived token and swaps it on every request, validating the Bugasura token with `POST /v1/oauth/introspect` (cached for 60 s).
 
 ### 1. Get client credentials from Bugasura
 
@@ -1250,7 +1253,7 @@ Add to the instance's dotenv file (`.env`, or the tenant file named by `MCP_ENV_
 | `OAUTH_INTROSPECTION_CACHE_TTL` | no | Seconds a positive token check is cached (default 60). Also bounds how long a revoked session keeps working. |
 | `BUGASURA_OAUTH_*_URL` | no | Override the derived upstream endpoints (`{WEB_BASE_URL}oauth/authorize`, `{API_BASE}/v1/oauth/{token,introspect,revoke}`). |
 
-Start with `--forwarded-allow-ips` set to the reverse proxy's address. The server validates `Host` and `Origin` as the MCP spec requires against DNS rebinding (`app.py`). Allowed are the host and origin of `MCP_PUBLIC_BASE_URL`, plus loopback, so a reverse proxy works whether or not it preserves `Host`. A request with a foreign `Origin` gets `403` and one with an unknown `Host` gets `421`. Requests without an `Origin` header (CLI and desktop clients, claude.ai's connector) are unaffected; a browser page on another origin, such as the MCP Inspector's web UI against a deployed server, is rejected.
+Start with `--forwarded-allow-ips` set to the reverse proxy's address. The server validates `Host` and `Origin` as the MCP spec requires against DNS rebinding (`core/app.py`). Allowed are the host and origin of `MCP_PUBLIC_BASE_URL`, plus loopback, so a reverse proxy works whether or not it preserves `Host`. A request with a foreign `Origin` gets `403` and one with an unknown `Host` gets `421`. Requests without an `Origin` header (CLI and desktop clients, claude.ai's connector) are unaffected; a browser page on another origin, such as the MCP Inspector's web UI against a deployed server, is rejected.
 
 CIMD clients make the server fetch their metadata document over https, with private and loopback addresses blocked. A tenant whose host can only reach the internet through an egress proxy sets `FASTMCP_SSRF_TRUST_PROXY=true` and `HTTPS_PROXY`.
 
@@ -1269,13 +1272,13 @@ Then add `https://xxxx.ngrok-free.app/mcp` as a custom connector. The tunnel's c
 
 By default users see one screen on first connect: Bugasura's own login + consent page. FastMCP's proxy also has its own interstitial that names the MCP client and its callback address; it is off (`OAUTH_REQUIRE_CONSENT=false`) so the flow looks like Bugasura end to end.
 
-What keeps that safe: MCP clients register themselves (DCR) or bring their own metadata document (CIMD), so the server enforces a redirect-URI allow-list at registration, when the metadata document is loaded, and again at `/authorize` (`DEFAULT_ALLOWED_REDIRECT_URIS` in `config.py`). Only loopback addresses and the callbacks of the clients documented above (Claude Desktop / claude.ai, VS Code including Cline and Roo Code, Claude Code, Cursor, Windsurf, Google Antigravity, ChatGPT connectors including Codex) are accepted, plus anything in `OAUTH_ALLOWED_REDIRECT_URIS`; a client registering any other callback gets `invalid_redirect_uri` (DCR rejections are logged as `Rejected client registration`; a CIMD client whose callback is not allowed is rejected without a log line, so when a new client cannot sign in, check its callback against the list first). Without that check, a rogue client could register its own callback and receive a user's session. Set `OAUTH_REQUIRE_CONSENT=true` to bring the interstitial back as a second layer.
+What keeps that safe: MCP clients register themselves (DCR) or bring their own metadata document (CIMD), so the server enforces a redirect-URI allow-list at registration, when the metadata document is loaded, and again at `/authorize` (`DEFAULT_ALLOWED_REDIRECT_URIS` in `config/config.py`). Only loopback addresses and the callbacks of the clients documented above (Claude Desktop / claude.ai, VS Code including Cline and Roo Code, Claude Code, Cursor, Windsurf, Google Antigravity, ChatGPT connectors including Codex) are accepted, plus anything in `OAUTH_ALLOWED_REDIRECT_URIS`; a client registering any other callback gets `invalid_redirect_uri` (DCR rejections are logged as `Rejected client registration`; a CIMD client whose callback is not allowed is rejected without a log line, so when a new client cannot sign in, check its callback against the list first). Without that check, a rogue client could register its own callback and receive a user's session. Set `OAUTH_REQUIRE_CONSENT=true` to bring the interstitial back as a second layer.
 
 ### 3. Reverse proxy
 
 Forward the whole origin, not just `/mcp`. FastMCP mounts these at the root: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/mcp`, `/authorize`, `/token`, `/register`, `/revoke`, `/auth/callback`, `/consent`, plus `/mcp`, `/health`, `/sse` and `/upload/<upload_id>`. Only `/mcp` requires a token; an upload link's unguessable, single-use id is its own credential.
 
-Upload links accept up to 100 MB per request. A user can hold 20 open links and 500 MB of uploaded files waiting for a tool, and the staging directory as a whole 5 GB (the `UPLOAD_MAX_*` constants in `config.py`). Keep the reverse proxy's request-body limit at or above 101 MB (Apache `LimitRequestBody`, nginx `client_max_body_size`), and its proxy timeout long enough for a 100 MB upload from a slow connection (for example 300 seconds).
+Upload links accept up to 100 MB per request. A user can hold 20 open links and 500 MB of uploaded files waiting for a tool, and the staging directory as a whole 5 GB (the `UPLOAD_MAX_*` constants in `config/config.py`). Keep the reverse proxy's request-body limit at or above 101 MB (Apache `LimitRequestBody`, nginx `client_max_body_size`), and its proxy timeout long enough for a 100 MB upload from a slow connection (for example 300 seconds).
 
 ### 4. Check it
 

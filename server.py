@@ -2,22 +2,16 @@
 """
 Bugasura MCP Server — entry point.
 
-Server logic lives in the flat modules at the repo root (`app`, `client`,
-`auth`, `helpers`, `tools/*`, `resources`, `prompts`). This module only parses
-CLI arguments and dispatches to the selected transport. Importing `tools`,
-`resources`, and `prompts` triggers FastMCP registration via decorator
-side-effects.
+Server logic lives in the packages next to this file: `config/` (settings),
+`core/` (FastMCP app, OAuth, upload links), `utils/` (API client, auth,
+resolvers, formatting), `tools/` and `assistant_guides/` (prompts,
+resources). This module only parses CLI arguments and dispatches to the
+selected transport. Importing `tools` and `assistant_guides` triggers FastMCP
+registration via decorator side-effects.
 """
-import argparse
-import sys
-
-import uvicorn
-
-import prompts  # noqa: F401
-import resources  # noqa: F401
-import tools  # noqa: F401
-from app import app, mcp
-from config import API_BASE, MCP_PUBLIC_BASE_URL, MCP_SERVER_NAME, logger, oauth_configured
+import argparse, sys, uvicorn, assistant_guides, tools  # noqa: F401  (registration side effects)
+from config.config import API_BASE, MCP_PUBLIC_BASE_URL, MCP_SERVER_NAME, logger, oauth_configured
+from core.app import app, mcp
 
 
 def main():

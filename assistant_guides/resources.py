@@ -1,8 +1,8 @@
 """MCP resource registrations (bugasura://...)."""
 import json
 
-from app import SERVER_VERSION, mcp
-from config import WEB_BASE_URL
+from config.config import WEB_BASE_URL
+from core.app import SERVER_VERSION, mcp
 
 
 @mcp.resource("bugasura://config/settings", title="Server Configuration", mime_type="application/json")

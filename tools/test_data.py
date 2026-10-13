@@ -11,34 +11,34 @@ Files are public CDN objects: the listing carries each file's full URL (`json_fi
 which is the download link. Uploads send the files themselves as multipart `testData[]` parts
 to /v1/projectTestDataFiles/add, which stores them on the CDN.
 """
-import asyncio, contextlib, json, mimetypes, os, unicodedata
+import asyncio, contextlib, json, mimetypes, os, unicodedata, httpx
 from typing import Any, List, Literal, Optional
 
-import httpx
 from pydantic import Field
 
-from output_types import ToolResponse
-from app import mcp
-from auth import current_user_id, get_api_key, validate_api_key
-from client import in_http_request, paginate_upstream, respond, logger, make_api_request
-from config import (
-    TEST_DATA_APP_BUILD_CATEGORY, TEST_DATA_APP_BUILD_EXTS,
-    TEST_DATA_CATEGORY_DESCRIPTION_MAX_LENGTH, TEST_DATA_DB_META_KEYS,
-    TEST_DATA_DEFAULT_FILE_CATEGORIES, TEST_DATA_DEFAULT_VARIABLE_KEYS,
-    TEST_DATA_DESCRIPTION_MAX_LENGTH, TEST_DATA_FILE_EXTS, TEST_DATA_GLOBALS_SCOPE,
-    TEST_DATA_MAX_FILE_SIZE_MB, TEST_DATA_MAX_FILES_PER_UPLOAD, TEST_DATA_MAX_INLINE_CONTENT_BYTES,
-    TEST_DATA_MAX_UPLOAD_TOTAL_MB, TEST_DATA_NAME_MAX_LENGTH,
+from config.config import (
+    logger, TEST_DATA_APP_BUILD_CATEGORY, TEST_DATA_APP_BUILD_EXTS,
+    TEST_DATA_CATEGORY_DESCRIPTION_MAX_LENGTH, TEST_DATA_DB_META_KEYS, TEST_DATA_DEFAULT_FILE_CATEGORIES,
+    TEST_DATA_DEFAULT_VARIABLE_KEYS, TEST_DATA_DESCRIPTION_MAX_LENGTH, TEST_DATA_FILE_EXTS,
+    TEST_DATA_GLOBALS_SCOPE, TEST_DATA_MAX_FILE_SIZE_MB, TEST_DATA_MAX_FILES_PER_UPLOAD,
+    TEST_DATA_MAX_INLINE_CONTENT_BYTES, TEST_DATA_MAX_UPLOAD_TOTAL_MB, TEST_DATA_NAME_MAX_LENGTH,
     TEST_DATA_OFFICE_VIEWER_EXTS, TEST_DATA_OFFICE_VIEWER_URL, TEST_DATA_TEXT_EXTS,
     TEST_DATA_UPLOAD_CONFIRM_ATTEMPTS, TEST_DATA_UPLOAD_CONFIRM_INTERVAL_SECONDS,
     TEST_DATA_UPLOAD_TIMEOUT_BASE_SECONDS, TEST_DATA_UPLOAD_TIMEOUT_MAX_SECONDS,
     TEST_DATA_UPLOAD_TIMEOUT_SECONDS_PER_MB, TEST_DATA_VALUE_MAX_LENGTH,
 )
-from helpers import (
+from core.app import mcp
+from core.uploads import discard, staged_paths
+from utils.auth import current_user_id, get_api_key, validate_api_key
+from utils.client import in_http_request, make_api_request
+from utils.files import create_folder, local_path_rejected, remove_created_folder, resolve_save_destination
+from utils.formatting import paginate_upstream, respond
+from utils.output_types import ToolResponse
+from utils.resolvers import IdOrName, select_team_project_context
+from utils.urls import (
     download_url_to_path, download_url_tmp, fetch_url_bytes, infer_filename_from_url_path,
-    create_folder, local_path_rejected, normalise_share_url, remove_created_folder, resolve_save_destination,
-    select_team_project_context,
+    normalise_share_url,
 )
-from uploads import discard, staged_paths
 
 
 _ENVIRONMENT_FIELD = ("Environment: numeric ID, environment name, or 'Globals' for the "
@@ -59,7 +59,7 @@ _ENVIRONMENT_SCOPE_FIELD = ("Environment: numeric ID, environment name, or 'Glob
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_data_environments(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     include_globals: bool = Field(default=False, description="Also return the project-wide 'Globals' scope as a row (default: False)"),
     start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
@@ -114,7 +114,7 @@ async def list_test_data_environments(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_test_data_environment(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     environment: str = Field(default=TEST_DATA_GLOBALS_SCOPE, description=_ENVIRONMENT_FIELD, min_length=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
@@ -185,7 +185,7 @@ async def get_test_data_environment(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_test_data_environment(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     environment_name: str = Field(description="Name of the new environment (1-250 characters, unique in the project, not 'Globals')", min_length=1, max_length=TEST_DATA_NAME_MAX_LENGTH),
 ) -> ToolResponse:
@@ -244,7 +244,7 @@ async def create_test_data_environment(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def rename_test_data_environment(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     environment: str = Field(description="Environment to rename: numeric ID or name", min_length=1),
     new_environment_name: str = Field(description="New name (1-250 characters, unique in the project, not 'Globals')", min_length=1, max_length=TEST_DATA_NAME_MAX_LENGTH),
@@ -317,7 +317,7 @@ async def rename_test_data_environment(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def duplicate_test_data_environment(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     source_environment: str = Field(description="Environment to copy: numeric ID, name, or 'Globals'", min_length=1),
     new_environment_name: str = Field(description="Name of the new environment (1-250 characters, unique in the project, not 'Globals')", min_length=1, max_length=TEST_DATA_NAME_MAX_LENGTH),
@@ -389,7 +389,7 @@ async def duplicate_test_data_environment(
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_test_data_environment(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     environment: str = Field(description="Environment to delete: numeric ID or name ('Globals' cannot be deleted)", min_length=1),
     delete_contents: bool = Field(default=False, description="Required (true) when the environment still holds custom variables or files; they are deleted with it (default: False)"),
@@ -482,7 +482,7 @@ async def delete_test_data_environment(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_data_variables(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     environment: str = Field(default=TEST_DATA_GLOBALS_SCOPE, description=_ENVIRONMENT_FIELD, min_length=1),
     include_globals: bool = Field(default=False, description="With an environment, also return the global variables (default: False)"),
@@ -550,7 +550,7 @@ async def list_test_data_variables(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_test_data_variable(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     variable_key: str = Field(description="Variable key: letters, numbers, underscores or dashes, 1-250 characters (e.g. 'loginEmail')", min_length=1, max_length=TEST_DATA_NAME_MAX_LENGTH),
     environment: str = Field(description=_ENVIRONMENT_SCOPE_FIELD, min_length=1),
@@ -617,7 +617,7 @@ async def create_test_data_variable(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_test_data_variable(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     variable: str = Field(description="Variable to update: numeric ID or exact key (e.g. 'baseUrl')", min_length=1),
     environment: str = Field(description=_ENVIRONMENT_SCOPE_FIELD, min_length=1),
@@ -731,7 +731,7 @@ async def update_test_data_variable(
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_test_data_variable(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     variable: str = Field(description="Variable to delete: numeric ID or exact key", min_length=1),
     environment: str = Field(description=_ENVIRONMENT_SCOPE_FIELD, min_length=1),
@@ -803,7 +803,7 @@ async def delete_test_data_variable(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_data_files(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     environment: str = Field(default=TEST_DATA_GLOBALS_SCOPE, description=_ENVIRONMENT_FIELD, min_length=1),
     include_globals: bool = Field(default=False, description="With an environment, also return the global files (default: False)"),
@@ -867,7 +867,7 @@ async def list_test_data_files(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_test_data_file(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     file: str = Field(description="File: numeric ID or file name (e.g. 'users.csv')", min_length=1),
     environment: str = Field(default=TEST_DATA_GLOBALS_SCOPE, description=_ENVIRONMENT_FIELD, min_length=1),
@@ -944,7 +944,7 @@ async def get_test_data_file(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def download_test_data_file(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     file: str = Field(description="File to download: numeric ID or file name (e.g. 'users.csv')", min_length=1),
     environment: str = Field(default=TEST_DATA_GLOBALS_SCOPE, description=_ENVIRONMENT_FIELD, min_length=1),
@@ -1079,7 +1079,7 @@ async def download_test_data_file(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_data_app_builds(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
     max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
@@ -1151,7 +1151,7 @@ async def list_test_data_app_builds(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def upload_test_data_files(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     category: str = Field(description="Category for the files: a built-in one ('App Build', 'Attachments & Documents', 'Product Images', 'Sample Data Files') or a custom one from bugasura_list_test_data_categories", min_length=1),
     environment: str = Field(description=_ENVIRONMENT_SCOPE_FIELD, min_length=1),
@@ -1418,7 +1418,7 @@ async def upload_test_data_files(
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_test_data_file(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     file: str = Field(description="File to delete: numeric ID or file name (e.g. 'users.csv')", min_length=1),
     environment: str = Field(description=_ENVIRONMENT_SCOPE_FIELD, min_length=1),
@@ -1480,7 +1480,7 @@ async def delete_test_data_file(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_data_categories(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -1519,7 +1519,7 @@ async def list_test_data_categories(
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_test_data_category(
-    team_id: int = Field(description="Team identifier (required)", ge=1),
+    team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
     category_name: str = Field(description="Category name (1-250 characters, unique in the project ignoring case)", min_length=1, max_length=TEST_DATA_NAME_MAX_LENGTH),
     category_description: str = Field(description="What files in this category are for (1-250 characters, required)", min_length=1, max_length=TEST_DATA_CATEGORY_DESCRIPTION_MAX_LENGTH),

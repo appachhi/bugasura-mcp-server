@@ -10,11 +10,13 @@ from typing import Any, List, Literal, Optional
 
 from pydantic import Field
 
-from output_types import ToolResponse
-from app import mcp
-from auth import get_api_key, validate_api_key
-from client import paginate_upstream, respond, logger, make_api_request
-from helpers import select_team_project_context
+from config.config import logger
+from core.app import mcp
+from utils.auth import get_api_key, validate_api_key
+from utils.client import make_api_request
+from utils.formatting import paginate_upstream, respond
+from utils.output_types import ToolResponse
+from utils.resolvers import IdOrName, select_team_project_context
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +30,7 @@ from helpers import select_team_project_context
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_test_run_environments(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     include_app_builds: bool = Field(default=True, description="Also return the app build files for each environment (default: True)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
@@ -48,7 +50,7 @@ async def list_test_run_environments(
     if 'status' in context and context['status'] == 'selection_required':
         return respond(context, response_format)
 
-    params = {'appId': context['project_id']}
+    params = {'appId': context['project_id'], 'teamId': context['team_id']}
     if include_app_builds:
         params['fetchAppBuildList'] = 1
 
@@ -67,7 +69,7 @@ async def list_test_run_environments(
 )
 async def list_test_runs(
     report: str = Field(description="Sprint / report: sprint name or numeric report id. Discover names with bugasura_list_sprints."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     execution_source: Optional[str] = Field(default=None, description="Filter by execution source, e.g. 'HUMAN' or 'AUTOMATION' (optional)"),
     search_by_text: Optional[str] = Field(default=None, description="Search test runs by name (optional)"),
@@ -99,7 +101,14 @@ async def list_test_runs(
         params['sortBy'] = sort_by
 
     upstream = await make_api_request('GET', '/v1/testrunsExecution/getList', api_key, params=params)
-    return respond(paginate_upstream(upstream, offset=start_at, max_results=max_results, local=True), response_format)
+    if upstream.get('status') != 'OK':
+        return respond(upstream, response_format)
+    # The runs sit under schedulerDetails; the top-level projectReportList is every sprint in the project
+    details = upstream.get('schedulerDetails') or {}
+    runs = {'status': 'OK', 'message': upstream.get('message'), 'report_id': report_id,
+            'test_runs': details.get('test_runs') or [], 'schedulers': details.get('scheduler') or []}
+    return respond(paginate_upstream(runs, items_key='test_runs', offset=start_at, max_results=max_results, local=True),
+                   response_format)
 
 
 @mcp.tool(
@@ -116,7 +125,7 @@ async def list_test_runs(
 async def get_test_run_details(
     run: str = Field(description="Test run: run name or numeric run id"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -180,7 +189,7 @@ async def create_test_run(
     confirm: bool = Field(default=False, description="Set to True only after the user has provided all run details (name, execution_mode, etc.). When False (default) the tool returns an options form — show it to the user, collect their choices, then re-call with confirm=True and the filled values."),
     name: Optional[str] = Field(default=None, description="Name of the test run (2-250 characters, required when confirm=True)"),
     execution_mode: Literal["single", "scheduled"] = Field(default="single", description="'single' = run once now; 'scheduled' = recurring/scheduled run"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     environment: Optional[str] = Field(default=None, description="Test data environment: name or numeric id (optional)"),
     app_build: Optional[str] = Field(default=None, description="App build for the chosen environment: file name or numeric id (optional)"),
@@ -229,7 +238,7 @@ async def create_test_run(
 
     if not confirm:
         env_resp = await make_api_request('GET', '/v1/projectTestDataEnvironments/get', api_key,
-                                          params={'appId': context['project_id']})
+                                          params={'appId': context['project_id'], 'teamId': context['team_id']})
         env_options = []
         if isinstance(env_resp, dict) and env_resp.get('status') == 'OK':
             for e in (env_resp.get('environmentDetails') or []):
@@ -299,10 +308,10 @@ async def create_test_run(
             'message': 'Test run name must be at most 250 characters long (2-250 characters required)'
         }
 
-    environment_id, error = await _resolve_environment(api_key, context['project_id'], environment)
+    environment_id, error = await _resolve_environment(api_key, context['team_id'], context['project_id'], environment)
     if error:
         return error
-    app_build_file_id, app_build_file_name, error = await _resolve_app_build(api_key, context['project_id'], app_build)
+    app_build_file_id, app_build_file_name, error = await _resolve_app_build(api_key, context['team_id'], context['project_id'], app_build)
     if error:
         return error
 
@@ -389,7 +398,7 @@ async def create_test_run(
 async def update_test_run(
     run: str = Field(description="Test run to update: run name or numeric run id"),
     report: Optional[str] = Field(default=None, description="Sprint / report (sprint name or id). Required when 'run' is a name so it can be looked up."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     run_name: Optional[str] = Field(default=None, description="New test run name (1-250 characters, optional)"),
     execution_status: Optional[Literal["SCHEDULED", "IN_PROGRESS", "COMPLETED", "PAUSED"]] = Field(default=None, description="New execution status (optional)"),
@@ -424,10 +433,10 @@ async def update_test_run(
     if error:
         return error
 
-    environment_id, error = await _resolve_environment(api_key, context['project_id'], environment)
+    environment_id, error = await _resolve_environment(api_key, context['team_id'], context['project_id'], environment)
     if error:
         return error
-    app_build_file_id, app_build_file_name, error = await _resolve_app_build(api_key, context['project_id'], app_build)
+    app_build_file_id, app_build_file_name, error = await _resolve_app_build(api_key, context['team_id'], context['project_id'], app_build)
     if error:
         return error
 
@@ -483,7 +492,7 @@ async def update_test_run(
 async def update_test_run_scheduler(
     scheduler: str = Field(description="Scheduler to edit: scheduler name or numeric id"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     name: Optional[str] = Field(default=None, description="New run/scheduler name (optional)"),
     execution_mode: Optional[Literal["single", "scheduled"]] = Field(default=None, description="Switch mode: 'single' (one-time) or 'scheduled' (recurring) (optional)"),
@@ -562,10 +571,10 @@ async def update_test_run_scheduler(
                 'message': "recurrence_type='After' requires recurrence_count"
             }
 
-    environment_id, error = await _resolve_environment(api_key, context['project_id'], environment)
+    environment_id, error = await _resolve_environment(api_key, context['team_id'], context['project_id'], environment)
     if error:
         return error
-    app_build_file_id, app_build_file_name, error = await _resolve_app_build(api_key, context['project_id'], app_build)
+    app_build_file_id, app_build_file_name, error = await _resolve_app_build(api_key, context['team_id'], context['project_id'], app_build)
     if error:
         return error
     execution_config_json, config_error = _build_execution_config(app_build_file_id, app_build_file_name, execution_config)
@@ -639,7 +648,7 @@ async def update_test_run_scheduler(
 async def rerun_test_run(
     scheduler: str = Field(description="Scheduler to rerun: scheduler name or numeric id"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     is_add_rerun: int = Field(default=0, description="Rerun flag (default: 0)"),
 ) -> ToolResponse:
@@ -683,7 +692,7 @@ async def add_test_cases_to_run(
     run: str = Field(description="Test run to add test cases into: run name or numeric id"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
     testcase_ids: str = Field(description="Test case IDs to add: comma-separated (e.g. '12,15,18') or a JSON array. They must already be linked to the sprint (bugasura_link_test_cases_to_sprint); others are skipped."),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
     """Add (copy) test cases into an existing test run execution."""
@@ -736,7 +745,7 @@ async def add_test_cases_to_run(
 async def delete_test_run(
     runs: str = Field(description="Test run(s) to delete: comma-separated names and/or numeric ids (e.g. 'Smoke run, 102')"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     is_permanent_delete: int = Field(default=0, description="0 = move to trash (soft delete, default), 1 = permanently delete"),
 ) -> ToolResponse:
@@ -767,6 +776,7 @@ async def delete_test_run(
 
     payload = {
         "appId": context['project_id'],
+        "teamId": context['team_id'],
         "reportId": report_id,
         "testRunExecutionRunIds": ','.join(str(i) for i in run_ids),
         "isPermanentDelete": is_permanent_delete,
@@ -784,7 +794,7 @@ async def delete_test_run(
 async def delete_test_run_scheduler(
     schedulers: str = Field(description="Scheduler(s) to delete: comma-separated names and/or numeric ids (e.g. 'Nightly, 6')"),
     report: str = Field(description="Sprint / report: sprint name or numeric report id"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     is_permanent_delete: int = Field(default=0, description="0 = move to trash (soft delete, default), 1 = permanently delete"),
 ) -> ToolResponse:
@@ -815,6 +825,7 @@ async def delete_test_run_scheduler(
 
     payload = {
         "appId": context['project_id'],
+        "teamId": context['team_id'],
         "isPermanentDelete": is_permanent_delete,
     }
     if len(scheduler_ids) == 1:
@@ -1002,24 +1013,24 @@ async def _resolve_report(api_key: str, team_id: int, project_id: int, report: A
     return _pick_match(resp.get('sprintsList', []), report, 'sprint_id', 'sprint_name', 'report')
 
 
-async def _resolve_environment(api_key: str, project_id: int, environment: Any):
+async def _resolve_environment(api_key: str, team_id: int, project_id: int, environment: Any):
     """Resolve an environment identifier (numeric ID or name) -> environment_id."""
     if environment is None:
         return None, None
     if str(environment).strip().isdigit():
         return int(environment), None
-    resp = await make_api_request('GET', '/v1/projectTestDataEnvironments/get', api_key, params={'appId': project_id})
+    resp = await make_api_request('GET', '/v1/projectTestDataEnvironments/get', api_key, params={'appId': project_id, 'teamId': team_id})
     if resp.get('status') != 'OK':
         return None, _fetch_error('environment', resp)
     return _pick_match(resp.get('environmentDetails', []), environment, 'proj_test_data_env_id', 'environment_name', 'environment')
 
 
-async def _resolve_app_build(api_key: str, project_id: int, app_build: Any):
+async def _resolve_app_build(api_key: str, team_id: int, project_id: int, app_build: Any):
     """Resolve an app build identifier (numeric ID or file name) -> (file_id, file_name, error)."""
     if app_build is None:
         return None, None, None
     resp = await make_api_request('GET', '/v1/projectTestDataEnvironments/get', api_key, params={
-        'appId': project_id, 'fetchAppBuildList': 1
+        'appId': project_id, 'teamId': team_id, 'fetchAppBuildList': 1
     })
     if resp.get('status') != 'OK':
         return None, None, _fetch_error('app build', resp)

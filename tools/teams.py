@@ -3,14 +3,15 @@ from typing import Literal, Optional
 
 from pydantic import Field
 
-from output_types import ToolResponse
-from app import mcp
-from auth import get_api_key, invalidate_user_context_cache, validate_api_key
-from client import (
-    auth_required_payload, display_team_name, paginate_upstream, paginated, respond,
-    validate_id, logger, make_api_request,
+from config.config import logger
+from core.app import mcp
+from utils.auth import get_api_key, invalidate_user_context_cache, validate_api_key
+from utils.client import auth_required_payload, validate_id, make_api_request
+from utils.formatting import display_team_name, paginate_upstream, paginated, respond
+from utils.output_types import ToolResponse
+from utils.resolvers import (
+    IdOrName, fetch_team_members, find_user_ids_by_names_or_emails, resolve_team_identifier,
 )
-from helpers import fetch_team_members, find_user_ids_by_names_or_emails, resolve_team_identifier
 
 
 @mcp.tool(
@@ -108,7 +109,7 @@ async def list_teams(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def get_team(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (provide either team_id or team_name)"),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (provide either team_id or team_name)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
@@ -322,7 +323,7 @@ async def create_team(
 )
 async def update_team(
     new_team_name: str = Field(description="New team name (required, 1-50 characters, min_length=1)", min_length=1),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (provide either team_id or team_name)"),
     team_name: Optional[str] = Field(default=None, description="Current team name to search for (provide either team_id or team_name)"),
 ) -> ToolResponse:
     """
@@ -441,7 +442,7 @@ async def update_team(
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_team(
-    team_id: Optional[int] = Field(default=None, description="Team identifier (provide either team_id or team_name, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (provide either team_id or team_name)"),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (provide either team_id or team_name)"),
 ) -> ToolResponse:
     """
@@ -548,7 +549,7 @@ async def delete_team(
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def list_team_members(
-    team_id: int = Field(description="Team identifier", ge=1),
+    team_id: IdOrName = Field(description="Team id or name"),
     start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
     max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
@@ -613,7 +614,7 @@ async def list_team_members(
 )
 async def add_team_members(
     email_list: str = Field(description="Comma-separated email addresses to invite (e.g., 'john@example.com, jane@example.com')"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional if team_name provided)"),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (optional if team_id provided)"),
 ) -> ToolResponse:
     """
@@ -780,7 +781,7 @@ async def add_team_members(
 async def update_team_member(
     user_id: int = Field(description="User ID to update (the team member whose role to change)"),
     is_admin: int = Field(description="Admin status: 1 for admin, 0 for regular member"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional if team_name provided)"),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (optional if team_id provided)"),
 ) -> ToolResponse:
     """
@@ -908,7 +909,7 @@ async def update_team_member(
 )
 async def delete_team_user(
     user_identifier: str = Field(description="User to remove: user ID (e.g., '123'), email (e.g., 'john@example.com'), or name (e.g., 'John Doe')"),
-    team_id: Optional[int] = Field(default=None, description="Team identifier (optional if team_name provided, ge=1)", ge=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional if team_name provided)"),
     team_name: Optional[str] = Field(default=None, description="Team name to search for (optional if team_id provided)"),
     is_leave_team: int = Field(default=0, description="Set to 1 if user is leaving team themselves (default: 0 for admin removal)"),
 ) -> ToolResponse:

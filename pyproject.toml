@@ -1,7 +1,8 @@
 # This project is run in place via `python server.py` — it is not built or
 # distributed as a pip package. The [project] section below is kept for
 # dependency metadata only (install with `pip install -r requirements.txt`).
-# Setuptools is explicitly told there are no packages or modules to install.
+# Setuptools is explicitly told there are no packages or modules to install; the
+# config/, core/, utils/, tools/ and assistant_guides/ packages are imported from the repo root.
 
 [project]
 name = "bugasura-mcp-server"
