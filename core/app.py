@@ -19,6 +19,7 @@ from config.config import (
 from core.oauth import build_auth_provider
 from core.uploads import sweep_periodically, upload_files, upload_page
 from utils.auth import get_api_key, validate_api_key
+from utils.formatting import redact_secrets
 from utils.resolvers import resolve_team_identifier
 
 
@@ -82,6 +83,24 @@ class ToolErrorFlagMiddleware(Middleware):
         return result
 
 
+class SecretRedactionMiddleware(Middleware):
+    """Mask credential-named keys (SECRET_RESPONSE_KEYS) in every tool result, whatever the upstream response carried."""
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        result = await call_next(context)
+        payload = result.structured_content
+        if not isinstance(payload, dict):
+            return result
+        redacted = redact_secrets(payload)
+        if redacted == payload:
+            return result
+        tool = await context.fastmcp_context.fastmcp.get_tool(context.message.name)
+        wrapped = (tool.output_schema or {}).get("x-fastmcp-wrap-result")
+        clean = tool.convert_result(redacted["result"] if wrapped else redacted)
+        clean.is_error, clean.meta = result.is_error, result.meta
+        return clean
+
+
 class TeamNameMiddleware(Middleware):
     """Accept a team name wherever a tool takes team_id: swap it for the numeric id before the arguments are validated."""
 
@@ -103,6 +122,7 @@ class TeamNameMiddleware(Middleware):
         return await call_next(context)
 
 
+mcp.add_middleware(SecretRedactionMiddleware())
 mcp.add_middleware(ToolErrorFlagMiddleware())
 mcp.add_middleware(TeamNameMiddleware())
 

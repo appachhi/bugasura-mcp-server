@@ -116,7 +116,8 @@ def respond(data: Any, response_format: str = "json") -> Any:
     while surfacing the human-readable rendering to agents.
     """
     if response_format == 'markdown':
-        rendered = _render_markdown(data)
+        # Mask before rendering: the redaction middleware can't see into the rendered text
+        rendered = _render_markdown(redact_secrets(data))
         status = data.get('status') if isinstance(data, dict) else 'OK'
         return {'status': status or 'OK', 'markdown': rendered}
     return data
@@ -253,14 +254,17 @@ def filter_large_fields(data: dict) -> dict:
 
 
 def redact_secrets(data):
-    """Return a copy of data with every credential-named key masked, at any depth (JSON-object strings included)."""
-    if isinstance(data, str) and data.lstrip().startswith('{'):
+    """Return a copy of data with every credential-named key masked, at any depth (JSON strings included)."""
+    if isinstance(data, str) and data.lstrip().startswith(('{', '[')):
         try:
-            return json.dumps(redact_secrets(json.loads(data)))
+            parsed = json.loads(data)
         except ValueError:
             return data
+        redacted = redact_secrets(parsed)
+        # Leave a string with nothing to mask as it was, so its formatting survives
+        return data if redacted == parsed else json.dumps(redacted)
     if isinstance(data, dict):
-        return {k: ('[REDACTED]' if str(k).lower() in SECRET_RESPONSE_KEYS and v not in (None, '')
+        return {k: ('[REDACTED]' if str(k).lower().replace('_', '') in SECRET_RESPONSE_KEYS and v not in (None, '')
                     else redact_secrets(v))
                 for k, v in data.items()}
     if isinstance(data, list):

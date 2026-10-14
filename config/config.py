@@ -243,8 +243,12 @@ TEST_DATA_MAX_INLINE_CONTENT_BYTES = 1024 * 1024
 TEST_DATA_OFFICE_VIEWER_EXTS = {"doc", "docx", "ppt", "pptx", "xls", "xlsx"}
 TEST_DATA_OFFICE_VIEWER_URL = "https://view.officeapps.live.com/op/embed.aspx?src="
 
-# Credential keys masked out of tool responses; the KB import endpoints echo connection secrets back. Compared lower-cased.
-SECRET_RESPONSE_KEYS = {"accesstoken", "password", "apitoken", "api_key", "coda_api_key", "client_secret"}
+# Credential keys masked out of every tool response (KB imports echo connection secrets, user rows carry api_key
+# and slack_settings). Compared lower-cased with underscores dropped, so api_key / apiKey / apikey all match.
+SECRET_RESPONSE_KEYS = {"accesstoken", "refreshtoken", "botaccesstoken", "password", "apitoken", "apikey",
+                        "codaapikey", "clientsecret", "slacksettings", "slackadvancedsettings", "incomingwebhook",
+                        "teamownerapikey", "githubinstallationtoken", "jirasettings", "aiapiaccesstokens",
+                        "figmaapikey", "openaiapikey", "hooksecretkey", "toolsintegrationsettings"}
 
 # Extensions the Knowledge Base accepts on an upload (matches the web app's file picker).
 KB_DOC_EXTS = {'txt', 'pdf', 'doc', 'docx', 'md'}

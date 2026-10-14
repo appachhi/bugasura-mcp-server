@@ -1530,6 +1530,10 @@ async def get_testpert_testplan(
     skip_enrich = _extract_skip_enrich(_status_resp)
     _testrun_id = _extract_testrun_id(_status_resp)
 
+    # The API appends every team member's full user row; the plan doesn't need them
+    if isinstance(resp, dict):
+        resp.pop('teamMembersDetails', None)
+
     # Attach a compact, edit-ready view alongside the raw plan.
     if isinstance(resp, dict) and resp.get('status') == 'OK':
         plan = resp.get('testPlanDetails')
