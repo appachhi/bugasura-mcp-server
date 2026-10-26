@@ -6,7 +6,7 @@
 
 [project]
 name = "bugasura-mcp-server"
-version = "3.3.1"
+version = "3.3.2"
 description = "MCP server for Bugasura/Appachhi API (run in place, not installable)"
 readme = "README.md"
 requires-python = ">=3.10"

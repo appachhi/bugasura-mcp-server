@@ -3,7 +3,7 @@
   "name": "io.bugasura/bugasura",
   "title": "Bugasura",
   "description": "Bug tracking and test management: issues, test cases, sprints, runs, requirements and KB.",
-  "version": "3.3.1",
+  "version": "3.3.2",
   "websiteUrl": "https://bugasura.io",
   "repository": {
     "url": "https://github.com/appachhi/bugasura-mcp-server",

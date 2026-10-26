@@ -30,7 +30,7 @@ from utils.resolvers import resolve_team_identifier
 auth = build_auth_provider()
 
 # Reported by /health and by server/discover (serverInfo.version)
-SERVER_VERSION = "3.3.1"
+SERVER_VERSION = "3.3.2"
 
 # Returned by server/discover; how an assistant should drive the tools.
 SERVER_INSTRUCTIONS = """\
@@ -152,8 +152,18 @@ class StdioOnlyToolsMiddleware(Middleware):
         return result
 
 
+class ToolTitleAnnotationMiddleware(Middleware):
+    """Mirror each tool's title into annotations.title, where directory listings read it."""
+
+    async def on_list_tools(self, context: MiddlewareContext, call_next):
+        tools = await call_next(context)
+        return [t.model_copy(update={'annotations': t.annotations.model_copy(update={'title': t.title})})
+                if t.annotations and t.title and not t.annotations.title else t for t in tools]
+
+
 mcp.add_middleware(SecretRedactionMiddleware())
 mcp.add_middleware(ToolErrorFlagMiddleware())
+mcp.add_middleware(ToolTitleAnnotationMiddleware())
 mcp.add_middleware(StdioOnlyToolsMiddleware())
 mcp.add_middleware(TeamNameMiddleware())
 
