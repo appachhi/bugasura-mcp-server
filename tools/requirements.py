@@ -24,8 +24,8 @@ from utils.resolvers import IdOrName, find_user_ids_by_names_or_emails, select_t
         "List requirements for a project with pagination and filtering. Returns requirement summaries "
         "with support for folders, sprints, sorting, and search. Interactive team/project selection "
         "available. Each requirement's `id` is the REQ number the user sees in Bugasura (REQ1, REQ2...) "
-        "— show the user that id and the title, exactly as the requirements page does; `requirement_id` "
-        "is the internal id for other tools and must not be shown."
+        "and is what the requirements page shows next to the title; `requirement_id` is the internal "
+        "id that other tools take."
     ),
     annotations={"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
@@ -747,8 +747,7 @@ async def get_requirement_details(
     description=(
         "Attach files (specs, mockups, documents) to an existing requirement. On the hosted server get "
         "an upload link with bugasura_create_upload_link(purpose='attachment'), let the user upload the "
-        "file(s), then pass its upload_id here. Local STDIO servers can pass file_paths instead. "
-        "Never read or encode the file yourself."
+        "file(s), then pass its upload_id here. Local STDIO servers can pass file_paths instead."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
@@ -1801,7 +1800,7 @@ async def update_requirement_comment(
 @mcp.tool(
     name="bugasura_delete_requirement_comment",
     title="Delete Requirement Comment",
-    description="Delete a requirement comment and its attachments. Confirm with the user first; it cannot be undone. Only the comment's author or a team admin can delete it.",
+    description="Delete a requirement comment and its attachments. It cannot be undone. Only the comment's author or a team admin can delete it.",
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
 )
 async def delete_requirement_comment(

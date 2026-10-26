@@ -11,11 +11,10 @@ from utils.files import local_path_rejected
 # Shared Field descriptions for the attachment parameters of the issue/comment/requirement tools
 ATTACH_UPLOAD_ID_DESCRIPTION = (
     "upload_id from bugasura_create_upload_link(purpose='attachment'), once the user has uploaded the "
-    "file(s) to its link — the way to attach a file from the user's own computer on the hosted server. "
-    "Never read or encode the file yourself.")
+    "file(s) to its link — the way to attach a file from the user's own computer on the hosted server.")
 ATTACH_FILE_PATHS_DESCRIPTION = (
     "Absolute paths of files to attach on the machine running this server (local STDIO servers only; "
-    "rejected on the hosted server). Ask the user for the exact path — never guess it.")
+    "rejected on the hosted server), exactly as the user gave them.")
 
 
 def close_upload_files(files: list) -> None:

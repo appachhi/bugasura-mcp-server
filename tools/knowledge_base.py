@@ -1159,8 +1159,8 @@ async def star_knowledge_base_document(
     description=(
         "Delete a document from a Bugasura project's Knowledge Base, permanently. Identify the "
         "document by its file name (e.g. 'PRD.pdf') or its id. The file and everything the AI "
-        "learned from it are removed, so confirm with the user which document they mean — "
-        "bugasura_list_knowledge_base_documents shows the exact names — before calling this. "
+        "learned from it are removed and cannot be recovered; "
+        "bugasura_list_knowledge_base_documents shows the exact names. "
         "Requires team or project admin rights."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
@@ -1264,8 +1264,8 @@ async def delete_knowledge_base_document(
         "Delete a folder from a Bugasura project's Knowledge Base. The folder and its sub-folders "
         "are removed from the knowledge base tree, and the documents inside them stop being "
         "listed — the API trashes the folder rather than erasing it, so it can be restored. A "
-        "folder that still holds documents is NOT deleted unless delete_documents=True — tell "
-        "the user how many documents are inside and get their confirmation first. Requires team "
+        "folder that still holds documents is NOT deleted unless delete_documents=True; the "
+        "refusal lists the documents inside. Requires team "
         "or project admin rights."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
@@ -2086,9 +2086,8 @@ async def rename_knowledge_base_page(
     title="Get Knowledge Base Page Content",
     description=(
         "Read the current markdown body of a page in a Bugasura Knowledge Base page document. "
-        "ALWAYS call this before changing a page the user wants edited rather than rewritten "
-        "— bugasura_update_knowledge_base_page_content replaces the whole body, so you need "
-        "the existing text in front of you to change part of it without losing the rest. "
+        "Use it before a partial edit: bugasura_update_knowledge_base_page_content in replace mode "
+        "overwrites the whole body, so changing part of a page starts from this text. "
         "A page that has never been written comes back with empty content, which is normal. "
         "Identify the document by name or id, and the page by page name or page id from "
         "bugasura_list_knowledge_base_pages."
@@ -2230,7 +2229,7 @@ async def get_knowledge_base_page_content(
         "mode='replace' (the default) REPLACES the whole body and the previous content "
         "cannot be recovered — so to change part of a page, read it first with "
         "bugasura_get_knowledge_base_page_content, edit that text, and pass the full result "
-        "here. Never write a partial body in replace mode. "
+        "here; a partial body in replace mode drops the rest of the page. "
         "mode='append' and mode='prepend' add to the page instead: they read the current "
         "body themselves and keep it, so pass only the new text — this is the safe way to "
         "add a section without rewriting anything. "
@@ -2783,8 +2782,8 @@ async def move_knowledge_base_page(
         "Delete a page from a Bugasura Knowledge Base page document, permanently. The "
         "page's content and everything the AI learned from it are removed, and a page that "
         "has sub pages takes them ALL with it — such a page is NOT deleted unless "
-        "delete_sub_pages=True, so tell the user which sub pages would go and get their "
-        "confirmation first. Identify the document by name or id, and the page by its page "
+        "delete_sub_pages=True; the refusal lists the sub pages that would go. "
+        "Identify the document by name or id, and the page by its page "
         "name or page id from bugasura_list_knowledge_base_pages."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
@@ -2943,10 +2942,8 @@ async def delete_knowledge_base_page(
         "bugasura_import_file_to_knowledge_base_document; purpose='testpert_kb' stages documents or "
         "images for bugasura_testpert_upload_kb (images go to a sprint only this way); purpose='test_data' "
         "stages test data files (csv, json, images, documents, app builds) for bugasura_upload_test_data_files. "
-        "Show the user upload_url; once they say the upload is done, call that tool with upload_id. "
-        "In a terminal client with shell access you may upload a file the user named yourself with "
-        "`curl -sS -F file=@<path> <upload_url>` — the bytes go through the shell, never through you. "
-        "Never read or encode the file yourself."
+        "The user opens upload_url to upload; that tool then takes upload_id. upload_url also accepts "
+        "a multipart POST, e.g. `curl -sS -F file=@<path> <upload_url>` from a terminal."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
 )
@@ -3023,17 +3020,15 @@ async def create_upload_link(
         "(the normal way on the hosted server, for a file on the user's own computer). "
         "(2) source_url — the Google Drive / Dropbox / public download link the user shared; the server "
         "fetches the file itself. "
-        "(3) file_paths — absolute paths on the machine running this server (local STDIO servers only); "
-        "ask the user for the exact path, never guess or construct it. "
-        "Never read, encode, or convert the file yourself. "
+        "(3) file_paths — absolute paths on the machine running this server (local STDIO servers only). "
         "This is the project-wide knowledge base — to add documents to a TestPert sprint's own knowledge "
         "base use bugasura_testpert_upload_kb instead."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def upload_knowledge_base_document(
-    file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server). Ask the user for the exact path — never construct or guess it. Multiple files are uploaded into the same folder."),
-    source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. IMPORTANT: a Google Drive link must be set to 'Anyone with the link'."),
+    file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server), exactly as the user gave them. Multiple files are uploaded into the same folder."),
+    source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. A Google Drive link must be set to 'Anyone with the link'."),
     source_url_filename: Optional[str] = Field(default=None, description="Original filename with extension (e.g. 'PRD.pdf'). Optional — inferred from the URL path or the Content-Disposition header when omitted. Only pass it if auto-detection fails or the user names the file."),
     upload_id: Optional[str] = Field(default=None, description="upload_id returned by bugasura_create_upload_link, once the user has uploaded the file(s) to its link. Every file uploaded there is added."),
     folder_name: Optional[str] = Field(default=None, description="Knowledge base folder to add the document to. Matched case-insensitively; created at root level when no folder has that name. Omit to use the project's first knowledge base folder."),
@@ -4484,8 +4479,7 @@ async def import_figma_to_knowledge_base(
         "bugasura_create_upload_link(purpose='document_import'), after the user uploaded the file "
         "to that link (the normal way on the hosted server). (2) source_url — a Google Drive / "
         "Dropbox / public download link. (3) file_path — an absolute path on the machine running "
-        "this server (local STDIO servers only); ask the user for the exact path, never guess it. "
-        "Never read, encode, or convert the file yourself. "
+        "this server (local STDIO servers only). "
         "To add a document to the knowledge base as a file in its own right, use "
         "bugasura_upload_knowledge_base_document instead."
     ),
@@ -4493,8 +4487,8 @@ async def import_figma_to_knowledge_base(
 )
 async def import_file_to_knowledge_base_document(
     document_identifier: str = Field(description="The Knowledge Base document to import into — its name or its kb_id (see bugasura_list_knowledge_base_documents). Must be a page document; an uploaded file has no pages to import into."),
-    file_path: Optional[str] = Field(default=None, description="Absolute path on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server). Ask the user for the exact path — never construct or guess it. Must be a .md, .csv, .xlsx or .xls file."),
-    source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. IMPORTANT: a Google Drive link must be set to 'Anyone with the link'."),
+    file_path: Optional[str] = Field(default=None, description="Absolute path on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server), exactly as the user gave it. Must be a .md, .csv, .xlsx or .xls file."),
+    source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. A Google Drive link must be set to 'Anyone with the link'."),
     source_url_filename: Optional[str] = Field(default=None, description="Original filename with extension (e.g. 'metrics.csv'). Optional — inferred from the URL path when omitted. Only pass it if auto-detection fails or the user names the file."),
     upload_id: Optional[str] = Field(default=None, description="upload_id returned by bugasura_create_upload_link(purpose='document_import'), once the user has uploaded the file to its link."),
     page_identifier: Optional[str] = Field(default=None, description="For a CSV/Excel import, the page to append the table to — its name or its page id (see bugasura_list_knowledge_base_pages). Omit to use the document's first page. Ignored for a Markdown import, which always creates its own page."),

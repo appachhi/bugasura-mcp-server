@@ -30,7 +30,7 @@ from utils.resolvers import resolve_team_identifier
 auth = build_auth_provider()
 
 # Reported by /health and by server/discover (serverInfo.version)
-SERVER_VERSION = "3.3.0"
+SERVER_VERSION = "3.3.1"
 
 # Returned by server/discover; how an assistant should drive the tools.
 SERVER_INSTRUCTIONS = """\
@@ -43,9 +43,16 @@ them to the user, then call the same tool again with the chosen value. Don't gue
 - List tools are paginated: pass start_at and max_results, and follow has_more / next_offset.
 - Results carry a "status" field: OK, selection_required, failed (see error / error_type), or \
 api_key_required. On api_key_required, follow its "action" text: never ask the user for an API key.
-- Confirm with the user before calling delete_* tools; deletions cannot be undone.
+- Confirm with the user before calling delete_* tools; deletions cannot be undone. When a delete is \
+refused because a folder or page still has contents, tell the user what would go before retrying.
 - Never read or encode a user's file. To upload or attach one, call bugasura_create_upload_link with \
-the matching purpose, give the user the link, then pass its upload_id to the tool.
+the matching purpose, give the user the link, then pass its upload_id to the tool. On a local server, \
+use file paths exactly as the user gives them; never guess or construct one.
+- Show test case scenario text in full, as returned. Identify items by what users see in Bugasura \
+(issue keys, test case numbers such as TES123, requirement ids such as REQ1), not by internal ids.
+- Choices that belong to the user stay with the user: selection_required options, TestPert KB file \
+roles and the regenerate context sections. For a TestPert sprint's status or phase, call \
+bugasura_testpert_advance with to_status omitted.
 - Report tool results without speculating about Bugasura's internals, code or schema; do pass on \
 warnings or partial failures a result reports.
 """

@@ -335,12 +335,10 @@ async def create_testpert_sprint(
     name = "bugasura_prepare_kb_upload",
     title = "Prepare KB Upload",
     description = (
-        "CALL THIS FIRST — before doing anything else — whenever the user wants to upload a file "
-        "(PDF, DOCX, image, screenshot, or any other file) to a Bugasura TestPert sprint or to a "
-        "project's Knowledge Base. "
-        "Do NOT encode, read, or process any attached file before calling this tool. "
-        "This tool returns the exact instructions to show the user so they can provide the file "
-        "in a way that works on this server (an upload link, a share link, or a local path)."
+        "Use when the user wants to upload a file (PDF, DOCX, image, screenshot, or any other file) "
+        "to a Bugasura TestPert sprint or to a project's Knowledge Base. Returns the ways the user "
+        "can provide the file on this server (an upload link, a share link, or a local path), worded "
+        "for the user."
     ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 )
@@ -401,21 +399,21 @@ async def prepare_kb_upload(
         "Attach knowledge-base material to a TestPert sprint. PREFER existing_kb_ids: link "
         "document(s) already in the project's Knowledge Base (get ids from "
         "bugasura_list_knowledge_base_documents) — this is the normal, working path. "
-        "If the material isn't in the project's Knowledge Base yet, add it there FIRST with "
-        "bugasura_upload_knowledge_base_document (use bugasura_prepare_kb_upload to get the "
-        "upload instructions to show the user), THEN come back and link its id here. "
+        "Material not yet in the project's Knowledge Base is added there with "
+        "bugasura_upload_knowledge_base_document (bugasura_prepare_kb_upload gives the upload "
+        "options), and its id is then linked here. "
         "Images (wireframes, designs, diagrams, screenshots) can only be added here: on the hosted "
         "server get an upload link with bugasura_create_upload_link(purpose='testpert_kb') and pass "
         "its upload_id with the matching *_image kb_type. Other direct uploads into a sprint "
-        "(source_url / file_paths / text_content) are legacy paths, so don't lead with them. "
+        "(source_url / file_paths / text_content) are legacy paths, kept for compatibility. "
         "Documents: .txt/.pdf/.doc/.docx/.md/.json (100 MB) — Images: .png/.jpg/.jpeg/.webp/.gif (20 MB)"
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def upload_testpert_kb(
-    source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. Share links are auto-converted to direct download URLs. IMPORTANT: the link must be set to 'Anyone with the link' access."),
+    source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file — no encoding needed. Share links are auto-converted to direct download URLs. The link must be set to 'Anyone with the link' access."),
     source_url_filename: Optional[str] = Field(default=None, description="Original filename with extension (e.g. 'PRD.pdf', 'wireframe.png'). Optional — the filename is inferred from the URL path or HTTP Content-Disposition header when not provided. Only pass this if auto-detection fails or the user explicitly names the file."),
-    file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server). Ask the user for the exact path — never construct or guess it."),
+    file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server), exactly as the user gave them."),
     text_content: Optional[str] = Field(default=None, description="Plain text the user pasted directly into the chat. Only for text kb_types. Not for PDFs, DOCX, or images — use source_url for those."),
     text_content_filename: Optional[str] = Field(default=None, description="Filename for the text_content upload (e.g. 'notes.md'). Text-native extensions (.md, .json, .txt) are preserved as-is."),
     upload_id: Optional[str] = Field(default=None, description="upload_id returned by bugasura_create_upload_link(purpose='testpert_kb'), once the user has uploaded the file(s) to its link. Every file must suit kb_type."),
@@ -935,11 +933,9 @@ async def start_skip_testplan(
     title = "Advance TestPert Sprint",
     description = (
         "Read the current TestPert phase OR advance the sprint to a new phase. "
-        "ALWAYS call this (with to_status omitted) when the user asks for the sprint's status, "
-        "current phase, or pipeline progress — e.g. 'what phase is this sprint at?', "
-        "'check testpert status', 'what is the current testpert status?', 'where is my sprint?'. "
-        "Do NOT use bugasura_testpert_get_testplan for status — it reads saved test plan content, "
-        "not the current pipeline phase. "
+        "With to_status omitted it returns the sprint's status, current phase and pipeline progress "
+        "— e.g. for 'what phase is this sprint at?', 'check testpert status', 'where is my sprint?'. "
+        "bugasura_testpert_get_testplan reads saved test plan content, not the current pipeline phase. "
         "To ADVANCE: set to_status to a GENERATE_* value to kick off an AI phase, then pass "
         "wait_for to poll until the engine reaches the matching terminal status. Re-callable: "
         "if still running when the time budget ends, call again (to_status omitted) to keep polling."
@@ -1513,8 +1509,8 @@ async def update_testpert_requirement_contexts(
         "focus_areas flattened to {area: level} + allowed focus_levels + counts) for showing the "
         "user what to review and collecting edits. Use ONLY after the sprint reaches TEST_PLANING "
         "and the user wants to see or edit the plan content. "
-        "Do NOT use this to check the current pipeline phase or status — call "
-        "bugasura_testpert_advance (with to_status omitted) for that."
+        "It does not report the current pipeline phase or status; "
+        "bugasura_testpert_advance (with to_status omitted) does."
     ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
@@ -1928,11 +1924,10 @@ async def generate_testpert_testcases(
         "Mirrors the regenerate button (green refresh icon) for COMPLETED sub-features and the "
         "retry button (circular arrow) for ERROR sub-features in the Generate tab. "
         "Get feature_id from bugasura_testpert_get_features — use the sub-feature's feature_id. "
-        "IMPORTANT: this tool ALWAYS requires context input across three sections before regenerating "
-        "(Gap Analysis, Test Focus Area Alignment, Context Discovery — matching the 3-step modal in "
-        "the web app). When called with confirm_context=False (default) it returns the options for all "
-        "three sections so the user can make their selections. You MUST present each section to the "
-        "user, collect their answers, then re-call with confirm_context=True and the filled values. "
+        "Regenerating takes the user's context input in three sections (Gap Analysis, Test Focus Area "
+        "Alignment, Context Discovery — matching the 3-step modal in the web app). With "
+        "confirm_context=False (default) it returns the options for all three sections for the user "
+        "to choose from; with confirm_context=True and the user's choices it regenerates. "
         "At least one option must be selected in EACH of the three sections. "
         "Maximum 5 attempts per sub-feature. "
         "Re-callable: if still generating when the time budget ends, call again with elapsed_seconds."
@@ -1942,7 +1937,7 @@ async def generate_testpert_testcases(
 async def regenerate_testpert_testcases(
     feature_id: int = Field(description="The sub-feature's feature_id to regenerate (from bugasura_testpert_get_features — the sub-feature row id, not the parent feature id)."),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
-    confirm_context: bool = Field(default=False, description="Set to True only after the user has selected options for ALL THREE sections (gap_analysis, test_focus_area, context_discovery). When False (default), the tool returns the three-section options form for the user to fill in — you must show these to the user, collect their choices, then re-call with confirm_context=True."),
+    confirm_context: bool = Field(default=False, description="Set to True only after the user has selected options for ALL THREE sections (gap_analysis, test_focus_area, context_discovery). When False (default), the tool returns the three-section options form for the user to fill in; the user's choices then go in a call with confirm_context=True."),
     gap_analysis: List[Literal["coverage_gaps", "depth_issues", "relevance_problems", "technical_misalignment"]] = Field(default=[], description="[Section 1] Selected gap analysis issues. Valid values: 'coverage_gaps', 'depth_issues', 'relevance_problems', 'technical_misalignment'. At least one required when confirm_context=True."),
     test_focus_area: List[str] = Field(default=[], description="[Section 2] Selected test focus area names from the sprint's test plan (e.g. 'Authentication', 'Reporting'). Use the labels returned in the context_required response. At least one required when confirm_context=True."),
     context_discovery: List[dict] = Field(default=[], description="[Section 3] Selected context discovery items as [{'key': str, 'value': str}] where key is one of 'missed_user_personas'/'business_constraints'/'integration_dependencies'/'risk_focus' and value is optional context text. At least one item required when confirm_context=True; value may be empty or omitted."),
@@ -2948,10 +2943,9 @@ async def generate_testpert_sprint_context(
     title = "Get TestPert KB Validation",
     description = (
         "Read the KB-validation verdict for a sprint parked at SPRINT_CONTEXT_USER_VALIDATION: the "
-        "uploaded documents the engine couldn't confidently classify, each with a reason. Call this "
-        "first, then ASK THE USER (not an automatic choice) for each file's role — Requirements, "
-        "Reference, or Constraints — or whether to remove it (bugasura_testpert_delete_kb). Submit the "
-        "user's chosen roles with bugasura_testpert_resolve_kb_validation to continue."
+        "uploaded documents the engine couldn't confidently classify, each with a reason. Each file's "
+        "role — Requirements, Reference, or Constraints — is the user's choice, as is removing it "
+        "(bugasura_testpert_delete_kb); bugasura_testpert_resolve_kb_validation submits the chosen roles."
     ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
@@ -3057,7 +3051,7 @@ class KbFileRole(BaseModel):
     role: Literal['REQUIREMENTS', 'REFERENCE', 'CONSTRAINTS'] = Field(
         description=("What the document is to this sprint, as chosen BY THE USER: REQUIREMENTS (defines "
                      "what to build/test), REFERENCE (background material), or CONSTRAINTS (rules and "
-                     "limits to respect). Never pick this yourself."))
+                     "limits to respect)."))
 
 
 @mcp.tool(

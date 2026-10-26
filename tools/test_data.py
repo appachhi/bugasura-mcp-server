@@ -385,7 +385,7 @@ async def duplicate_test_data_environment(
 @mcp.tool(
     name = "bugasura_delete_test_data_environment",
     title = "Delete Test Data Environment",
-    description = "Permanently delete a test data environment (by ID or name) together with ALL its variables and files. Cannot be undone - confirm with the user before calling this. Refused while the environment holds custom variables or files unless delete_contents=true.",
+    description = "Permanently delete a test data environment (by ID or name) together with ALL its variables and files. Cannot be undone. Refused while the environment holds custom variables or files unless delete_contents=true.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_test_data_environment(
@@ -727,7 +727,7 @@ async def update_test_data_variable(
 @mcp.tool(
     name = "bugasura_delete_test_data_variable",
     title = "Delete Test Data Variable",
-    description = "Permanently delete one test data variable (by ID or exact key) from an environment or the 'Globals' scope. The default baseUrl/apiBaseUrl variables cannot be deleted. Confirm with the user before calling this.",
+    description = "Permanently delete one test data variable (by ID or exact key) from an environment or the 'Globals' scope. The default baseUrl/apiBaseUrl variables cannot be deleted. Cannot be undone.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_test_data_variable(
@@ -1144,9 +1144,7 @@ async def list_test_data_app_builds(
         "that link (the normal way on the hosted server, for a file on the user's own computer, up to 100MB). "
         "(2) source_url - the Google Drive / Dropbox / public download link the user shared; the server fetches "
         "the file itself. "
-        "(3) file_paths - absolute paths on the machine running this server (local STDIO servers only); ask the "
-        "user for the exact path, never guess or construct it. "
-        "Never read, encode, or convert the file yourself."
+        "(3) file_paths - absolute paths on the machine running this server (local STDIO servers only)."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
@@ -1156,7 +1154,7 @@ async def upload_test_data_files(
     category: str = Field(description="Category for the files: a built-in one ('App Build', 'Attachments & Documents', 'Product Images', 'Sample Data Files') or a custom one from bugasura_list_test_data_categories", min_length=1),
     environment: str = Field(description=_ENVIRONMENT_SCOPE_FIELD, min_length=1),
     upload_id: Optional[str] = Field(default=None, description="upload_id returned by bugasura_create_upload_link(purpose='test_data'), once the user has uploaded the file(s) to its link. Every file uploaded there is added."),
-    file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server). Ask the user for the exact path - never construct or guess it.", max_length=TEST_DATA_MAX_FILES_PER_UPLOAD),
+    file_paths: List[str] = Field(default=[], description="Absolute paths on the MCP server's local filesystem (local STDIO servers only; rejected on the hosted server), exactly as the user gave them.", max_length=TEST_DATA_MAX_FILES_PER_UPLOAD),
     source_url: Optional[str] = Field(default=None, description="Google Drive share link, Dropbox share link, or any public direct download URL. The MCP server fetches the file - no encoding needed. A Google Drive link must be set to 'Anyone with the link'."),
     source_url_filename: Optional[str] = Field(default=None, description="Original filename with extension (e.g. 'users.csv'). Optional - inferred from the URL or the download's headers; pass it only if auto-detection fails or the user names the file."),
     description: str = Field(default="", description="What the files are for (0-500 characters, applied to every file, optional)", max_length=TEST_DATA_DESCRIPTION_MAX_LENGTH),
@@ -1414,7 +1412,7 @@ async def upload_test_data_files(
 @mcp.tool(
     name = "bugasura_delete_test_data_file",
     title = "Delete Test Data File",
-    description = "Permanently delete one test data file (by ID or file name) from an environment or the 'Globals' scope. Cannot be undone - confirm with the user before calling this.",
+    description = "Permanently delete one test data file (by ID or file name) from an environment or the 'Globals' scope. Cannot be undone.",
     annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def delete_test_data_file(

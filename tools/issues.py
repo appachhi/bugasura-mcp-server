@@ -261,7 +261,7 @@ async def _attach_issue_files(api_key: str, team_id: int, issue_key, opened: dic
         "Attach files (screenshots, logs, recordings, documents) to an existing issue. "
         "On the hosted server get an upload link with bugasura_create_upload_link(purpose='attachment'), "
         "let the user upload the file(s), then pass its upload_id here. Local STDIO servers can pass "
-        "file_paths instead. Never read or encode the file yourself."
+        "file_paths instead."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
