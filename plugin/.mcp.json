@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bugasura": {
+      "type": "http",
+      "url": "https://mcp.bugasura.io/mcp"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "bugasura",
+  "version": "3.3.0",
+  "description": "Bug tracking and test management in Bugasura: issues, test cases, sprints, test runs, requirements, knowledge base and TestPert AI test generation.",
+  "author": {
+    "name": "Bugasura",
+    "email": "support@bugasura.io",
+    "url": "https://bugasura.io"
+  },
+  "homepage": "https://github.com/appachhi/bugasura-mcp-server#readme",
+  "repository": "https://github.com/appachhi/bugasura-mcp-server",
+  "license": "MIT",
+  "privacyPolicyUrl": "https://bugasura.io/privacy/",
+  "keywords": ["bug tracking", "test management", "qa", "test cases", "sprints", "issues"]
+}

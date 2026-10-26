@@ -8,6 +8,13 @@ Bugasura MCP Server enables AI tools like Claude, VS Code Copilot, and Cursor to
 
 ---
 
+## ⚠️ Breaking changes in 3.3
+
+| What changed | 3.2 | 3.3 |
+|--------------|-----|-----|
+| Requirement ↔ test case links | `bugasura_link_unlink_requirement_testcases` with `is_delete` | `bugasura_link_requirement_testcases` and `bugasura_unlink_requirement_testcases` (destructive); both take comma-separated `testcase_ids` |
+| Coda, Jira, Confluence and Figma imports (10 tools) | Offered on every transport | Local (STDIO) only. They take that service's API token as an argument, so the hosted server no longer lists them and refuses calls to them |
+
 ## ⚠️ Breaking changes in 3.0
 
 Authentication moved to OAuth 2.0 sign-in. If you're upgrading from 2.x:
@@ -967,7 +974,8 @@ Names are resolved via `bugasura_list_sprints` (report ↔ sprint), `bugasura_li
 - `bugasura_add_requirement_attachments` - Attach files to an existing requirement
 - `bugasura_update_requirement` - Update requirement details (partial updates supported, preserves all fields)
 - `bugasura_delete_requirement` - Delete a requirement permanently
-- `bugasura_link_unlink_requirement_testcases` - Link or unlink test cases to/from a requirement
+- `bugasura_link_requirement_testcases` - Link test cases to a requirement (comma-separated IDs)
+- `bugasura_unlink_requirement_testcases` - Unlink test cases from a requirement; the test cases are kept
 - `bugasura_create_requirement_folder` - Create a folder for organizing requirements
 - `bugasura_list_requirement_folders` - List all folders in a project
 - `bugasura_list_requirement_comments` - List a requirement's comments (paginated)
@@ -1001,6 +1009,8 @@ The knowledge base is a project-level document library, organized in folders and
 **Imports** (all in `tools/knowledge_base.py`)
 
 The six entries in the Knowledge Base page's "+" menu, plus the document editor's own Import menu. Everything except the file upload runs in the background — the tool returns as soon as the crawl/sync is queued, and `bugasura_list_knowledge_base_documents` shows its progress in `stage`. Connector credentials are supplied per call and are never stored by this server.
+
+> **Local (STDIO) only:** the Coda, Jira, Confluence and Figma imports and their listing tools take that service's API token as an argument, so the hosted server (`/mcp`) does not offer them: a token typed into a hosted chat would pass through the conversation. Run the server locally to use them; on the hosted server, import a website or upload a file instead.
 
 - `bugasura_create_upload_link` - A short-lived, single-use upload link on this server for a file on the user's own computer (hosted server only). `purpose` picks the consuming tool: `knowledge_base`, `document_import`, `testpert_kb`, `attachment` (issues, issue/test case comments, requirements; any file type), or `test_data` (`bugasura_upload_test_data_files`)
 - `bugasura_upload_knowledge_base_document` - Upload document(s) (`.txt`, `.pdf`, `.doc`, `.docx`, `.md`) from an upload link, a share link or a local path
@@ -1634,7 +1644,8 @@ The server passes your requests to the Bugasura API under your own account. It k
 
 - 🌐 [Website](https://bugasura.io)
 - 📧 [support@bugasura.io](mailto:support@bugasura.io)
-- 📚 [API Documentation](https://docs.bugasura.io)
+- 📚 [Documentation](https://github.com/appachhi/bugasura-mcp-server#readme)
+- 🐞 [Report an issue](https://github.com/appachhi/bugasura-mcp-server/issues)
 - 🔒 [Privacy Policy](https://bugasura.io/privacy/)
 - 📄 [Terms of Service](https://bugasura.io/terms-of-service/)
 

@@ -180,6 +180,15 @@ USER_CONTEXT_TTL_SECONDS = 300  # 5 minutes
 # Compared lower-cased.
 ERROR_STATUSES = {"failed", "error", "api_key_required"}
 
+# Tools served under STDIO only: they take a third-party API token (Jira, Confluence, Coda, Figma) as an
+# argument, which over HTTP would pass through the hosted chat. core/app.py hides and refuses them there.
+STDIO_ONLY_TOOLS = frozenset({
+    "bugasura_list_coda_docs", "bugasura_list_coda_pages", "bugasura_import_coda_to_knowledge_base",
+    "bugasura_list_jira_projects", "bugasura_list_jira_issues", "bugasura_import_jira_to_knowledge_base",
+    "bugasura_list_confluence_spaces", "bugasura_list_confluence_pages", "bugasura_import_confluence_to_knowledge_base",
+    "bugasura_import_figma_to_knowledge_base",
+})
+
 # Test case platform types the API accepts. The agents are platform bound:
 # the Browser Agent runs only Desktop Web, the Mobile Agent only the mobile types.
 TestCasePlatformType = Literal["DESKTOP_WEB", "ANDROID", "ANDROID_MOBILE_WEB", "IOS", "IOS_MOBILE_WEB", "MULTI_PLATFORM"]
@@ -262,6 +271,24 @@ KB_DOC_IMPORT_MAX_FILE_SIZE_MB = 10
 TESTPERT_KB_DOC_EXTS = {'txt', 'pdf', 'doc', 'docx', 'md', 'json'}
 TESTPERT_KB_IMG_EXTS = {'png', 'jpg', 'jpeg', 'webp', 'gif'}
 TESTPERT_KB_MAX_IMAGE_SIZE_MB = 20
+# Sprint status -> its stage key in the TestPert status response's ai_context_files
+TESTPERT_STAGE_CONTEXT_KEYS = {
+    "SPRINT_CONTEXT": "context_understanding",
+    "DEEPEN_REQUIREMENTS_QUESTIONS": "deepen_requirement_questions",
+    "MISSING_REQUIREMENTS": "missing_requirement",
+    "RISKS_IN_REQUIREMENTS": "risk_in_requirements",
+}
+# Requirement-context category -> the sprint statuses it is reviewed at
+TESTPERT_REQ_CONTEXT_STAGE_STATUSES = {
+    "all": ("DEEPEN_REQUIREMENTS_QUESTIONS", "MISSING_REQUIREMENTS", "RISKS_IN_REQUIREMENTS"),
+    "deepen_questions": ("DEEPEN_REQUIREMENTS_QUESTIONS",),
+    "missing": ("MISSING_REQUIREMENTS",),
+    "risk": ("RISKS_IN_REQUIREMENTS",),
+}
+# How the assistant shows a stage's sources (stage_context): its markdown table, at every stage
+TESTPERT_STAGE_CONTEXT_TABLE_HINT = (
+    "followed by stage_context.table exactly as given: it is a markdown table, so show it as a table (not inside a code block) and keep its <br> line breaks. Don't redraw, reformat or summarise it, and don't add other HTML. Never show numeric ids or field names."
+)
 # Per-file cap for issue/comment/requirement attachments sent by the MCP (the API's own limits are
 # per team plan for issues and 100 MB for requirements)
 ATTACHMENT_MAX_FILE_SIZE_MB = 100

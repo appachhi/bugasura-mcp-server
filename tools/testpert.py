@@ -19,7 +19,8 @@ from pydantic import BaseModel, Field
 
 from config.config import (
     logger, KB_MAX_FILE_SIZE_MB, TESTPERT_KB_DOC_EXTS, TESTPERT_KB_IMG_EXTS,
-    TESTPERT_KB_MAX_IMAGE_SIZE_MB, WEB_BASE_URL,
+    TESTPERT_KB_MAX_IMAGE_SIZE_MB, TESTPERT_REQ_CONTEXT_STAGE_STATUSES, TESTPERT_STAGE_CONTEXT_KEYS,
+    TESTPERT_STAGE_CONTEXT_TABLE_HINT, WEB_BASE_URL,
 )
 from core.app import mcp
 from core.uploads import claim, discard, release, staged_paths
@@ -1116,7 +1117,7 @@ async def get_testpert_requirement_contexts(
     formatted path is dropped by the response wrapper) and groups rows itself.
 
     Returns:
-        dict: {status, sprint_id, deepen_questions?, missing?, risk?, counts, message}.
+        dict: {status, sprint_id, deepen_questions?, missing?, risk?, counts, stage_context?, message}.
         If the engine hasn't produced any rows yet, returns status 'OK' with empty
         groups and a hint to ensure the phase has completed.
     """
@@ -1154,6 +1155,9 @@ async def get_testpert_requirement_contexts(
 
     rows = resp.get('testpertRequirementContexts') or []
     grouped = _group_requirement_contexts(rows)
+    # Sources of the stage the sprint is on, only when this call shows that stage.
+    status_resp = await _get_sprint_testpert_status_raw(api_key, context['team_id'], context['project_id'], sprint_id)
+    stage_context = _stage_context_details(status_resp, TESTPERT_REQ_CONTEXT_STAGE_STATUSES[category])
 
     result: dict = {
         'status': 'OK',
@@ -1179,13 +1183,15 @@ async def get_testpert_requirement_contexts(
         # guidance to review-and-proceed instead of asking each one (which the platform doesn't do).
         deepen_list = result.get('deepen_questions_list') or []
         deepen_total = len(deepen_list)
-        deepen_answered = sum(1 for q in deepen_list if (q.get('current_response') or '').strip())
+        # Answered like the platform counts it: a ticked option or typed text.
+        deepen_answered = sum(1 for q in deepen_list
+                              if (q.get('current_response') or '').strip() or any(o['selected'] for o in q['options']))
         result['deepen_answered_count'] = deepen_answered
         if deepen_total and deepen_answered == deepen_total:
             result['all_deepen_preanswered'] = True
             result['message'] = (
                 "These contextual questions are ALREADY answered (this is what Quick testing depth does — "
-                "the engine auto-answers them; each one's current_response is filled). Do NOT ask them "
+                "the engine auto-answers them; each one has a selected option or a current_response). Do NOT ask them "
                 "one-by-one. Instead tell the user they're pre-filled, optionally show a couple as "
                 "examples, and let them either tweak any answer (save edits with "
                 "bugasura_testpert_answer_context_questions) or just proceed. To move on, continue with "
@@ -1197,17 +1203,28 @@ async def get_testpert_requirement_contexts(
                 "First give the user a short one-line overview (how many questions, the areas; note if "
                 f"{deepen_answered} of {deepen_total} are already answered). Then ask them ONE QUESTION "
                 "AT A TIME from deepen_questions_list (it is ordered): show 'Question 1 of N' + the "
-                "question (and its current_response if it already has one), WAIT for their answer, then "
+                "question, then 'Why:' and 'Impact:' lines from its why and impact when present (and its "
+                "current_response if it already has one). If it has options, list their "
+                "labels numbered, mark the recommended one as (Recommended) and any already selected, and tell "
+                "them they can pick one or more and/or type their own answer. WAIT for their answer, then "
                 "ask the next. Do NOT dump the whole list. Let them skip any (say 'skip') or stop early. "
                 "When done, save with bugasura_testpert_answer_context_questions "
-                "(answers=[{requirement_context_id, response}]); partial is fine. Use plain language "
-                "only — never show status codes or field names."
+                "(answers=[{requirement_context_id, selected_option_ids, response}]); partial is fine. Use plain "
+                "language only — never show status codes, option ids or field names."
             )
     else:
         result['message'] = (
             "Show these to the user in plain language for their approve/reject/edit decision, then save "
             "with bugasura_testpert_update_requirement_contexts and continue. No internal codes in what the user sees."
         )
+    if stage_context:
+        result['stage_context'] = stage_context
+        if _extract_sprint_status(status_resp) == 'DEEPEN_REQUIREMENTS_QUESTIONS':
+            # The deepen questions are where the user answers, so the table comes before them.
+            result['message'] += (" Before the questions, show 'What these questions are based on' "
+                                  + TESTPERT_STAGE_CONTEXT_TABLE_HINT + " Show it once, not with every question.")
+        else:
+            result['message'] += " Along with these, show 'Based on' " + TESTPERT_STAGE_CONTEXT_TABLE_HINT
     return await _attach_link_for_sprint(result, api_key, context['team_id'], context['project_id'], sprint_id)
 
 
@@ -3208,8 +3225,8 @@ async def get_testpert_sprint_context(
         return _sprint_selection_required(context['team_id'], context['project_id'])
 
     tid, pid = context['team_id'], context['project_id']
-    current = _extract_sprint_status(
-        await _get_sprint_testpert_status_raw(api_key, tid, pid, sprint_id))
+    status_resp = await _get_sprint_testpert_status_raw(api_key, tid, pid, sprint_id)
+    current = _extract_sprint_status(status_resp)
     not_ready = _sprint_context_not_ready(current)
     if not_ready:
         return not_ready
@@ -3224,7 +3241,16 @@ async def get_testpert_sprint_context(
 
     details = resp.get('sprintContextDetails') or {}
     personas = details.get('user_personas') or {}
-    return {
+    features = resp.get('features') or []
+    if isinstance(features, dict):
+        # Like the platform, default features and sub-features are left out.
+        shown = {}
+        for key, f in features.items():
+            if isinstance(f, dict) and str(f.get('is_default_feature')) != '1':
+                subs = [s for s in f.get('sub_features') or [] if isinstance(s, dict) and str(s.get('is_default_feature')) != '1']
+                shown[key] = {**f, 'sub_features': subs}
+        features = shown
+    result = {
         'status': 'OK',
         'sprint_id': sprint_id,
         'current_status': current,
@@ -3232,15 +3258,23 @@ async def get_testpert_sprint_context(
         'user_roles': personas.get('personas') or [],
         'user_roles_applicable': personas.get('applicable'),
         'affected_modules': details.get('affected_modules') or [],
-        'features': resp.get('features') or [],
+        'features': features or [],
         'message': "Sprint context read.",
         'next_step': ("This is an instruction for you, not a summary to relay. Show the user the actual "
-                      "affected modules, user roles and features values above (not this instruction). "
+                      "affected modules (each with its impact type and reason), user roles (each with its role, "
+                      "access level when set, primary goals and workflows) and features values above, with each "
+                      "sub-feature's details under it as one line (join the pieces with ', '); not the platform, "
+                      "and not this instruction. "
                       "Ask if they want to add, remove, or edit any before continuing, then call "
                       "bugasura_testpert_confirm_sprint_context — with affected_modules/user_roles if they "
                       "changed anything, or with neither to just confirm and continue as-is. Features are "
                       "edited separately with bugasura_testpert_add_feature / _delete_feature."),
     }
+    stage_context = _stage_context_details(status_resp, ('SPRINT_CONTEXT',))
+    if stage_context:
+        result['stage_context'] = stage_context
+        result['next_step'] += " Along with these, show 'Based on' " + TESTPERT_STAGE_CONTEXT_TABLE_HINT
+    return result
 
 
 @mcp.tool(
@@ -3371,9 +3405,10 @@ async def confirm_testpert_sprint_context(
     name = "bugasura_testpert_answer_context_questions",
     title = "Answer TestPert Context Questions",
     description = (
-        "Submit the user's answers to a TestPert sprint's contextual (deepen-requirement) questions. "
-        "Each answer is saved per-row via /testpertrequirementcontexts/update (writes the answer to the "
-        "row's details column, isEdited=1) — no status change on save. Partial answers are fine (answer "
+        "Submit the user's answers to a TestPert sprint's contextual (deepen-requirement) questions: the "
+        "options they picked and/or their own typed answer. Each answer is saved per-row via "
+        "/testpertrequirementcontexts/update (picked options to the row's options column, typed answer to "
+        "its details column, isEdited=1) — no status change on save. Partial answers are fine (answer "
         "only the questions you want). By default this then advances to GENERATE_MISSING_REQUIREMENTS and "
         "polls until MISSING_REQUIREMENTS. Requires a team-admin API key. "
         "Use this for the DEEPEN questions; use bugasura_testpert_update_requirement_contexts for missing-req / risk edits."
@@ -3382,8 +3417,11 @@ async def confirm_testpert_sprint_context(
 )
 async def answer_testpert_context_questions(
     answers: List[dict] = Field(description=(
-        "List of answers, each {'requirement_context_id': <int>, 'response': <str>}. "
-        "Use the requirement_context_id and query from bugasura_testpert_get_requirement_contexts(category='deepen_questions'). "
+        "List of answers, each {'requirement_context_id': <int>, 'selected_option_ids': <list of option id str, optional>, "
+        "'response': <str, optional>}. Use the requirement_context_id, query and options from "
+        "bugasura_testpert_get_requirement_contexts(category='deepen_questions'). selected_option_ids is the full set "
+        "of picked options (replaces the current picks; [] clears them; omit to keep them). response is the user's "
+        "own typed answer; omit to keep the current one. "
         "Only the questions you include are answered; the rest keep their current response."
     )),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
@@ -3416,7 +3454,7 @@ async def answer_testpert_context_questions(
 
     if not answers:
         return {'status': 'failed', 'error': 'No answers provided', 'error_type': 'ValidationError',
-                'message': 'Provide at least one {requirement_context_id, response} in answers.'}
+                'message': 'Provide at least one {requirement_context_id, selected_option_ids and/or response} in answers.'}
 
     # Answering the deepen questions belongs to that phase; refuse if the sprint has
     # already moved past it (the status this would set would step the flow backward).
@@ -3442,11 +3480,11 @@ async def answer_testpert_context_questions(
                         "DEEPEN_REQUIREMENTS_QUESTIONS (run bugasura_testpert_generate_sprint_context first)."),
         }
 
-    # Build {rcid: response} lookup from the caller's answers.
+    # Build {rcid: answer} lookup from the caller's answers.
     lookup = {}
     for a in answers:
         if isinstance(a, dict) and a.get('requirement_context_id') is not None:
-            lookup[str(a['requirement_context_id'])] = a.get('response', '') or ''
+            lookup[str(a['requirement_context_id'])] = a
 
     # Index the live deepen rows by requirement_context_id (the answer lives in the
     # `details` column; the question text is in `title`).
@@ -3466,19 +3504,37 @@ async def answer_testpert_context_questions(
     answered = 0
     matched = set()
     failed = []
-    for key, resp in lookup.items():
+    for key, ans in lookup.items():
         if key not in rows_by_id:
             continue
         matched.add(key)
-        upd = await make_api_request('POST', '/v1/testpertrequirementcontexts/update', api_key, data={
+        data = {
             'appId': str(pid),
             'reportId': str(sprint_id),
             'requirementContextId': key,
-            'details': resp,
             'isEdited': '1',
-        })
+        }
+        resp = ans.get('response')
+        if resp is not None:
+            data['details'] = resp
+        picked = ans.get('selected_option_ids')
+        if picked is not None:
+            # Tick exactly the picked options, like the platform's checkboxes; other keys are kept.
+            picked = {str(p) for p in (picked if isinstance(picked, list) else [picked])}
+            options = rows_by_id[key].get('options') or {}
+            option_list = options.get('options') or []
+            unknown = picked - {str(o.get('id')) for o in option_list}
+            if unknown:
+                failed.append({'requirement_context_id': key,
+                               'error': f"Unknown option id(s) for this question: {', '.join(sorted(unknown))}"})
+                continue
+            if option_list:
+                for o in option_list:
+                    o['selected'] = str(o.get('id')) in picked
+                data['options'] = json.dumps(options)
+        upd = await make_api_request('POST', '/v1/testpertrequirementcontexts/update', api_key, data=data)
         if isinstance(upd, dict) and upd.get('status') == 'OK':
-            if resp:
+            if resp or picked:
                 answered += 1
         else:
             failed.append({'requirement_context_id': key,
@@ -4162,6 +4218,52 @@ def _extract_testrun_id(status_resp: Any) -> Optional[Any]:
     return None
 
 
+def _stage_context_details(status_resp: Any, statuses: tuple) -> Optional[dict]:
+    """
+    Pull the current stage's sources (file names + readable *_details rows + a markdown table) out of a
+    getStatus row's ai_context_files while the sprint is at one of `statuses` (or None).
+    """
+    status = _extract_sprint_status(status_resp)
+    if status not in statuses or status not in TESTPERT_STAGE_CONTEXT_KEYS:
+        return None
+    raw = status_resp['testpertStausDetails'][0].get('ai_context_files')
+    try:
+        stage = json.loads(raw).get(TESTPERT_STAGE_CONTEXT_KEYS[status])
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if not isinstance(stage, dict):
+        return None
+    files = [f.get('original_filename') or f.get('filename') for f in stage.get('files') or [] if isinstance(f, dict)]
+    files = [n for n in files if n]
+    # Every resolved list the API adds, with whatever readable fields its rows carry; ids are left out.
+    lists = {}
+    for name, rows in stage.items():
+        if name.endswith('_details') and isinstance(rows, list):
+            items = [{k: v for k, v in r.items() if k not in ('id', 'answers') and v not in (None, '')}
+                     for r in rows if isinstance(r, dict)]
+            items = [i for i in items if i]
+            if items:
+                lists[name] = items
+    if not files and not lists:
+        return None
+    # A markdown table, one row per kind; <br> stacks its items (chat apps draw it as a line break).
+    kb_names = [n for n in files + [r.get('title') or r.get('file_name') for r in lists.get('kb_details', [])] if n]
+    table_rows = [('KB File', [', '.join(kb_names)])] if kb_names else []
+    for name in sorted((n for n in lists if n != 'kb_details'),
+                       key=lambda n: (n != 'requirement_details', n != 'test_case_details')):
+        items = []
+        for r in lists[name]:
+            text = r.get('title') or r.get('file_name') or r.get('name') or ''
+            items.append(f"{r['code']} - {text}" if r.get('code') else text)
+        table_rows.append((name[:-len('_details')].replace('_', ' ').capitalize(), items))
+    table = ['| Context | Name / Title |', '|---|---|']
+    for label, items in table_rows:
+        # Line breaks and pipes in a title would split the row.
+        cell = '<br>'.join(' '.join(str(i).split()).replace('|', '\\|') for i in items)
+        table.append(f"| {label} | {cell} |")
+    return {'file_count': len(files), 'files': files, **lists, 'table': '\n'.join(table)}
+
+
 async def _attach_link_for_sprint(result: dict, api_key: str, team_id: int, project_id: int,
                                   sprint_id: int, tab: Optional[str] = None) -> dict:
     """
@@ -4223,7 +4325,7 @@ def _group_requirement_contexts(rows: List[dict]) -> dict:
 
     Returns {'deepen_questions': {<sub_category>: [...]}, 'missing': [...], 'risk': [...]}.
     Deepen questions are nested by sub_category (product/business/tech/test/user) and
-    expose query/response so answers can be collected per question.
+    expose query/response/options so answers can be collected per question.
     """
     deepen: dict = {}
     missing: List[dict] = []
@@ -4239,11 +4341,19 @@ def _group_requirement_contexts(rows: List[dict]) -> dict:
                     ad = json.loads(ad)
                 except (ValueError, TypeError):
                     pass
+            # Answer options from the agent; '' on older rows and user-added questions.
+            opts = r.get('options')
+            if isinstance(opts, str) and opts:
+                try:
+                    opts = json.loads(opts)
+                except (ValueError, TypeError):
+                    opts = None
             deepen.setdefault(sub, []).append({
                 'requirement_context_id': rcid,
                 'query': r.get('title'),
                 'response': r.get('details'),
                 'additionalDetails': ad,
+                'options': opts,
             })
         elif cat in ('missing_requirement', 'risk_in_requirement'):
             item = {
@@ -4277,7 +4387,7 @@ async def _count_undecided_missing(api_key: str, project_id: int, sprint_id: int
 def _deepen_questions_flat(deepen: dict) -> list:
     """
     Flatten grouped deepen questions into an ordered, numbered list for asking one at a time.
-    Returns [{index, requirement_context_id, sub_category, query, current_response}].
+    Returns [{index, requirement_context_id, sub_category, query, current_response, why, impact, options}].
     """
     if not isinstance(deepen, dict):
         return []
@@ -4288,12 +4398,23 @@ def _deepen_questions_flat(deepen: dict) -> list:
     for sub in ordered:
         for q in deepen.get(sub, []):
             i += 1
+            # Like the platform, only the first recommended option gets the Recommended tag.
+            options = []
+            for o in (q.get('options') or {}).get('options') or []:
+                recommended = bool(o.get('recommended')) and not any(v['recommended'] for v in options)
+                options.append({'id': str(o.get('id')), 'label': o.get('label'),
+                                'selected': bool(o.get('selected')), 'recommended': recommended})
+            # Why / Impact lines the platform shows under the question.
+            ad = q.get('additionalDetails') if isinstance(q.get('additionalDetails'), dict) else {}
             flat.append({
                 'index': i,
                 'requirement_context_id': q.get('requirement_context_id'),
                 'sub_category': sub,
                 'query': q.get('query'),
                 'current_response': q.get('response') or '',
+                'why': ad.get('reasoning') or '',
+                'impact': ad.get('consequence') or '',
+                'options': options,
             })
     return flat
 

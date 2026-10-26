@@ -14,11 +14,13 @@ from mcp_types import Icon
 
 from config.config import (
     API_BASE, BUGASURA_WEBSITE_URL, ERROR_STATUSES, MCP_CONNECT_URL, MCP_PUBLIC_BASE_URL,
-    MCP_SERVER_ICON_SVG_URL, MCP_SERVER_ICON_URL, MCP_SERVER_NAME, OPENAI_APPS_CHALLENGE_TOKEN, logger,
+    MCP_SERVER_ICON_SVG_URL, MCP_SERVER_ICON_URL, MCP_SERVER_NAME, OPENAI_APPS_CHALLENGE_TOKEN, STDIO_ONLY_TOOLS,
+    logger,
 )
 from core.oauth import build_auth_provider
 from core.uploads import sweep_periodically, upload_files, upload_page
 from utils.auth import get_api_key, validate_api_key
+from utils.client import in_http_request
 from utils.formatting import redact_secrets
 from utils.resolvers import resolve_team_identifier
 
@@ -28,7 +30,7 @@ from utils.resolvers import resolve_team_identifier
 auth = build_auth_provider()
 
 # Reported by /health and by server/discover (serverInfo.version)
-SERVER_VERSION = "3.2.0"
+SERVER_VERSION = "3.3.0"
 
 # Returned by server/discover; how an assistant should drive the tools.
 SERVER_INSTRUCTIONS = """\
@@ -122,8 +124,30 @@ class TeamNameMiddleware(Middleware):
         return await call_next(context)
 
 
+class StdioOnlyToolsMiddleware(Middleware):
+    """Hide STDIO_ONLY_TOOLS from tools/list over HTTP and refuse calls to them, so their third-party tokens never pass through a hosted chat."""
+
+    async def on_list_tools(self, context: MiddlewareContext, call_next):
+        tools = await call_next(context)
+        return [t for t in tools if t.name not in STDIO_ONLY_TOOLS] if in_http_request() else tools
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        if context.message.name not in STDIO_ONLY_TOOLS or not in_http_request():
+            return await call_next(context)
+        tool = await context.fastmcp_context.fastmcp.get_tool(context.message.name)
+        result = tool.convert_result({
+            'status': 'failed', 'error_type': 'NotAvailable',
+            'error': f"{context.message.name} is only available when the Bugasura MCP server runs locally (STDIO), "
+                     f"because it needs a third-party API token. On the hosted server, import a website or "
+                     f"upload a file instead (bugasura_import_website_to_knowledge_base, bugasura_create_upload_link).",
+        })
+        result.is_error = True
+        return result
+
+
 mcp.add_middleware(SecretRedactionMiddleware())
 mcp.add_middleware(ToolErrorFlagMiddleware())
+mcp.add_middleware(StdioOnlyToolsMiddleware())
 mcp.add_middleware(TeamNameMiddleware())
 
 

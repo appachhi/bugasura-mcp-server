@@ -1,0 +1,38 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "bugasura",
+  "version": "3.3.0",
+  "description": "Bug tracking and test management in Bugasura: issues, test cases, sprints, test runs, requirements, knowledge base and TestPert AI test generation.",
+  "author": {
+    "name": "Bugasura",
+    "email": "support@bugasura.io",
+    "url": "https://bugasura.io"
+  },
+  "homepage": "https://github.com/appachhi/bugasura-mcp-server#readme",
+  "repository": "https://github.com/appachhi/bugasura-mcp-server",
+  "license": "MIT",
+  "keywords": ["bug tracking", "test management", "qa", "test cases", "sprints", "issues"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Bugasura",
+        "shortDescription": "Bug tracking & test management",
+        "longDescription": "Work with your Bugasura workspace from chat. Log and update issues, assign and comment on them; write, run and report test cases; plan sprints and test runs; manage requirements and link them to test cases; keep a project knowledge base; and generate test cases from requirements with TestPert. Refer to teams, projects and issues by name or key (such as ISS09); Bugasura resolves them for you. You sign in with your own Bugasura account, and every action runs with your permissions.",
+        "developerName": "Bugasura",
+        "category": "Productivity",
+        "capabilities": ["Read", "Write"],
+        "websiteURL": "https://bugasura.io",
+        "supportURL": "https://github.com/appachhi/bugasura-mcp-server/issues",
+        "privacyPolicyURL": "https://bugasura.io/privacy/",
+        "termsOfServiceURL": "https://bugasura.io/terms-of-service/",
+        "defaultPrompt": [
+          "List my Bugasura teams and projects",
+          "Show the latest issues in my project",
+          "Create a test case for the login flow"
+        ],
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/logo.png"
+      }
+    }
+  }
+}

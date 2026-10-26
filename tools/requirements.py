@@ -1495,201 +1495,114 @@ async def delete_requirement(
         return response
 
 
-@mcp.tool(
-    name="bugasura_link_unlink_requirement_testcases",
-    title="Link or Unlink Requirement Test Cases",
-    description="Link or unlink test cases to/from a requirement. Supports interactive team/project selection and bulk operations with comma-separated test case IDs.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
-)
-async def link_unlink_requirement_testcases(
-    requirement_id: int = Field(description="Requirement numeric ID to link/unlink test cases"),
-    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
-    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
-    testcase_ids: Optional[str] = Field(default=None, description="Comma-separated test case IDs to link (e.g., '123,456,789'). Required for linking."),
-    unlink_testcase_id: Optional[int] = Field(default=None, description="Single test case ID to unlink from requirement. Required for unlinking."),
-    is_delete: bool = Field(default=False, description="Set to True to unlink test cases, False to link (default)"),
-    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)", ge=1),
-    folder_id: Optional[int] = Field(default=None, description="Folder identifier (optional, ge=1)", ge=1),
-) -> ToolResponse:
-    """
-    Link or unlink test cases to/from a requirement for traceability.
-
-    Interactive flow: If team_id/project_id are not provided, this function
-    will guide you through selection.
-
-    **Linking Test Cases** (is_delete=False):
-    - Provide testcase_ids as comma-separated IDs (e.g., "123,456,789")
-    - Links each test case with its own API call and reports which linked and which failed
-    - Creates traceability between requirements and test cases
-
-    **Unlinking Test Cases** (is_delete=True):
-    - Provide unlink_testcase_id with a single test case ID
-    - Removes the link between requirement and test case
-    - Does not delete the test case itself
-
-    Args:
-        requirement_id: Requirement identifier (required)
-        team_id: Team identifier (optional - will prompt if not provided)
-        project_id: Project identifier (optional - will prompt if not provided)
-        testcase_ids: Comma-separated test case IDs to link (required for linking)
-        unlink_testcase_id: Test case ID to unlink (required for unlinking)
-        is_delete: True to unlink, False to link (default: False)
-        sprint_id: Sprint identifier (optional)
-        folder_id: Folder identifier (optional)
-
-    Returns:
-        dict: {
-            'status': 'OK',
-            'message': 'Test case(s) linked/unlinked successfully'
-        }
-
-    Examples:
-        # Link multiple test cases to a requirement
-        link_unlink_requirement_testcases(
-            api_key,
-            requirement_id=2036,
-            testcase_ids="123,456,789"
-        )
-
-        # Link a single test case
-        link_unlink_requirement_testcases(
-            api_key,
-            requirement_id=2036,
-            testcase_ids="123"
-        )
-
-        # Unlink a test case from requirement
-        link_unlink_requirement_testcases(
-            api_key,
-            requirement_id=2036,
-            unlink_testcase_id=123,
-            is_delete=True
-        )
-
-        # Link with explicit context
-        link_unlink_requirement_testcases(
-            api_key,
-            requirement_id=2036,
-            team_id=456,
-            project_id=789,
-            testcase_ids="123,456"
-        )
-    """
-    # Validate API key before proceeding
+async def _link_unlink_requirement_test_cases(tool_name: str, is_delete: bool, requirement_id: int, testcase_ids: str,
+                                              team_id: Optional[int], project_id: Optional[int],
+                                              sprint_id: Optional[int], folder_id: Optional[int]) -> dict:
+    """Shared body of the requirement link/unlink tools: one /requirement/linkUnlinkRequirementTestCases call per ID."""
     api_key = get_api_key()
     validation = await validate_api_key(api_key)
-    if isinstance(validation, list):
-        return {'status': 'failed', 'error': 'Unexpected API response format', 'details': str(validation)}
     if not validation.get('valid'):
         return validation
 
-    # Use centralized context selection helper
-    context = await select_team_project_context(
-        api_key, team_id, project_id,
-        'bugasura_link_unlink_requirement_testcases',
-        f', requirement_id={requirement_id}'
-    )
-
-    # If context selection is needed, return the selection prompt
+    context = await select_team_project_context(api_key, team_id, project_id, tool_name,
+                                                f', requirement_id={requirement_id}, testcase_ids="{testcase_ids}"')
     if 'status' in context and context['status'] == 'selection_required':
         return context
-
-    # Extract validated team_id and project_id
     team_id = context['team_id']
     project_id = context['project_id']
 
-    # Validate operation parameters
-    if is_delete:
-        # Unlinking operation
-        if unlink_testcase_id is None:
-            return {
-                'status': 'failed',
-                'error': 'Missing unlink_testcase_id',
-                'message': 'unlink_testcase_id is required when is_delete=True'
-            }
-
-        logger.info(f"Unlinking test case {unlink_testcase_id} from requirement {requirement_id}")
-
-        payload = {
-            "app_id": project_id,
-            "team_id": team_id,
-            "requirement_id": requirement_id,
-            "isDelete": 1,
-            "deleteTestCaseId": unlink_testcase_id
+    ids = [i.strip() for i in str(testcase_ids).split(',') if i.strip()]
+    invalid_ids = [i for i in ids if not i.isdigit()]
+    if not ids or invalid_ids:
+        return {
+            'status': 'failed',
+            'error': 'Invalid testcase_ids',
+            'message': f"testcase_ids must be comma-separated numeric IDs; invalid: {invalid_ids or [testcase_ids]}"
         }
 
+    action = 'unlink' if is_delete else 'link'
+    logger.info(f"{tool_name}: {action} test cases {ids} {'from' if is_delete else 'to'} requirement {requirement_id}")
+
+    # The API takes a single test case per call (testCaseId / deleteTestCaseId), so send one call per ID.
+    done, failed = [], []
+    for tc_id in ids:
+        payload = {"app_id": project_id, "team_id": team_id, "requirement_id": requirement_id}
+        if is_delete:
+            payload.update({"isDelete": 1, "deleteTestCaseId": tc_id})
+        else:
+            payload.update({"isDelete": 0, "testCaseId": tc_id})
         if sprint_id is not None:
             payload["sprint_id"] = sprint_id
         if folder_id is not None:
             payload["folder_id"] = folder_id
 
-    else:
-        # Linking operation
-        if not testcase_ids:
-            return {
-                'status': 'failed',
-                'error': 'Missing testcase_ids',
-                'message': 'testcase_ids is required when linking test cases (is_delete=False)'
-            }
+        response = await make_api_request('POST', '/v1/requirement/linkUnlinkRequirementTestCases', api_key, data=payload)
+        if response.get('status') == 'OK':
+            done.append(int(tc_id))
+        else:
+            logger.error(f"{tool_name}: Failed to {action} test case {tc_id} for requirement {requirement_id}: {response.get('message')}")
+            failed.append({'testcase_id': int(tc_id), 'message': response.get('message') or response.get('error')})
 
-        ids = [i.strip() for i in str(testcase_ids).split(',') if i.strip()]
-        invalid_ids = [i for i in ids if not i.isdigit()]
-        if not ids or invalid_ids:
-            return {
-                'status': 'failed',
-                'error': 'Invalid testcase_ids',
-                'message': f"testcase_ids must be comma-separated numeric IDs; invalid: {invalid_ids or [testcase_ids]}"
-            }
-
-        logger.info(f"Linking test cases {ids} to requirement {requirement_id}")
-
-        # The API validates testCaseId as a single int, so link one ID per call.
-        linked, failed = [], []
-        for tc_id in ids:
-            payload = {
-                "app_id": project_id,
-                "team_id": team_id,
-                "requirement_id": requirement_id,
-                "isDelete": 0,
-                "testCaseId": tc_id
-            }
-            if sprint_id is not None:
-                payload["sprint_id"] = sprint_id
-            if folder_id is not None:
-                payload["folder_id"] = folder_id
-
-            response = await make_api_request('POST', '/v1/requirement/linkUnlinkRequirementTestCases', api_key, data=payload)
-            if response.get('status') == 'OK':
-                linked.append(int(tc_id))
-            else:
-                logger.error(f"Failed to link test case {tc_id} to requirement {requirement_id}: {response.get('message')}")
-                failed.append({'testcase_id': int(tc_id), 'message': response.get('message') or response.get('error')})
-
-        if not failed:
-            logger.info(f"Successfully linked test case(s) {linked} to requirement {requirement_id}")
-            return {
-                'status': 'OK',
-                'message': f"Linked {len(linked)} test case(s) to requirement {requirement_id}",
-                'linked_testcase_ids': linked
-            }
+    key = 'unlinked_testcase_ids' if is_delete else 'linked_testcase_ids'
+    if not failed:
         return {
-            'status': 'failed' if not linked else 'partial_success',
-            'error': f"Failed to link {len(failed)} of {len(ids)} test case(s)",
-            'message': failed[0]['message'],
-            'linked_testcase_ids': linked,
-            'failed': failed
+            'status': 'OK',
+            'message': f"{'Unlinked' if is_delete else 'Linked'} {len(done)} test case(s) {'from' if is_delete else 'to'} requirement {requirement_id}",
+            key: done
         }
+    return {
+        'status': 'failed' if not done else 'partial_success',
+        'error': f"Failed to {action} {len(failed)} of {len(ids)} test case(s)",
+        'message': failed[0]['message'],
+        key: done,
+        'failed': failed
+    }
 
-    # Make the API request
-    logger.info(f"Sending unlink request for requirement_id={requirement_id}")
-    response = await make_api_request('POST', '/v1/requirement/linkUnlinkRequirementTestCases', api_key, data=payload)
 
-    if response.get('status') == 'OK':
-        logger.info(f"Successfully unlinked test case {unlink_testcase_id} from requirement {requirement_id}")
-    else:
-        logger.error(f"Failed to unlink test case: {response.get('message')}")
+@mcp.tool(
+    name="bugasura_link_requirement_testcases",
+    title="Link Test Cases to Requirement",
+    description=(
+        "Link existing test cases to a requirement for traceability. Accepts comma-separated numeric test case IDs "
+        "(test_case_id from bugasura_list_test_cases) and reports which linked and which failed. "
+        "Interactive team/project selection available."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def link_requirement_testcases(
+    requirement_id: int = Field(description="Requirement numeric ID to link the test cases to"),
+    testcase_ids: str = Field(description="Comma-separated numeric test case IDs to link (e.g., '123,456,789')", min_length=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)", ge=1),
+    folder_id: Optional[int] = Field(default=None, description="Folder identifier (optional, ge=1)", ge=1),
+) -> ToolResponse:
+    """Link test cases to a requirement via /v1/requirement/linkUnlinkRequirementTestCases."""
+    return await _link_unlink_requirement_test_cases('bugasura_link_requirement_testcases', False, requirement_id,
+                                                     testcase_ids, team_id, project_id, sprint_id, folder_id)
 
-    return response
+
+@mcp.tool(
+    name="bugasura_unlink_requirement_testcases",
+    title="Unlink Test Cases from Requirement",
+    description=(
+        "Remove the link between a requirement and test cases. The test cases themselves are not deleted. "
+        "Accepts comma-separated numeric test case IDs and reports which unlinked and which failed. "
+        "Interactive team/project selection available."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
+)
+async def unlink_requirement_testcases(
+    requirement_id: int = Field(description="Requirement numeric ID to unlink the test cases from"),
+    testcase_ids: str = Field(description="Comma-separated numeric test case IDs to unlink (e.g., '123,456')", min_length=1),
+    team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
+    project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional, ge=1)", ge=1),
+    folder_id: Optional[int] = Field(default=None, description="Folder identifier (optional, ge=1)", ge=1),
+) -> ToolResponse:
+    """Unlink test cases from a requirement via /v1/requirement/linkUnlinkRequirementTestCases with isDelete=1."""
+    return await _link_unlink_requirement_test_cases('bugasura_unlink_requirement_testcases', True, requirement_id,
+                                                     testcase_ids, team_id, project_id, sprint_id, folder_id)
 
 
 def _normalise_requirement_status(status: str) -> str:

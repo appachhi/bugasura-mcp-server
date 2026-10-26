@@ -2400,6 +2400,9 @@ def _baseline_tc_details(tc_data: dict) -> dict:
         'test_steps': _normalise_steps(tc_data.get('test_steps') or tc_data.get('steps')),
         'assignee': tc_data.get('assignee') or '',
     }
+    # Resend the stored platform so a partial update cannot clear it; the agents route test cases by it.
+    if tc_data.get('platform_type'):
+        tc_details['platform_type'] = tc_data['platform_type']
     # API test cases keep their steps in api_test_steps; the backend clears them when it is not sent.
     if str(tc_data.get('is_api_test_case') or '0') == '1':
         tc_details['api_test_steps'] = tc_data.get('api_test_steps') or ''

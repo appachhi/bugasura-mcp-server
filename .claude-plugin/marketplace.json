@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "bugasura",
+  "description": "Bugasura plugins for Claude Code",
+  "owner": {
+    "name": "Bugasura",
+    "email": "support@bugasura.io"
+  },
+  "plugins": [
+    {
+      "name": "bugasura",
+      "description": "Bug tracking and test management in Bugasura: issues, test cases, sprints, test runs, requirements, knowledge base and TestPert AI test generation.",
+      "author": {
+        "name": "Bugasura"
+      },
+      "category": "productivity",
+      "homepage": "https://github.com/appachhi/bugasura-mcp-server#readme",
+      "source": "./plugin"
+    }
+  ]
+}
