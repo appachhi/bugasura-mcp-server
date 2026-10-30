@@ -30,7 +30,7 @@ from utils.resolvers import resolve_team_identifier
 auth = build_auth_provider()
 
 # Reported by /health and by server/discover (serverInfo.version)
-SERVER_VERSION = "3.3.2"
+SERVER_VERSION = "3.3.3"
 
 # Returned by server/discover; how an assistant should drive the tools.
 SERVER_INSTRUCTIONS = """\
@@ -79,16 +79,26 @@ mcp = FastMCP(
 
 
 class ToolErrorFlagMiddleware(Middleware):
-    """Report a tool payload whose status is in ERROR_STATUSES as an MCP tool error."""
+    """Report a tool payload whose status is in ERROR_STATUSES as an MCP tool error, and log every tool failure."""
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
-        result = await call_next(context)
+        tool = context.message.name
+        try:
+            result = await call_next(context)
+        except Exception as e:
+            # Rejected arguments raise here, before the tool body runs
+            logger.warning(f"Tool {tool} raised {type(e).__name__}: {' '.join(str(e).split())[:500]}")
+            raise
         payload = result.structured_content or {}
         # FastMCP wraps dict returns as {"result": {...}}
         payload = payload.get("result", payload) if isinstance(payload, dict) else {}
         status = payload.get("status") if isinstance(payload, dict) else None
         if isinstance(status, str) and status.lower() in ERROR_STATUSES:
             result.is_error = True
+            # respond(..., 'markdown') keeps only status and the rendered text
+            detail = payload.get("message") or str(payload.get("markdown") or "").strip().split("\n", 1)[0]
+            logger.warning(f"Tool {tool} failed: status={status} error_type={payload.get('error_type')} "
+                           f"error={str(payload.get('error') or '')[:300]} message={str(detail)[:300]}")
         return result
 
 

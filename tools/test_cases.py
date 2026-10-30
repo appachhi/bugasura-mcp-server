@@ -406,7 +406,7 @@ async def get_test_case(
 @mcp.tool(
     name = "bugasura_update_test_case",
     title = "Update Test Case",
-    description = "Update test case details (partial updates supported). Can update any field including scenario, feature tags, testing type, severity, priority, conditions, test steps, assignees, status, and sprint associations. execution_status and test_case_status apply to the project test case, or with sprint_id to the test case in that sprint, or with sprint_id and test_run_execution_run_id to the test case in that test run (e.g. to mark it COMPLETED in a run). To assign a sprint-level test case to an agent for automated execution, set assign_to_agent=True along with sprint_id. API test cases go to the API Agent; functional test cases go by platform_type: DESKTOP_WEB to the Browser Agent, the mobile types to the Mobile Agent. A functional test case with no platform_type cannot be assigned, so pass platform_type in the same call (e.g. platform_type='DESKTOP_WEB' for the Browser Agent). If the agent cannot be assigned the call fails, and test_case_updated says whether the other changes were saved. Agents are not team members and cannot be set through assignees: assign_to_agent assigns one here, and bugasura_assign_test_cases_to_agent assigns several test cases. To have an agent run it in an existing test run, also pass test_run_execution_run_id; without it only test runs created afterwards include the assignment. Interactive selection available.",
+    description = "Update test case details (partial updates supported). Can update any field including scenario, feature tags, testing type, severity, priority, conditions, test steps, assignees, status, and sprint associations. execution_status and test_case_status apply to the project test case, or with sprint_id to the test case in that sprint, or with sprint_id and test_run_execution_run_id to the test case in that test run (e.g. to mark it COMPLETED in a run). To assign a sprint-level test case to an agent for automated execution, set assign_to_agent=True along with sprint_id. API test cases go to the API Agent; functional test cases go by platform_type: DESKTOP_WEB to the Browser Agent, the mobile types to the Mobile Agent. When neither the sprint nor the project test case has a platform type and platform_type is not passed, the call saves nothing and returns selection_required with the platform types whose agent is enabled. If the agent cannot be assigned the call fails, and test_case_updated says whether the other changes were saved. Agents are not team members and cannot be set through assignees: assign_to_agent assigns one here, and bugasura_assign_test_cases_to_agent assigns several test cases. To have an agent run it in an existing test run, also pass test_run_execution_run_id; without it only test runs created afterwards include the assignment. Interactive selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_test_case(
@@ -673,7 +673,8 @@ async def update_test_case(
     # An agent that cannot take this test case fails the call before anything is saved.
     agent = None
     if assign_to_agent:
-        agent, agent_failure = await _pick_agent(api_key, team_id, project_id, testcase_id, sprint_id, test_run_execution_run_id, platform_type)
+        agent, agent_platform, agent_failure = await _pick_agent(api_key, team_id, project_id, testcase_id, sprint_id,
+                                                                 test_run_execution_run_id, platform_type, tc_data.get('platform_type'))
         if agent_failure:
             return agent_failure
 
@@ -711,7 +712,8 @@ async def update_test_case(
     # Step 6 (optional): Assign to agent within a sprint, as the UI's "Assign to Agent" does:
     # /testpert/sprintTestCase/update with isTestAgentEnabled=1 and the agent as assignee.
     if agent and isinstance(result, dict) and result.get('status') == 'OK':
-        assignment = await _assign_to_agent(api_key, team_id, project_id, testcase_id, sprint_id, test_run_execution_run_id, agent)
+        assignment = await _assign_to_agent(api_key, team_id, project_id, testcase_id, sprint_id, test_run_execution_run_id, agent,
+                                            agent_platform)
         if assignment['status'] != 'OK':
             return assignment
         result['agent_assignment'] = assignment
@@ -2006,14 +2008,21 @@ async def _sprint_agent_context(api_key, team_id, project_id, sprint_id, test_ru
     return rows, settings, _enabled_agents(settings, resp.get('teamMembersDetails')), None
 
 
-async def _save_agent_fields(api_key, team_id, project_id, testcase_id, platform_type=None, fill_test_data=False) -> str:
-    """Set platform_type and/or empty test data to '[]' (the executor json-decodes it) on the project test case
-    before an agent assignment. Returns '' once saved, otherwise the reason."""
+async def _project_test_case(api_key, team_id, project_id, testcase_id) -> Optional[dict]:
+    """The project test case from /v1/testcases/get, or None when it cannot be read."""
     resp = await make_api_request('GET', '/v1/testcases/get', api_key,
                                   params={'team_id': team_id, 'app_id': project_id, 'testcase_id': testcase_id})
     rows = resp.get('testCaseDetails') if isinstance(resp, dict) and resp.get('status') == 'OK' else None
     tc_data = rows[0] if isinstance(rows, list) and rows else rows
-    if not isinstance(tc_data, dict) or not tc_data:
+    return tc_data if isinstance(tc_data, dict) and tc_data else None
+
+
+async def _save_agent_fields(api_key, team_id, project_id, testcase_id, platform_type=None, fill_test_data=False,
+                             tc_data=None) -> str:
+    """Set platform_type and/or empty test data to '[]' (the executor json-decodes it) on the project test case
+    before an agent assignment; _assign_to_agent sets the sprint copy's platform. Returns '' once saved, otherwise the reason."""
+    tc_data = tc_data or await _project_test_case(api_key, team_id, project_id, testcase_id)
+    if not tc_data:
         return 'Could not read the test case to update it'
     tc_details = _baseline_tc_details(tc_data)
     if platform_type:
@@ -2126,7 +2135,8 @@ async def list_agents(
         "Mobile Agent; platform_type fills in test cases that have none. With test_run_execution_run_id the test cases are "
         "assigned in that test run and the agents pick them up on their own (track them with bugasura_run_agent_test_cases). "
         "Without it they are assigned in the sprint, which only test runs created afterwards copy. "
-        "Reports per test case what was assigned and why the rest were not. Interactive team/project selection available."
+        "Reports per test case what was assigned and why the rest were not; test cases with no platform type are listed in "
+        "needs_platform_type, with the platform types whose agent is enabled as options. Interactive team/project selection available."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
@@ -2164,7 +2174,8 @@ async def assign_test_cases_to_agent(
 
     by_id = {str(r.get('test_case_id')): r for r in rows}
     scope = f"test run {run_id}" if run_id else f"sprint {sprint_id}"
-    assigned, rejected = [], []
+    platform_options = _platform_options(agents)
+    assigned, rejected, needs_platform = [], [], []
 
     def reject(tc_id, reason, message=''):
         logger.warning(f"Agent assignment rejected for {_agent_scope(tc_id, sprint_id, run_id)}: {reason}. {message}")
@@ -2176,7 +2187,22 @@ async def assign_test_cases_to_agent(
             reject(tc_id, f'Not in {scope}', 'Link it with bugasura_link_test_cases_to_sprint first.')
             continue
         is_api = str(row.get('is_api_test_case') or '0') == '1'
-        set_platform = platform_type if platform_type and not is_api and not row.get('platform_type') else None
+        # The sprint/run copy gets a platform only when the test case is linked; the project test case's stands in for an empty one
+        project_tc = None
+        if not is_api and not row.get('platform_type'):
+            project_tc = await _project_test_case(api_key, tid, pid, tc_id)
+            if project_tc is None:
+                reject(tc_id, 'Could not read the test case', 'Try again in a moment.')
+                continue
+            if project_tc.get('platform_type'):
+                row = {**row, 'project_platform_type': str(project_tc['platform_type']).upper()}
+        set_platform = platform_type if platform_type and not is_api and not _agent_platform(row) else None
+        if _needs_platform(row, set_platform):
+            if platform_options:
+                needs_platform.append({'testcase_id': int(tc_id), 'test_case_number': row.get('test_case_number')})
+            else:
+                reject(tc_id, NO_PLATFORM_AGENT)
+            continue
         agent_key, problem = _route_agent(row, set_platform)
         if problem:
             reject(tc_id, *problem)
@@ -2195,11 +2221,12 @@ async def assign_test_cases_to_agent(
                 continue
             fill_test_data = not stored
         if set_platform or fill_test_data:
-            save_error = await _save_agent_fields(api_key, tid, pid, tc_id, set_platform, fill_test_data)
+            save_error = await _save_agent_fields(api_key, tid, pid, tc_id, set_platform, fill_test_data, project_tc)
             if save_error:
                 reject(tc_id, 'Could not prepare the test case for the agent', save_error)
                 continue
-        result = await _assign_to_agent(api_key, tid, pid, tc_id, sprint_id, run_id, agent)
+        result = await _assign_to_agent(api_key, tid, pid, tc_id, sprint_id, run_id, agent,
+                                        set_platform or row.get('project_platform_type'))
         if result['status'] != 'OK':
             rejected.append({'testcase_id': int(tc_id), 'reason': result['error'], 'message': result['detail']})
             continue
@@ -2208,6 +2235,17 @@ async def assign_test_cases_to_agent(
     out = {'sprint_id': sprint_id, 'assigned': assigned, 'rejected': rejected}
     if run_id:
         out['test_run_execution_run_id'] = run_id
+    if needs_platform:
+        waiting = ','.join(str(n['testcase_id']) for n in needs_platform)
+        out.update(needs_platform_type=needs_platform, options=platform_options,
+                   instruction=f"Ask the user which platform these test cases run on, then call "
+                               f"bugasura_assign_test_cases_to_agent again with testcase_ids='{waiting}' and "
+                               "platform_type=<chosen>; test cases on different platforms go in separate calls.")
+    if not assigned and needs_platform:
+        return {'status': 'selection_required', 'step': 'platform_type_selection',
+                'message': f"{len(needs_platform)} test case(s) have no platform type, which decides the agent that runs "
+                           f"them. Nothing was assigned yet{f'; {len(rejected)} could not be assigned, see rejected' if rejected else ''}.",
+                **out}
     if not assigned:
         return {'status': 'failed', 'error': 'No test case was assigned to an agent', 'error_type': 'AgentAssignmentError',
                 'message': f"{rejected[0]['reason']}. {rejected[0].get('message', '')}".strip(), **out}
@@ -2219,7 +2257,9 @@ async def assign_test_cases_to_agent(
                    "an existing run does not change, so pass test_run_execution_run_id to assign them in it.")
     if rejected:
         message += f" {len(rejected)} could not be assigned, see rejected."
-    return {'status': 'partial_success' if rejected else 'OK', 'message': message, **out}
+    if needs_platform:
+        message += f" {len(needs_platform)} need a platform type first, see needs_platform_type."
+    return {'status': 'partial_success' if rejected or needs_platform else 'OK', 'message': message, **out}
 
 
 @mcp.tool(
@@ -2466,11 +2506,32 @@ def _enabled_agents(settings: dict, team_members) -> dict:
     return agents
 
 
+def _agent_platform(tc_detail: dict, platform_type: Optional[str] = None) -> str:
+    """The platform an agent runs a sprint test case on: the one passed, else the sprint/run copy's, else the project
+    test case's, which callers add as project_platform_type when the copy has none (it gets one only at linking)."""
+    return str(platform_type or tc_detail.get('platform_type') or tc_detail.get('project_platform_type') or '').upper()
+
+
+def _needs_platform(tc_detail: dict, platform_type: Optional[str] = None) -> bool:
+    return str(tc_detail.get('is_api_test_case') or '0') != '1' and not _agent_platform(tc_detail, platform_type)
+
+
+def _platform_options(agents: dict) -> list:
+    """The platform types to offer the user: those whose agent is enabled for the project."""
+    return ([{'platform_type': p, 'agent': AGENT_LABELS['browser_agent']}
+             for p in sorted(BROWSER_AGENT_PLATFORM_TYPES) if 'browser_agent' in agents]
+            + [{'platform_type': p, 'agent': AGENT_LABELS['mobile_agent']}
+               for p in sorted(MOBILE_AGENT_PLATFORM_TYPES) if 'mobile_agent' in agents])
+
+
+NO_PLATFORM_AGENT = 'The test case has no platform type, and neither the Browser Agent nor the Mobile Agent is enabled for this project'
+
+
 def _route_agent(tc_detail: dict, platform_type: Optional[str] = None):
     """The agent key that runs this sprint test case, or (None, (error, message)) when no agent can."""
     if str(tc_detail.get('is_api_test_case') or '0') == '1':
         return 'api_agent', None
-    tc_platform = str(platform_type or tc_detail.get('platform_type') or '').upper()
+    tc_platform = _agent_platform(tc_detail, platform_type)
     if tc_platform in BROWSER_AGENT_PLATFORM_TYPES:
         return 'browser_agent', None
     if tc_platform in MOBILE_AGENT_PLATFORM_TYPES:
@@ -2480,13 +2541,14 @@ def _route_agent(tc_detail: dict, platform_type: Optional[str] = None):
                   "(ANDROID, ANDROID_MOBILE_WEB, IOS, IOS_MOBILE_WEB) for the Mobile Agent.")
 
 
-async def _pick_agent(api_key, team_id, project_id, testcase_id, sprint_id, test_run_execution_run_id, platform_type):
-    """Return (agent, failure) for a sprint test case before anything is saved. The API silently drops an
-    agent whose platform does not match (status OK + warningMsg), so the platform is checked here first."""
+async def _pick_agent(api_key, team_id, project_id, testcase_id, sprint_id, test_run_execution_run_id, platform_type,
+                      project_platform=None):
+    """Return (agent, platform to send with the assignment, failure) for a sprint test case before anything is saved.
+    The API silently drops an agent whose platform does not match (status OK + warningMsg), so it is checked here first."""
     where = _agent_scope(testcase_id, sprint_id, test_run_execution_run_id)
     if not sprint_id:
-        return None, _agent_failed(where, 'sprint_id is required for agent assignment',
-                                   'Provide sprint_id together with assign_to_agent=True.')
+        return None, None, _agent_failed(where, 'sprint_id is required for agent assignment',
+                                         'Provide sprint_id together with assign_to_agent=True.')
 
     tc_params = {'teamId': str(team_id), 'appId': str(project_id), 'sprintId': str(sprint_id)}
     if test_run_execution_run_id:
@@ -2494,33 +2556,54 @@ async def _pick_agent(api_key, team_id, project_id, testcase_id, sprint_id, test
     tc_resp = await make_api_request('GET', '/testpert/sprintTestCase/get', api_key, params=tc_params)
     if not (isinstance(tc_resp, dict) and tc_resp.get('status') == 'OK'):
         logger.warning(f"sprintTestCase/get failed for {where}: {tc_resp.get('message') if isinstance(tc_resp, dict) else tc_resp}")
-        return None, _agent_failed(where, 'Could not fetch sprint test case data for agent assignment',
-                                   'Testpert may not be enabled for this project, or the sprint_id is invalid.')
+        return None, None, _agent_failed(where, 'Could not fetch sprint test case data for agent assignment',
+                                         'Testpert may not be enabled for this project, or the sprint_id is invalid.')
 
     tc_detail = next((t for t in tc_resp.get('testCaseDetails') or []
                       if str(t.get('test_case_id', '')) == str(testcase_id)), None)
     if tc_detail is None:
         scope = 'test run' if test_run_execution_run_id else 'sprint'
-        return None, _agent_failed(where, f'Test case is not in this {scope}',
-                                   'Link the test case to the sprint before assigning it to an agent.')
+        return None, None, _agent_failed(where, f'Test case is not in this {scope}',
+                                         'Link the test case to the sprint before assigning it to an agent.')
 
-    agent_key, problem = _route_agent(tc_detail, platform_type)
-    if problem:
-        return None, _agent_failed(where, *problem)
+    if not tc_detail.get('platform_type') and project_platform:
+        tc_detail = {**tc_detail, 'project_platform_type': str(project_platform).upper()}
 
     settings = await _project_agent_settings(api_key, team_id, project_id)
     if settings is None:
-        return None, _agent_failed(where, "Could not read the project's agent settings", 'Try again in a moment.')
-    agent = _enabled_agents(settings, tc_resp.get('teamMembersDetails')).get(agent_key)
+        return None, None, _agent_failed(where, "Could not read the project's agent settings", 'Try again in a moment.')
+    agents = _enabled_agents(settings, tc_resp.get('teamMembersDetails'))
+
+    # Neither copy has a platform: the user picks one instead of the call failing
+    if _needs_platform(tc_detail, platform_type):
+        options = _platform_options(agents)
+        if not options:
+            return None, None, _agent_failed(where, NO_PLATFORM_AGENT, 'Enable one in the project settings (bugasura_list_agents shows which are on).')
+        number = tc_detail.get('test_case_number') or f'#{testcase_id}'
+        logger.info(f"Agent assignment for {where} needs a platform type")
+        return None, None, {
+            'status': 'selection_required', 'step': 'platform_type_selection',
+            'message': f"Test case {number} has no platform type, which decides the agent that runs it. Nothing was saved.",
+            'options': options,
+            'instruction': 'Ask the user which platform it runs on, then call bugasura_update_test_case again with the same '
+                           'arguments and platform_type=<chosen>.',
+        }
+
+    agent_key, problem = _route_agent(tc_detail, platform_type)
+    if problem:
+        return None, None, _agent_failed(where, *problem)
+    agent = agents.get(agent_key)
     if not agent:
         label = AGENT_LABELS[agent_key]
-        return None, _agent_failed(where, f'The {label} is not enabled for this project',
+        return None, None, _agent_failed(where, f'The {label} is not enabled for this project',
                                    f'Enable the {label} in the project settings before assigning (bugasura_list_agents shows which are on).')
-    return agent, None
+    return agent, platform_type or tc_detail.get('project_platform_type'), None
 
 
-async def _assign_to_agent(api_key, team_id, project_id, testcase_id, sprint_id, test_run_execution_run_id, agent) -> dict:
-    """Assign the sprint test case to the agent _pick_agent chose; runs after the field update was saved."""
+async def _assign_to_agent(api_key, team_id, project_id, testcase_id, sprint_id, test_run_execution_run_id, agent,
+                           platform_type=None) -> dict:
+    """Assign the sprint test case to the agent _pick_agent chose; runs after the field update was saved.
+    platform_type is saved on the sprint (or run) copy, which the API checks; the project update never reaches it."""
     label = agent['label']
     where = _agent_scope(testcase_id, sprint_id, test_run_execution_run_id)
     logger.info(f"Assigning {where} to the {label} (user_id={agent['user_id']})")
@@ -2536,6 +2619,9 @@ async def _assign_to_agent(api_key, team_id, project_id, testcase_id, sprint_id,
     }
     if test_run_execution_run_id:
         agent_payload['testRunsExecutionRunId'] = str(test_run_execution_run_id)
+    if platform_type and agent['agent'] != 'api_agent':
+        agent_payload['isTestCasePlatformTypeUpdate'] = '1'
+        agent_payload['testCasePlatformType'] = str(platform_type).upper()
     agent_resp = await make_api_request('POST', '/testpert/sprintTestCase/update', api_key, data=agent_payload)
     if not isinstance(agent_resp, dict) or agent_resp.get('status') != 'OK':
         return _agent_failed(where, f'Could not assign the test case to the {label}',

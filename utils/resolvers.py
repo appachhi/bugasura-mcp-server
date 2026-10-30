@@ -1,5 +1,6 @@
 """Identifier resolvers and interactive team/project selection used by tools."""
 from typing import Annotated, Optional, Union
+from urllib.parse import quote
 
 from pydantic import Field
 
@@ -445,12 +446,8 @@ async def resolve_issue_identifier_to_id(api_key: str, team_id: int, project_id:
     issue_identifier = str(issue_id)
     logger.info(f"{log_prefix}Resolving issue identifier '{issue_identifier}'")
 
-    # Fetch issues in pages. Previously this fetched a single 1000-issue page; we
-    # now paginate so projects with >1000 issues are searchable, and we short-circuit
-    # as soon as we find an exact key match (the common case — users typically
-    # reference 'ISS09'-style keys). Cap total scan at PAGE_SIZE * MAX_PAGES
-    # (50 × 100 = 5000) to bound latency; projects larger than that need a
-    # server-side search endpoint.
+    # search_by_text matches the key (prefix + number) and the summary, among other fields, on the API side,
+    # so only candidate issues are paged; the exact key and summary checks below pick the one meant.
     PAGE_SIZE = 100
     MAX_PAGES = 50
 
@@ -469,6 +466,8 @@ async def resolve_issue_identifier_to_id(api_key: str, team_id: int, project_id:
             'project_id': str(project_id),
             'start_at': offset,
             'max_results': PAGE_SIZE,
+            # The API urldecodes the already-decoded query value, so it is encoded once here
+            'search_by_text': quote(issue_identifier, safe=''),
         }
         if sprint_id:
             params['sprint_id'] = str(sprint_id)
@@ -498,14 +497,15 @@ async def resolve_issue_identifier_to_id(api_key: str, team_id: int, project_id:
             break
 
     if not collected:
-        logger.warning(f"{log_prefix}No issues found in project {project_id}")
+        logger.warning(f"{log_prefix}No issue matches '{issue_identifier}' in project {project_id}")
         return {
             'status': 'failed',
-            'error': 'No issues found',
-            'message': f"No issues found in project {project_id}"
+            'error': 'Issue not found',
+            'message': f"No issue found with key or summary '{issue_identifier}' in project {project_id}. "
+                       "Check that the issue belongs to this project (bugasura_list_issues)."
         }
 
-    logger.info(f"{log_prefix}Exhausted key lookup across {len(collected)} issues; falling back to summary match")
+    logger.info(f"{log_prefix}No key match among {len(collected)} search results; falling back to summary match")
     issues = collected
 
     # Try exact match by summary/reason

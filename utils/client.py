@@ -280,7 +280,14 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
     try:
         # Make the HTTP request with constructed URL and headers
         logger.debug(f"Sending {method} request to {url}")
-        response = await client.request(method, url, headers=headers, **kwargs)
+        try:
+            response = await client.request(method, url, headers=headers, **kwargs)
+        except (httpx.RemoteProtocolError, httpx.ReadError) as e:
+            # A pooled connection the API already closed fails at once; only a GET is safe to send again
+            if method.upper() != 'GET':
+                raise
+            logger.warning(f"Retrying {method} {endpoint} once after {type(e).__name__}: {e}")
+            response = await client.request(method, url, headers=headers, **kwargs)
 
         # Log response status
         logger.info(f"API Response: {method} {endpoint} - Status {response.status_code}")
@@ -305,8 +312,28 @@ async def make_api_request(method: str, endpoint: str, api_key: str, **kwargs) -
         status_code = e.response.status_code if e.response is not None else "unknown"
         logger.error(f"HTTP Error: {method} {endpoint} - Status {status_code}: {str(e)}")
 
-        if status_code == 401:
+        # The API sends 403 (older builds 401) when the user is not a member of the request's team; the session is fine then
+        message = ''
+        if status_code in (401, 403):
+            try:
+                message = str((e.response.json() or {}).get('message') or '')
+            except (ValueError, AttributeError):
+                pass
+        if status_code == 401 and 'permission' not in message.lower():
             return auth_required_payload("expired")
+        if 'permission' in message.lower():
+            sent = {**(kwargs.get('params') or {}), **(kwargs.get('data') or {})}
+            team_id = sent.get('team_id') or sent.get('teamId')
+            logger.warning(f"{status_code} permission denied: {method} {endpoint} team_id={team_id}: {message}")
+            return {
+                "error": message,
+                "status": "failed",
+                "error_type": "PermissionDenied",
+                "message": (f"The signed-in user is not a member of team {team_id}, or the project is not in it. "
+                            "Check the team_id and project_id (bugasura_list_teams, bugasura_list_projects); "
+                            "signing in again will not help."),
+                "endpoint": endpoint,
+            }
 
         # Details stay in the log; the caller gets the status and Bugasura's own JSON message.
         error_response = {
